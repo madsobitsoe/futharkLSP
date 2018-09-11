@@ -56,6 +56,8 @@ import Language.Futhark.Parser.Lexer
       let             { L $$ LET }
       loop            { L $$ LOOP }
       in              { L $$ IN }
+      match           { L $$ MATCH }
+      case            { L $$ CASE }
 
       id              { L _ (ID _) }
       'id['           { L _ (INDEXING _) }
@@ -93,6 +95,8 @@ import Language.Futhark.Parser.Lexer
       '-'             { L $$ NEGATE }
       '<'             { L $$ LTH }
       '^'             { L $$ HAT }
+      '|'             { L $$ PIPE  }
+
 
       '+...'          { L _ (SYMBOL Plus _ _) }
       '-...'          { L _ (SYMBOL Minus _ _) }
@@ -154,8 +158,8 @@ import Language.Futhark.Parser.Lexer
       doc             { L _  (DOC _) }
 
 %left bottom
-%left ifprec letprec unsafe
-%left ','
+%left ifprec letprec unsafe caseprec
+%left ',' case
 %left ':'
 %right '...' '..<' '..>' '..'
 %left '`'
@@ -165,7 +169,7 @@ import Language.Futhark.Parser.Lexer
 %left '||...'
 %left '&&...'
 %left '<=...' '>=...' '>...' '<' '<...' '==...' '!=...'
-%left '&...' '^...' '^' '|...'
+%left '&...' '^...' '^' '|...' '|'
 %left '<<...' '>>...'
 %left '+...' '-...' '-'
 %left '*...' '*' '/...' '%...' '//...' '%%...'
@@ -347,6 +351,7 @@ BinOp :: { QualName Name }
       | '^'        { qualName (nameFromString "^") }
       | '&...'     { binOpName $1 }
       | '|...'     { binOpName $1 }
+      | '|'        { qualName (nameFromString "|") }
       | '>>...'    { binOpName $1 }
       | '<<...'    { binOpName $1 }
       | '<|...'    { binOpName $1 }
@@ -446,6 +451,15 @@ TypeExpAtom :: { UncheckedTypeExp }
              | '{' '}'                        { TERecord [] (srcspan $1 $>) }
              | '{' FieldTypes1 '}'            { TERecord $2 (srcspan $1 $>) }
              | QualName                       { TEVar (fst $1) (snd $1) }
+             | Enum                           { TEEnum (fst $1)  (snd $1)}
+
+Enum :: { ([Name], SrcLoc) }
+Enum  : VConstr0 %prec bottom { ([fst $1], snd $1) }
+      | VConstr0 '|' Enum
+        { let names = fst $1 : fst $3; loc = srcspan (snd $1) (snd $3) in (names, loc) }
+
+VConstr0 :: { (Name, SrcLoc) }
+             : '#' id  { let L _ (ID c) = $2 in  (c, srclocOf $1) }
 
 TypeArg :: { TypeArgExp Name }
          : '[' DimDecl ']' { TypeArgExpDim (fst $2) (srcspan $1 $>) }
@@ -515,6 +529,8 @@ Exp2 :: { UncheckedExp }
 
      | LetExp %prec letprec { $1 }
 
+     | MatchExp { $1 }
+
      | unsafe Exp2     { Unsafe $2 (srcspan $1 $>) }
      | assert Atom Atom    { Assert $2 $3 NoInfo (srcspan $1 $>) }
 
@@ -532,6 +548,7 @@ Exp2 :: { UncheckedExp }
      | Exp2 '<<...' Exp2   { binOp $1 $2 $3 }
      | Exp2 '&...' Exp2    { binOp $1 $2 $3 }
      | Exp2 '|...' Exp2    { binOp $1 $2 $3 }
+     | Exp2 '|' Exp2       { binOp $1 (L $2 (SYMBOL Bor [] (nameFromString "|"))) $3 }
      | Exp2 '&&...' Exp2   { binOp $1 $2 $3 }
      | Exp2 '||...' Exp2   { binOp $1 $2 $3 }
      | Exp2 '^...' Exp2    { binOp $1 $2 $3 }
@@ -577,6 +594,7 @@ Apply :: { UncheckedExp }
 
 Atom :: { UncheckedExp }
 Atom : PrimLit        { Literal (fst $1) (snd $1) }
+     | VConstr0       { VConstr0 (fst $1) NoInfo (snd $1) }
      | intlit         { let L loc (INTLIT x) = $1 in IntLit x NoInfo loc }
      | floatlit       { let L loc (FLOATLIT x) = $1 in FloatLit x NoInfo loc }
      | stringlit      { let L loc (STRINGLIT s) = $1 in
@@ -689,6 +707,21 @@ LetExp :: { UncheckedExp }
 LetBody :: { UncheckedExp }
     : in Exp %prec letprec { $2 }
     | LetExp %prec letprec { $1 }
+
+MatchExp :: { UncheckedExp }
+MatchExp : match Exp Cases  { let loc = srcspan $1 $>
+                              in Match $2 $> loc  }
+
+Cases :: { [CaseBase NoInfo Name] }
+Cases : Case  %prec caseprec { [$1] }
+      | Case Cases           { $1 : $2 }
+
+Case :: { CaseBase NoInfo Name }
+Case : case VConstr0 '->' Exp { let (vConstr, vConstrLoc) = $2;
+                                    loc = srcspan vConstrLoc $>
+                                in CaseEnum (EnumPattern vConstr vConstrLoc) $> loc }
+
+-- VConstr0 :: { (Name, SrcLoc) }
 
 LoopForm :: { LoopFormBase NoInfo Name }
 LoopForm : for VarId '<' Exp

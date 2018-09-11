@@ -51,6 +51,7 @@ module Language.Futhark.Syntax
   , DimIndexBase(..)
   , ExpBase(..)
   , FieldBase(..)
+  , CaseBase(..)
   , LoopFormBase (..)
   , PatternBase(..)
   , StreamForm(..)
@@ -338,6 +339,7 @@ data TypeBase dim as = Prim PrimType
                      | Arrow as (Maybe VName) (TypeBase dim as) (TypeBase dim as)
                      -- ^ The aliasing corresponds to the lexical
                      -- closure of the function.
+                     | Enum [Name]
                      deriving (Show)
 
 instance (Eq dim, Eq as) => Eq (TypeBase dim as) where
@@ -395,6 +397,7 @@ data TypeExp vn = TEVar (QualName vn) SrcLoc
                 | TEUnique (TypeExp vn) SrcLoc
                 | TEApply (TypeExp vn) (TypeArgExp vn) SrcLoc
                 | TEArrow (Maybe vn) (TypeExp vn) (TypeExp vn) SrcLoc
+                | TEEnum [Name] SrcLoc
                  deriving (Eq, Show)
 
 instance Located (TypeExp vn) where
@@ -405,6 +408,7 @@ instance Located (TypeExp vn) where
   locOf (TEUnique _ loc)    = locOf loc
   locOf (TEApply _ _ loc)   = locOf loc
   locOf (TEArrow _ _ _ loc) = locOf loc
+  locOf (TEEnum _ loc)    = locOf loc
 
 data TypeArgExp vn = TypeArgExpDim (DimDecl vn) SrcLoc
                    | TypeArgExpType (TypeExp vn)
@@ -708,6 +712,12 @@ data ExpBase f vn =
             -- and return the value of the second expression if it
             -- does.
 
+            | VConstr0 Name (f CompType) SrcLoc
+
+            | Match (ExpBase f vn) [CaseBase f vn] SrcLoc
+
+            
+
 deriving instance Showable f vn => Show (ExpBase f vn)
 
 data StreamForm f vn = MapLike    StreamOrd
@@ -754,6 +764,7 @@ instance Located (ExpBase f vn) where
   locOf (Stream _ _ _  pos)            = locOf pos
   locOf (Unsafe _ loc)                 = locOf loc
   locOf (Assert _ _ _ loc)             = locOf loc
+  locOf (VConstr0 _ _ loc)                   = locOf loc
 
 -- | An entry in a record literal.
 data FieldBase f vn = RecordFieldExplicit Name (ExpBase f vn) SrcLoc
@@ -764,6 +775,14 @@ deriving instance Showable f vn => Show (FieldBase f vn)
 instance Located (FieldBase f vn) where
   locOf (RecordFieldExplicit _ _ loc) = locOf loc
   locOf (RecordFieldImplicit _ _ loc) = locOf loc
+
+-- | A case in a match expression.
+data CaseBase f vn = CaseEnum (PatternBase f vn) (ExpBase f vn) SrcLoc
+
+deriving instance Showable f vn => Show (CaseBase f vn)
+
+instance Located (CaseBase f vn) where
+  locOf (CaseEnum _ _ loc ) = locOf loc
 
 -- | Whether the loop is a @for@-loop or a @while@-loop.
 data LoopFormBase f vn = For (IdentBase f vn) (ExpBase f vn)
@@ -779,6 +798,7 @@ data PatternBase f vn = TuplePattern [PatternBase f vn] SrcLoc
                       | Id vn (f PatternType) SrcLoc
                       | Wildcard (f PatternType) SrcLoc -- Nothing, i.e. underscore.
                       | PatternAscription (PatternBase f vn) (TypeDeclBase f vn) SrcLoc
+                      | EnumPattern Name SrcLoc
 deriving instance Showable f vn => Show (PatternBase f vn)
 
 instance Located (PatternBase f vn) where

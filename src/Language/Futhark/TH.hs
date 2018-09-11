@@ -66,6 +66,7 @@ deriving instance Lift (ModExpBase Info VName)
 deriving instance Lift (ModBindBase Info VName)
 deriving instance Lift (DecBase Info VName)
 deriving instance Lift (ProgBase Info VName)
+deriving instance Lift (CaseBase Info VName)
 
 -- Typechecker instances
 deriving instance Lift BoundV

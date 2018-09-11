@@ -492,6 +492,7 @@ typeOf (ProjectSection _ (Info t) _) =
   removeShapeAnnotations t
 typeOf (IndexSection _ (Info t) _) =
   removeShapeAnnotations t
+typeOf (VConstr0 n _ _) = undefined -- TODO: Figure this out :)
 
 foldFunType :: Monoid as => [TypeBase dim as] -> TypeBase dim as -> TypeBase dim as
 foldFunType ps ret = foldr (Arrow mempty Nothing) ret ps
