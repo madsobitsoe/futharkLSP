@@ -713,10 +713,7 @@ data ExpBase f vn =
             -- does.
 
             | VConstr0 Name (f CompType) SrcLoc
-
             | Match (ExpBase f vn) [CaseBase f vn] SrcLoc
-
-            
 
 deriving instance Showable f vn => Show (ExpBase f vn)
 
