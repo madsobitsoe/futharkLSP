@@ -337,9 +337,9 @@ data TypeBase dim as = Prim PrimType
                      | Record (M.Map Name (TypeBase dim as))
                      | TypeVar as Uniqueness TypeName [TypeArg dim as]
                      | Arrow as (Maybe VName) (TypeBase dim as) (TypeBase dim as)
+                     | Enum [Name]
                      -- ^ The aliasing corresponds to the lexical
                      -- closure of the function.
-                     | Enum [Name]
                      deriving (Show)
 
 instance (Eq dim, Eq as) => Eq (TypeBase dim as) where
@@ -348,6 +348,7 @@ instance (Eq dim, Eq as) => Eq (TypeBase dim as) where
   Record x1 == Record x2 = x1 == x2
   TypeVar _ u1 x1 y1 == TypeVar _ u2 x2 y2 = u1 == u2 && x1 == x2 && y1 == y2
   Arrow _ _ x1 y1 == Arrow _ _ x2 y2 = x1 == x2 && y1 == y2
+  Enum ns1 == Enum ns2 = ns1 == ns2 -- TODO: fix.
   _ == _ = False
 
 instance Bitraversable TypeBase where
@@ -359,6 +360,7 @@ instance Bitraversable TypeBase where
     TypeVar <$> g als <*> pure u <*> pure t <*> traverse (bitraverse f g) args
   bitraverse f g (Arrow als v t1 t2) =
     Arrow <$> g als <*> pure v <*> bitraverse f g t1 <*> bitraverse f g t2
+  bitraverse _ _ (Enum n) = pure $ Enum n
 
 instance Bifunctor TypeBase where
   bimap = bimapDefault
@@ -711,8 +713,7 @@ data ExpBase f vn =
             -- ^ Fail if the first expression does not return true,
             -- and return the value of the second expression if it
             -- does.
-
-            | VConstr0 Name (f CompType) SrcLoc
+            | VConstr0 Name (f (TypeBase () ())) SrcLoc
             | Match (ExpBase f vn) [CaseBase f vn] SrcLoc
 
 deriving instance Showable f vn => Show (ExpBase f vn)
@@ -761,7 +762,8 @@ instance Located (ExpBase f vn) where
   locOf (Stream _ _ _  pos)            = locOf pos
   locOf (Unsafe _ loc)                 = locOf loc
   locOf (Assert _ _ _ loc)             = locOf loc
-  locOf (VConstr0 _ _ loc)                   = locOf loc
+  locOf (VConstr0 _ _ loc)             = locOf loc
+  locOf (Match _ _ loc)                = locOf loc
 
 -- | An entry in a record literal.
 data FieldBase f vn = RecordFieldExplicit Name (ExpBase f vn) SrcLoc
@@ -805,6 +807,7 @@ instance Located (PatternBase f vn) where
   locOf (Id _ _ loc)                = locOf loc
   locOf (Wildcard _ loc)            = locOf loc
   locOf (PatternAscription _ _ loc) = locOf loc
+  locOf (EnumPattern _ loc)         = locOf loc
 
 -- | Documentation strings, including source location.
 data DocComment = DocComment String SrcLoc

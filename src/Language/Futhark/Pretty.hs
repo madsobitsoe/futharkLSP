@@ -138,6 +138,8 @@ instance Pretty (ShapeDecl dim) => Pretty (TypeBase dim as) where
     parens (pprName v <> colon <+> ppr t1) <+> text "->" <+> ppr t2
   ppr (Arrow _ Nothing t1 t2) =
     ppr t1 <+> text "->" <+> ppr t2
+  ppr (Enum names) =
+    cat . punctuate (text " | ") . map ((text "#" <>) . ppr) $ names
 
 instance Pretty (ShapeDecl dim) => Pretty (TypeArg dim as) where
   ppr (TypeArgDim d _) = ppr $ ShapeDecl [d]

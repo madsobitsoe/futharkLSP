@@ -1326,6 +1326,18 @@ checkExp (DoLoop tparams mergepat mergeexp form loopbody loc) =
         then return pat'
         else convergePattern pat' body_cons' body_t' body_loc
 
+checkExp (VConstr0 name NoInfo loc) =
+  return $ VConstr0 name (Info (Enum [name])) loc
+
+--checkExp (Match e (c:_) loc) = do
+--  e'     <- checkExp e
+--  eCase  <- checkCase c
+--
+--checkCase :: CaseBase NoInfo Name -> TermTypeM Exp
+--checkCase (CaseEnum (EnumPattern name patLoc) e loc) = checkExp e
+  
+
+
 checkIdent :: IdentBase NoInfo Name -> TermTypeM Ident
 checkIdent (Ident name _ loc) = do
   (QualName _ name', vt) <- lookupVar loc (qualName name)

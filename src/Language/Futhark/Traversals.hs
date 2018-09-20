@@ -173,6 +173,10 @@ instance ASTMappable (ExpBase Info VName) where
     DoLoop <$> mapM (astMap tv) tparams <*> astMap tv mergepat <*>
     mapOnExp tv mergeexp <*> astMap tv form <*>
     mapOnExp tv loopbody <*> pure loc
+  astMap tv (VConstr0 name t loc) =
+    VConstr0 name <$> traverse (mapOnType tv) t <*> pure loc
+  astMap tv (Match e cases loc) =
+    Match <$> mapOnExp tv e <*> astMap tv cases <*> pure loc
 
 instance ASTMappable (LoopFormBase Info VName) where
   astMap tv (For i bound) = For <$> astMap tv i <*> astMap tv bound
@@ -191,6 +195,7 @@ instance ASTMappable (TypeExp VName) where
     TEApply <$> astMap tv t1 <*> astMap tv t2 <*> pure loc
   astMap tv (TEArrow v t1 t2 loc) =
     TEArrow v <$> astMap tv t1 <*> astMap tv t2 <*> pure loc
+  astMap tv te@(TEEnum names loc) = pure te
 
 instance ASTMappable (TypeArgExp VName) where
   astMap tv (TypeArgExpDim dim loc) =
@@ -298,6 +303,10 @@ instance ASTMappable (FieldBase Info VName) where
   astMap tv (RecordFieldImplicit name t loc) =
     RecordFieldImplicit <$> mapOnName tv name
     <*> traverse (mapOnCompType tv) t <*> pure loc
+
+instance ASTMappable (CaseBase Info VName) where
+  astMap tv (CaseEnum pat e loc) =
+    CaseEnum <$> astMap tv pat <*> astMap tv e <*> pure loc
 
 instance ASTMappable a => ASTMappable (Info a) where
   astMap tv = traverse $ astMap tv

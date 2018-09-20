@@ -67,6 +67,9 @@ unifyTypesU uf (Record ts1) (Record ts2)
       (M.intersectionWith (,) ts1 ts2)
 unifyTypesU uf (Arrow as1 mn1 t1 t1') (Arrow as2 _ t2 t2') =
   Arrow (as1 <> as2) mn1 <$> unifyTypesU (flip uf) t1 t2 <*> unifyTypesU uf t1' t2'
+unifyTypesU uf (Enum ns1) (Enum ns2)
+  | sort ns1 == sort ns2 =
+    Just $ Enum ns1
 unifyTypesU _ _ _ = Nothing
 
 unifyTypeArgs :: (Monoid als, Eq als, ArrayDim dim) =>
@@ -246,6 +249,10 @@ checkTypeExp ote@TEApply{} = do
           throwError $ TypeError tloc $ "Type argument " ++ pretty a ++
           " not valid for a type parameter " ++ pretty p
 
+checkTypeExp t@(TEEnum names loc) = do
+  unless (sort names == sort (nub names)) $
+    throwError $ TypeError loc $ "Duplicate value constructors in " ++ pretty t
+  return (TEEnum names loc, Enum names,  Unlifted)
 
 checkNamedDim :: MonadTypeChecker m =>
                  SrcLoc -> QualName Name -> m (QualName VName)
@@ -268,6 +275,7 @@ checkForDuplicateNames = (`evalStateT` mempty) . mapM_ check
         check (TuplePattern ps _) = mapM_ check ps
         check (RecordPattern fs _) = mapM_ (check . snd) fs
         check (PatternAscription p _ _) = check p
+        check (EnumPattern _ _) = return ()
 
         seen v loc = do
           already <- gets $ M.lookup v
@@ -295,6 +303,7 @@ checkForDuplicateNamesInType = checkForDuplicateNames . pats
         pats (TEApply t1 (TypeArgExpType t2) _) = pats t1 ++ pats t2
         pats (TEApply t1 TypeArgExpDim{} _) = pats t1
         pats TEVar{} = []
+        pats TEEnum{} = []
 
 checkTypeParams :: MonadTypeChecker m =>
                    [TypeParamBase Name]
@@ -493,6 +502,7 @@ substTypesAny lookupSubst ot = case ot of
   Record ts ->  Record $ fmap (substTypesAny lookupSubst) ts
   Arrow als v t1 t2 ->
     Arrow als v (substTypesAny lookupSubst t1) (substTypesAny lookupSubst t2)
+  Enum names -> Enum names
 
   where nope = error "substTypesAny: Cannot create array after substitution."
 

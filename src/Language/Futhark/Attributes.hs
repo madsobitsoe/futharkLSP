@@ -136,6 +136,8 @@ nestedDims t =
             Prim{}              -> mempty
             TypeVar _ _ _ targs -> concatMap typeArgDims targs
             Arrow _ v t1 t2     -> filter (notV v) $ nestedDims t1 <> nestedDims t2
+            Enum{}              -> []
+
   where arrayNestedDims ArrayPrimElem{} =
           mempty
         arrayNestedDims (ArrayPolyElem _ targs _) =
@@ -492,7 +494,8 @@ typeOf (ProjectSection _ (Info t) _) =
   removeShapeAnnotations t
 typeOf (IndexSection _ (Info t) _) =
   removeShapeAnnotations t
-typeOf (VConstr0 n _ _) = undefined -- TODO: Figure this out :)
+typeOf (VConstr0 n _ _)  = Enum [n] -- TODO: Figure this out.
+typeOf (Match _ (CaseEnum _ eCase _ :_) _) = typeOf eCase
 
 foldFunType :: Monoid as => [TypeBase dim as] -> TypeBase dim as -> TypeBase dim as
 foldFunType ps ret = foldr (Arrow mempty Nothing) ret ps
