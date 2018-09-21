@@ -314,7 +314,157 @@ blockedGenReduce :: (MonadFreshNames m, HasScope Kernels m) =>
                     SubExp -> [GenReduceOp InKernel]
                  -> Lambda InKernel -> [VName]
                  -> m ([VName], Stms Kernels)
-blockedGenReduce arr_w ops lam arrs = runBinder $ do
+blockedGenReduce arr_w ops lam arrs =
+  --local_mem_size <- letSubExp "local_mem_size" $ eSubExp $ intConst int32 (48 * 1024)
+  blockedGenReduceGlobalMemory arr_w ops lam arrs
+
+blockedGenReduceLocalMemory :: (MonadFreshNames m, HasScope Kernels m) =>
+                               SubExp -> [GenReduceOp InKernel]
+                            -> Lambda InKernel -> [VName]
+                            -> m ([VName], Stms Kernels)
+blockedGenReduceLocalMemory arr_w ops lam arrs = runBinder $ do
+-- 0) Compute num_groups and group_size.
+  (_, KernelSize _ _ elems_per_thread _ num_threads) <-
+    blockedKernelSize arr_w
+
+  -- Largely follows this:
+  -- https://github.com/lolkat2k/masters-prototype/blob/master/kernels.cu.h#L1385
+
+  -- TODO: Write infrastructure to query local memory size.
+  local_mem_size <- letSubExp "local_mem_size" =<< eSubExp (intConst Int32 (48 * 1024))
+  max_group_size <- letSubExp "max_group_size" $ Op $ GetSizeMax SizeGroup
+
+  -- if: (max_group_sz < w)
+  -- then: coop_lvl := max_group_size
+  -- else: coop_lvl := w
+  coop_lvls <- forM ops $ \(GenReduceOp w _ _ _) ->
+    letSubExp "coop_lvl" =<<
+    eIf (pure $ BasicOp $ CmpOp (CmpSle Int32) max_group_size w)
+    (pure $ resultBody [max_group_size]) (pure $ resultBody [w])
+
+  -- TODO: Find size of histogram.
+  -- hists_per_group := min( (SH_MEM_SZ / (his_mem_sz + locks_mem_sz)), (BLOCK_SZ / coop_lvl) )
+  hists_per_group <- forM (zip ops coop_lvls) $ \(GenReduceOp w dest _ _, coop_lvl) -> do
+    his_mem_size <- letSubExp "his_mem_size" $
+      BasicOp $ BinOp (Mul Int32) (intConst Int32 (2 * 4)) w -- histogram and locks
+    letSubExp "hists_per_group" =<<
+      eBinOp (SMin Int32)
+      (pure $ BasicOp $ BinOp (SDiv Int32) local_mem_size his_mem_size)
+      (pure $ BasicOp $ BinOp (SDiv Int32) max_group_size coop_lvl)
+
+  -- threads_per_group := hists_per_group * coop_lvl
+  threads_per_group <- forM (zip hists_per_group  coop_lvls) $ \(hist_per_group, coop_lvl) ->
+    letSubExp "threads_per_group" $
+    BasicOp $ BinOp (Mul Int32) hist_per_group coop_lvl
+
+  -- num_hists := num_threads / coop_lvl
+  num_hists <- forM (zip3 hists_per_group threads_per_group coop_lvls) $ \(hists, threads, coop_lvl) ->
+    letSubExp "num_histograms" =<<
+      eBinOp (SDiv Int32)
+      (pure $ BasicOp $ BinOp (Mul Int32) threads hists)
+      (eSubExp coop_lvl)
+
+  -- num_groups := ceil( num_hists / (float)hists_per_group )
+  num_groups <- forM (zip num_hists hists_per_group) $ \(total_hists, hists_group) ->
+    letSubExp "num_groups" =<< eDivRoundingUp Int32 (eSubExp total_hists) (eSubExp hists_group)
+
+-- 1) Set num_groups and group_size.
+  -- TODO: Find maximum instead of just taking the first element.
+  kspace <- newKernelSpace (head num_groups, head threads_per_group, num_threads) $ FlatThreadSpace []
+  let ltid = spaceLocalId kspace
+      gtid = spaceGlobalId kspace
+      nthreads = spaceNumThreads kspace
+      group_size = spaceGroupSize kspace
+
+-- 2) Initialize sub-histograms in local memory.
+  sub_histos <- forM ops $ \(GenReduceOp w dests ne op) -> do
+    ne_ts <- mapM subExpType ne
+    combine_id <- newVName "ne_elem_"
+    letExp "sub_histo" $ Op $ Combine (combineSpace [(combine_id, group_size)]) ne_ts [] $ Body () mempty ne
+
+-- 3) Initialize locks array in local memory.
+  lock_arrs <- forM (zip ops num_hists) $ \(GenReduceOp w _ _ _, num_hists') -> do
+    combine_id <- newVName "lock_elem_"
+    locks <- letExp "locks_arr0" $ BasicOp $ Replicate (Shape [num_hists', w]) (intConst Int32 0)
+    locks_t <- lookupType locks
+    letExp "locks_arr1" $ Op $ Combine (combineSpace [(combine_id, group_size)]) [locks_t] [] $ Body () mempty [Var locks]
+
+-- 4) Create loop.
+  let sub_histos' = sub_histos -- concat sub_histos
+  dest_ts <- mapM lookupType sub_histos'
+
+  (kres, kstms) <- runBinder $ localScope (scopeOfKernelSpace kspace) $ do
+    i <- newVName "i"
+    -- The merge parameters are the histogram we are constructing.
+    merge_params <- zipWithM newParam (map baseString sub_histos')
+                                      (map (`toDecl` Unique) dest_ts)
+    let merge = zip merge_params $ map Var sub_histos'
+        form = ForLoop i Int32 elems_per_thread []
+
+    loop_body <- runBodyBinder $ localScope (scopeOfFParams (map fst merge) <>
+                                             scopeOf form) $ do
+      -- Compute the offset into the input and output.  To this a
+      -- thread can add its local ID to figure out which element it is
+      -- responsible for.
+      offset <- letSubExp "offset" =<<
+                eBinOp (Add Int32)
+                (eBinOp (Mul Int32)
+                 (eSubExp $ Var $ spaceGroupId kspace)
+                 (pure $ BasicOp $ BinOp (Mul Int32) elems_per_thread group_size))
+                (pure $ BasicOp $ BinOp (Mul Int32) (Var i) group_size)
+
+      -- We execute the bucket function once and update each histogram serially.
+      -- We apply the bucket function if j=offset+ltid is less than
+      -- num_elements.  This also involves writing to the mapout
+      -- arrays.
+      j <- letSubExp "j" $ BasicOp $ BinOp (Add Int32) offset (Var ltid)
+      let in_bounds = pure $ BasicOp $ CmpOp (CmpSlt Int32) j arr_w
+
+          in_bounds_branch = do
+            -- Read array input.
+            arr_elems <- forM arrs $ \a -> do
+              a_t <- lookupType a
+              let slice = fullSlice a_t [DimFix j]
+              letSubExp (baseString a ++ "_elem") $ BasicOp $ Index a slice
+
+            -- Apply bucket function.
+            resultBody <$> eLambda lam (map eSubExp arr_elems)
+
+          not_in_bounds_branch =
+            return $ resultBody $ replicate (length ops) (intConst Int32 (-1)) ++
+            concatMap genReduceNeutral ops
+
+      lam_res <- letTupExp "bucket_fun_res" =<<
+                  eIf in_bounds in_bounds_branch not_in_bounds_branch
+
+      let (buckets, vs) = splitAt (length ops) $ map Var lam_res
+          perOp :: [a] -> [[a]]
+          perOp = chunks $ map (length . genReduceDest) ops
+
+      ops_res <- forM (zip6 ops (perOp $ map paramName merge_params) buckets (perOp vs) lock_arrs num_hists) $
+        \(GenReduceOp dest_w _ _ comb_op, subhistos, bucket, vs', lock_arrs', num_hists') -> do
+          -- Compute subhistogram index for each thread.
+          global_ind <- letSubExp "global_ind" =<<
+                        eBinOp (SDiv Int32)
+                        (toExp gtid)
+                        (eDivRoundingUp Int32 (toExp nthreads) (eSubExp num_hists'))
+          fmap (map Var) $ letTupExp "genreduce_res" $ Op $
+            GroupGenReduce [num_hists', dest_w] subhistos comb_op [global_ind, bucket] vs' lock_arrs'
+
+      return $ resultBody $ concat ops_res
+
+    result <- letTupExp "result" $ DoLoop [] merge form loop_body
+    return $ map (ThreadsReturn OneResultPerGroup . Var) result
+
+  let kbody = KernelBody () kstms kres
+  letTupExp "histograms" $ Op $ Kernel (KernelDebugHints "gen_reduce" []) kspace dest_ts kbody
+
+
+blockedGenReduceGlobalMemory :: (MonadFreshNames m, HasScope Kernels m) =>
+                                SubExp -> [GenReduceOp InKernel]
+                             -> Lambda InKernel -> [VName]
+                             -> m ([VName], Stms Kernels)
+blockedGenReduceGlobalMemory arr_w ops lam arrs = runBinder $ do
   (_, KernelSize num_groups group_size elems_per_thread _ num_threads) <-
     blockedKernelSize arr_w
 
