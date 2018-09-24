@@ -236,6 +236,7 @@ traverseType f g h (TypeVar als u t args) =
   TypeVar <$> h als <*> pure u <*> f t <*> traverse (traverseTypeArg f g h) args
 traverseType f g h (Arrow als v t1 t2) =
   Arrow <$> h als <*> pure v <*> traverseType f g h t1 <*> traverseType f g h t2
+traverseType _ _ _ (Enum cs) = pure $ Enum cs
 
 traverseArrayElemType :: Applicative f =>
                          TypeTraverser f ArrayElemTypeBase dim1 als1 dim2 als2
