@@ -316,7 +316,8 @@ blockedGenReduce :: (MonadFreshNames m, HasScope Kernels m) =>
                  -> m ([VName], Stms Kernels)
 blockedGenReduce arr_w ops lam arrs =
   --local_mem_size <- letSubExp "local_mem_size" $ eSubExp $ intConst int32 (48 * 1024)
-  blockedGenReduceGlobalMemory arr_w ops lam arrs
+  -- blockedGenReduceGlobalMemory arr_w ops lam arrs
+  blockedGenReduceLocalMemory arr_w ops lam arrs
 
 blockedGenReduceLocalMemory :: (MonadFreshNames m, HasScope Kernels m) =>
                                SubExp -> [GenReduceOp InKernel]
@@ -344,7 +345,7 @@ blockedGenReduceLocalMemory arr_w ops lam arrs = runBinder $ do
 
   -- TODO: Find size of histogram.
   -- hists_per_group := min( (SH_MEM_SZ / (his_mem_sz + locks_mem_sz)), (BLOCK_SZ / coop_lvl) )
-  hists_per_group <- forM (zip ops coop_lvls) $ \(GenReduceOp w dest _ _, coop_lvl) -> do
+  hists_per_group <- forM (zip ops coop_lvls) $ \(GenReduceOp w _ _ _, coop_lvl) -> do
     his_mem_size <- letSubExp "his_mem_size" $
       BasicOp $ BinOp (Mul Int32) (intConst Int32 (2 * 4)) w -- histogram and locks
     letSubExp "hists_per_group" =<<
@@ -358,15 +359,14 @@ blockedGenReduceLocalMemory arr_w ops lam arrs = runBinder $ do
     BasicOp $ BinOp (Mul Int32) hist_per_group coop_lvl
 
   -- num_hists := num_threads / coop_lvl
-  num_hists <- forM (zip3 hists_per_group threads_per_group coop_lvls) $ \(hists, threads, coop_lvl) ->
+  num_hists <- forM coop_lvls $ \coop_lvl ->
     letSubExp "num_histograms" =<<
-      eBinOp (SDiv Int32)
-      (pure $ BasicOp $ BinOp (Mul Int32) threads hists)
-      (eSubExp coop_lvl)
+      eBinOp (SDiv Int32) (eSubExp num_threads) (eSubExp coop_lvl)
 
   -- num_groups := ceil( num_hists / (float)hists_per_group )
-  num_groups <- forM (zip num_hists hists_per_group) $ \(total_hists, hists_group) ->
-    letSubExp "num_groups" =<< eDivRoundingUp Int32 (eSubExp total_hists) (eSubExp hists_group)
+  num_groups <- forM (zip num_hists hists_per_group) $ \(num_hists', hists_per_group') ->
+    letSubExp "num_groups" =<<
+    eDivRoundingUp Int32 (eSubExp num_hists') (eSubExp hists_per_group')
 
 -- 1) Set num_groups and group_size.
   -- TODO: Find maximum instead of just taking the first element.
@@ -376,29 +376,29 @@ blockedGenReduceLocalMemory arr_w ops lam arrs = runBinder $ do
       nthreads = spaceNumThreads kspace
       group_size = spaceGroupSize kspace
 
+-- 4) Create loop.
+  (kres, kstms) <- runBinder $ localScope (scopeOfKernelSpace kspace) $ do
+
 -- 2) Initialize sub-histograms in local memory.
-  sub_histos <- forM ops $ \(GenReduceOp w dests ne op) -> do
-    ne_ts <- mapM subExpType ne
-    combine_id <- newVName "ne_elem_"
-    letExp "sub_histo" $ Op $ Combine (combineSpace [(combine_id, group_size)]) ne_ts [] $ Body () mempty ne
+    sub_histos <- forM (zip ops num_hists) $ \(GenReduceOp _w _dests ne _op, num_hists') -> do
+      ne_ts <- mapM subExpType ne
+      combine_id <- newVName "ne_elem"
+      letExp "sub_histo" $ Op $ Combine (combineSpace [(combine_id, num_hists')]) ne_ts [] $ Body () mempty ne
 
 -- 3) Initialize locks array in local memory.
-  lock_arrs <- forM (zip ops num_hists) $ \(GenReduceOp w _ _ _, num_hists') -> do
-    combine_id <- newVName "lock_elem_"
-    locks <- letExp "locks_arr0" $ BasicOp $ Replicate (Shape [num_hists', w]) (intConst Int32 0)
-    locks_t <- lookupType locks
-    letExp "locks_arr1" $ Op $ Combine (combineSpace [(combine_id, group_size)]) [locks_t] [] $ Body () mempty [Var locks]
+    lock_arrs <- forM (zip ops num_hists) $ \(GenReduceOp w _ _ _, num_hists') -> do
+      combine_id <- newVName "lock_elem"
+      locks <- letSubExp "locks" $ BasicOp $ Replicate (Shape [w]) (intConst Int32 0)
+      locks_t <- subExpType locks
+      letExp "locks_arr" $ Op $ Combine (combineSpace [(combine_id, num_hists')]) [locks_t] [] $ Body () mempty [locks]
 
--- 4) Create loop.
-  let sub_histos' = sub_histos -- concat sub_histos
-  dest_ts <- mapM lookupType sub_histos'
+    dest_ts <- mapM lookupType sub_histos
 
-  (kres, kstms) <- runBinder $ localScope (scopeOfKernelSpace kspace) $ do
     i <- newVName "i"
     -- The merge parameters are the histogram we are constructing.
-    merge_params <- zipWithM newParam (map baseString sub_histos')
+    merge_params <- zipWithM newParam (map baseString sub_histos)
                                       (map (`toDecl` Unique) dest_ts)
-    let merge = zip merge_params $ map Var sub_histos'
+    let merge = zip merge_params $ map Var sub_histos
         form = ForLoop i Int32 elems_per_thread []
 
     loop_body <- runBodyBinder $ localScope (scopeOfFParams (map fst merge) <>
@@ -456,9 +456,12 @@ blockedGenReduceLocalMemory arr_w ops lam arrs = runBinder $ do
     result <- letTupExp "result" $ DoLoop [] merge form loop_body
     return $ map (ThreadsReturn OneResultPerGroup . Var) result
 
-  let kbody = KernelBody () kstms kres
-  letTupExp "histograms" $ Op $ Kernel (KernelDebugHints "gen_reduce" []) kspace dest_ts kbody
+  dest_ts <- forM ops $ \(GenReduceOp w _dest ne _op) -> do
+    ts <- mapM subExpType ne
+    return $ map (flip arrayOfRow w) ts
 
+  let kbody = KernelBody () kstms kres
+  letTupExp "histograms" $ Op $ Kernel (KernelDebugHints "gen_reduce_local_memory" []) kspace (concat dest_ts) kbody
 
 blockedGenReduceGlobalMemory :: (MonadFreshNames m, HasScope Kernels m) =>
                                 SubExp -> [GenReduceOp InKernel]
