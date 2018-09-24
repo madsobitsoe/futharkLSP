@@ -88,6 +88,7 @@ data Value = ValuePrim !PrimValue
            | ValueArray !(Array Int Value)
            | ValueRecord (M.Map Name Value)
            | ValueFun (Value -> EvalM Value)
+           | ValueEnum Name
 
 instance Eq Value where
   ValuePrim x == ValuePrim y = x == y
@@ -105,6 +106,7 @@ instance Pretty Value where
         braces $ commasep $ map field $ M.toList m
         where field (k, v) = ppr k <+> equals <+> ppr v
   ppr ValueFun{} = text "#<fun>"
+  ppr (ValueEnum n) = text "#" <> ppr n
 
 -- | Create an array value; failing if that would result in an
 -- irregular array.
@@ -483,6 +485,7 @@ evalType env t@(TypeVar () _ tn args) =
           t'' <- evalType env t'
           return (mempty, M.singleton p $ T.TypeAbbr l [] t'')
         matchPtoA _ _ = return mempty
+evalType _ (Enum cs) = return $ Enum cs
 
 eval :: Env -> Exp -> EvalM Value
 
@@ -712,6 +715,8 @@ eval env (Assert what e (Info s) loc) = do
   cond <- asBool <$> eval env what
   unless cond $ bad loc env s
   eval env e
+
+eval env (VConstr0 c _ _) = return $ ValueEnum c
 
 eval _ e = error $ "eval not yet: " ++ show e
 

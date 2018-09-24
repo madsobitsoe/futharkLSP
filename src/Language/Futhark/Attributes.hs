@@ -494,7 +494,7 @@ typeOf (ProjectSection _ (Info t) _) =
   removeShapeAnnotations t
 typeOf (IndexSection _ (Info t) _) =
   removeShapeAnnotations t
-typeOf (VConstr0 n _ _)  = Enum [n] -- TODO: Figure this out.
+typeOf (VConstr0 n (Info t) _)  = t
 typeOf (Match _ (CaseEnum _ eCase _ :_) _) = typeOf eCase
 
 foldFunType :: Monoid as => [TypeBase dim as] -> TypeBase dim as -> TypeBase dim as
@@ -521,6 +521,7 @@ typeVars t =
       mconcat $ typeVarFree tn : map typeArgFree targs
     Array (ArrayRecordElem fields) _ _ ->
       foldMap (typeVars . fst . recordArrayElemToType) fields
+    Enum names -> mempty
   where typeVarFree = S.singleton . typeLeaf
         typeArgFree (TypeArgType ta _) = typeVars ta
         typeArgFree TypeArgDim{} = mempty

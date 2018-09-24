@@ -13,6 +13,7 @@ module Language.Futhark.TypeChecker.Terms
   )
 where
 
+
 import Control.Monad.Except
 import Control.Monad.State
 import Control.Monad.RWS
@@ -185,6 +186,7 @@ data Constraint = NoConstraint (Maybe Liftedness) SrcLoc
                 | Overloaded [PrimType] SrcLoc
                 | HasFields (M.Map Name (TypeBase () ())) SrcLoc
                 | Equality SrcLoc
+                | HasConstrs [Name] SrcLoc
                 deriving Show
 
 instance Located Constraint where
@@ -194,6 +196,7 @@ instance Located Constraint where
   locOf (Overloaded _ loc) = locOf loc
   locOf (HasFields _ loc) = locOf loc
   locOf (Equality loc) = locOf loc
+  locOf (HasConstrs _ loc) = locOf loc
 
 -- | Is the given type variable actually the name of an abstract type
 -- or type parameter, which we cannot substitute?
@@ -221,6 +224,7 @@ applySubstInConstraint _ _ (NoConstraint l loc) = NoConstraint l loc
 applySubstInConstraint _ _ (Overloaded ts loc) = Overloaded ts loc
 applySubstInConstraint _ _ (Equality loc) = Equality loc
 applySubstInConstraint _ _ (ParamType l loc) = ParamType l loc
+applySubstInConstraint _ _ (HasConstrs ns loc) = HasConstrs ns loc
 
 normaliseType :: Substitutable a => a -> TermTypeM a
 normaliseType t = do constraints <- getConstraints
@@ -894,6 +898,7 @@ checkExp (Ascript e decl loc) = do
   decl' <- checkTypeDecl decl
   e' <- checkExp e
   t <- toStruct <$> expType e'
+  --error $ show e' ++ "\n" ++ show decl' ++ "\n" ++ show t
   let decl_t = removeShapeAnnotations $ unInfo $ expandedType decl'
   unify loc decl_t t
 
@@ -1326,8 +1331,10 @@ checkExp (DoLoop tparams mergepat mergeexp form loopbody loc) =
         then return pat'
         else convergePattern pat' body_cons' body_t' body_loc
 
-checkExp (VConstr0 name NoInfo loc) =
-  return $ VConstr0 name (Info (Enum [name])) loc
+checkExp (VConstr0 name NoInfo loc) = do
+  t <- newTypeVar loc "t"
+  mustHaveConstr loc name t
+  return $ VConstr0 name (Info t) loc
 
 --checkExp (Match e (c:_) loc) = do
 --  e'     <- checkExp e
@@ -1903,6 +1910,23 @@ zeroOrderType loc desc t = do
               " must be non-function, but type parameter " ++ prettyName vn ++ " at " ++
               locStr ploc ++ " may be a function."
             _ -> return ()
+
+mustHaveConstr :: SrcLoc -> Name -> TypeBase dim as -> TermTypeM ()
+mustHaveConstr loc c t = do
+  constraints <- getConstraints
+  case t of
+    TypeVar _ _ (TypeName _ tn) []
+      | Just NoConstraint{} <- M.lookup tn constraints ->
+          modifyConstraints $ M.insert tn $ HasConstrs [c] loc
+      | Just (HasConstrs cs _) <- M.lookup tn constraints ->
+          if c `elem` cs
+          then return ()
+          else modifyConstraints $ M.insert tn $ HasConstrs (c:cs) loc
+    Enum cs
+      | c `elem` cs -> return ()
+      | otherwise   -> throwError $ TypeError loc $
+                       "Type " ++ pretty (toStructural t) ++
+                       " does not have a" ++ pretty c ++ " constructor."
 
 mustHaveField :: Monoid as => SrcLoc -> Name -> TypeBase dim as -> TermTypeM (TypeBase dim as)
 mustHaveField loc l t = do

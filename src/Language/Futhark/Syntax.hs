@@ -713,7 +713,7 @@ data ExpBase f vn =
             -- ^ Fail if the first expression does not return true,
             -- and return the value of the second expression if it
             -- does.
-            | VConstr0 Name (f (TypeBase () ())) SrcLoc
+            | VConstr0 Name (f CompType) SrcLoc
             | Match (ExpBase f vn) [CaseBase f vn] SrcLoc
 
 deriving instance Showable f vn => Show (ExpBase f vn)
