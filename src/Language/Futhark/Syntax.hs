@@ -714,7 +714,7 @@ data ExpBase f vn =
             -- and return the value of the second expression if it
             -- does.
             | VConstr0 Name (f CompType) SrcLoc
-            | Match (ExpBase f vn) [CaseBase f vn] SrcLoc
+            | Match (ExpBase f vn) [CaseBase f vn] (f CompType) SrcLoc
 
 deriving instance Showable f vn => Show (ExpBase f vn)
 
@@ -763,7 +763,7 @@ instance Located (ExpBase f vn) where
   locOf (Unsafe _ loc)                 = locOf loc
   locOf (Assert _ _ _ loc)             = locOf loc
   locOf (VConstr0 _ _ loc)             = locOf loc
-  locOf (Match _ _ loc)                = locOf loc
+  locOf (Match _ _ _ loc)                = locOf loc
 
 -- | An entry in a record literal.
 data FieldBase f vn = RecordFieldExplicit Name (ExpBase f vn) SrcLoc

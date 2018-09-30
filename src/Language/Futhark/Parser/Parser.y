@@ -710,7 +710,7 @@ LetBody :: { UncheckedExp }
 
 MatchExp :: { UncheckedExp }
 MatchExp : match Exp Cases  { let loc = srcspan $1 $>
-                              in Match $2 $> loc  }
+                              in Match $2 $> NoInfo loc  }
 
 Cases :: { [CaseBase NoInfo Name] }
 Cases : Case  %prec caseprec { [$1] }

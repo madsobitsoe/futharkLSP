@@ -718,6 +718,20 @@ eval env (Assert what e (Info s) loc) = do
 
 eval env (VConstr0 c _ _) = return $ ValueEnum c
 
+eval env (Match e cs _ _) =
+  do
+  e' <- eval env e
+  case e' of
+    ValueEnum c ->
+      let mi = findIndex (\cEnum -> c == getConstr cEnum) cs
+      in case mi of
+        Just i  -> eval env $ getExpr (cs!!i)
+        Nothing -> fail $ show cs ++ "\n" ++ show c ++ "No pattern matching expression."
+    _           -> fail "Not supported yet."
+  where getConstr (CaseEnum (EnumPattern n _) _ _) = n
+        getExpr   (CaseEnum _ e _) = e
+
+
 eval _ e = error $ "eval not yet: " ++ show e
 
 substituteInModule :: M.Map VName VName -> Module -> Module

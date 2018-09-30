@@ -175,8 +175,9 @@ instance ASTMappable (ExpBase Info VName) where
     mapOnExp tv loopbody <*> pure loc
   astMap tv (VConstr0 name t loc) =
     VConstr0 name <$> traverse (mapOnCompType tv) t <*> pure loc
-  astMap tv (Match e cases loc) =
-    Match <$> mapOnExp tv e <*> astMap tv cases <*> pure loc
+  astMap tv (Match e cases t loc) =
+    Match <$> mapOnExp tv e <*> astMap tv cases
+          <*> traverse (mapOnCompType tv) t <*> pure loc
 
 instance ASTMappable (LoopFormBase Info VName) where
   astMap tv (For i bound) = For <$> astMap tv i <*> astMap tv bound
@@ -297,6 +298,7 @@ instance ASTMappable (PatternBase Info VName) where
     PatternAscription <$> astMap tv pat <*> astMap tv t <*> pure loc
   astMap tv (Wildcard (Info t) loc) =
     Wildcard <$> (Info <$> mapOnPatternType tv t) <*> pure loc
+  astMap tv (EnumPattern name loc) = pure $ EnumPattern name loc
 
 instance ASTMappable (FieldBase Info VName) where
   astMap tv (RecordFieldExplicit name e loc) =

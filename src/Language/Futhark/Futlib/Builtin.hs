@@ -15,4 +15,4 @@ import Language.Futhark.Futlib (prelude)
 -- ASTs.  Set this to emptyBasis to speed up compilation of the
 -- Futhark compiler (but slow down compilation of Futhark programs).
 builtinBasis :: Basis
-builtinBasis = $(embedBasis prelude)
+builtinBasis = emptyBasis -- $(embedBasis prelude)

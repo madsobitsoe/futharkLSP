@@ -495,7 +495,7 @@ typeOf (ProjectSection _ (Info t) _) =
 typeOf (IndexSection _ (Info t) _) =
   removeShapeAnnotations t
 typeOf (VConstr0 n (Info t) _)  = t
-typeOf (Match _ (CaseEnum _ eCase _ :_) _) = typeOf eCase
+typeOf (Match _ _ (Info t) _) = t
 
 foldFunType :: Monoid as => [TypeBase dim as] -> TypeBase dim as -> TypeBase dim as
 foldFunType ps ret = foldr (Arrow mempty Nothing) ret ps
