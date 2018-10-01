@@ -726,9 +726,19 @@ eval env (Match e cs _ _) =
       let mi = findIndex (\cEnum -> c == getConstr cEnum) cs
       in case mi of
         Just i  -> eval env $ getExpr (cs!!i)
-        Nothing -> fail $ show cs ++ "\n" ++ show c ++ "No pattern matching expression."
+        Nothing -> fail $ show cs ++ "\n"
+                   ++ show c ++ "No pattern matching expression."
+    v -> do
+      cs' <- mapM (eval env . getPrim) cs
+      let mi = findIndex (v==) cs'
+      case mi of
+        Just i  -> eval env $ getExpr (cs!!i)
+        Nothing -> fail $ show cs
+                   ++ "\n" ++ "No pattern matching expression."
+
     _           -> fail "Not supported yet."
   where getConstr (CaseEnum (EnumPattern n _ _) _ _) = n
+        getPrim   (CaseEnum (LitPattern e _ _) _ _)  = e
         getExpr   (CaseEnum _ e _) = e
 
 

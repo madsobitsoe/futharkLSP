@@ -798,6 +798,7 @@ data PatternBase f vn = TuplePattern [PatternBase f vn] SrcLoc
                       | Wildcard (f PatternType) SrcLoc -- Nothing, i.e. underscore.
                       | PatternAscription (PatternBase f vn) (TypeDeclBase f vn) SrcLoc
                       | EnumPattern Name (f PatternType) SrcLoc
+                      | LitPattern (ExpBase f vn) (f PatternType) SrcLoc
 deriving instance Showable f vn => Show (PatternBase f vn)
 
 instance Located (PatternBase f vn) where

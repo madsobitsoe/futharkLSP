@@ -622,6 +622,17 @@ checkPattern' (EnumPattern c NoInfo loc) NoneInferred = do
   mustHaveConstr loc c t
   return $ EnumPattern c (Info t) loc
 
+checkPattern' (LitPattern e NoInfo loc) (Ascribed t) = do
+  e' <- checkExp e
+  t' <- expType e'
+  unify loc (toStructural t') (toStructural t)
+  return $ LitPattern e' (Info (vacuousShapeAnnotations t')) loc
+
+checkPattern' (LitPattern e NoInfo loc) NoneInferred = do
+  e' <- checkExp e
+  t' <- expType e'
+  return $ LitPattern e' (Info (vacuousShapeAnnotations t')) loc
+
 
 bindPatternNames :: PatternBase NoInfo Name -> TermTypeM a -> TermTypeM a
 bindPatternNames = bindSpaced . map asTerm . S.toList . patIdentSet
@@ -775,6 +786,7 @@ patternUses :: Pattern -> ([VName], [VName])
 patternUses Id{} = mempty
 patternUses Wildcard{} = mempty
 patternUses EnumPattern{} = mempty
+patternUses LitPattern{} = mempty
 patternUses (PatternParens p _) = patternUses p
 patternUses (TuplePattern ps _) = foldMap patternUses ps
 patternUses (RecordPattern fs _) = foldMap (patternUses . snd) fs
@@ -1366,7 +1378,7 @@ checkExp (Match e cs NoInfo loc) = do
 
 mustHaveSameType :: SrcLoc -> CompType -> [CaseBase NoInfo Name] -> TermTypeM (CompType, [CaseBase Info VName])
 mustHaveSameType loc _ [] = typeError loc "Match expressions must have a least one case."
-mustHaveSameType loc t cases@(CaseEnum _ e _:cs) = do
+mustHaveSameType loc t cases@(CaseEnum _ e _:_) = do
   e' <- checkExp e
   t' <- expType e'
   let checkCaseExp (CaseEnum pat caseExp cLoc) = do

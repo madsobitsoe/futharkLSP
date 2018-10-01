@@ -716,18 +716,42 @@ Cases :: { [CaseBase NoInfo Name] }
 Cases : Case  %prec caseprec { [$1] }
       | Case Cases           { $1 : $2 }
 
---Case :: { CaseBase NoInfo Name }
---Case : case VConstr0 '->' Exp { let (vConstr, vConstrLoc) = $2;
---                                    loc = srcspan vConstrLoc $>
---                                in CaseEnum (EnumPattern vConstr NoInfo vConstrLoc) $> loc }
-
 Case :: { CaseBase NoInfo Name }
-Case : case CasePattern '->' Exp { let loc = srcspan $1 $>
+Case : case CPattern '->' Exp { let loc = srcspan $1 $>
                                     in CaseEnum $2 $> loc }
 
-CasePattern :: { PatternBase NoInfo Name}
-CasePattern : Pattern { $1 }
-            | VConstr0     { let (name, loc) = $1 in EnumPattern name NoInfo loc }
+--CPattern :: { PatternBase NoInfo Name}
+--CPattern : Pattern      { $1 }
+--           | VConstr0     { let (name, loc) = $1 in EnumPattern name NoInfo loc }
+--           | PrimLit      { LitPattern (Literal (fst $1) (snd $1)) (snd $1) }
+
+CPattern :: { PatternBase NoInfo Name }
+CPattern : CInnerPattern ':' TypeExpDecl { PatternAscription $1 $3 (srcspan $1 $>) }
+         | CInnerPattern                 { $1 }
+
+
+CPatterns1 :: { [PatternBase NoInfo Name] }
+           : CPattern               { [$1] }
+           | CPattern ',' CPatterns1 { $1 : $3 }
+
+CInnerPattern :: { PatternBase NoInfo Name }
+CInnerPattern : id                                { let L loc (ID name) = $1 in Id name NoInfo loc }
+             | '(' BindingBinOp ')'               { Id $2 NoInfo (srcspan $1 $>) }
+             | '(' BindingUnOp ')'                { Id $2 NoInfo (srcspan $1 $>) }
+             | '_'                                { Wildcard NoInfo $1 }
+             | '(' ')'                            { TuplePattern [] (srcspan $1 $>) }
+             | '(' CPattern ')'                   { PatternParens $2 (srcspan $1 $>) }
+             | '(' CPattern ',' CPatterns1 ')'    { TuplePattern ($2:$4) (srcspan $1 $>) }
+             | '{' FieldPatterns '}'              { RecordPattern $2 (srcspan $1 $>) }
+             | VConstr0                           { let (name, loc) = $1 in EnumPattern name NoInfo loc }
+             | CaseLiteral                        { LitPattern (fst $1) NoInfo (snd $1) }
+
+CaseLiteral :: { (UncheckedExp, SrcLoc) }
+CaseLiteral : PrimLit        { (Literal (fst $1) (snd $1), snd $1) }
+            | intlit         { let L loc (INTLIT x) = $1 in (IntLit x NoInfo loc, loc) }
+            | floatlit       { let L loc (FLOATLIT x) = $1 in (FloatLit x NoInfo loc, loc)}
+            | stringlit      { let L loc (STRINGLIT s) = $1 in
+                        (ArrayLit (map (flip Literal loc . SignedValue . Int32Value . fromIntegral . ord) s) NoInfo loc, loc) }
 
 
 LoopForm :: { LoopFormBase NoInfo Name }
