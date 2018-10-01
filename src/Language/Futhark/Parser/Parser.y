@@ -719,7 +719,7 @@ Cases : Case  %prec caseprec { [$1] }
 Case :: { CaseBase NoInfo Name }
 Case : case VConstr0 '->' Exp { let (vConstr, vConstrLoc) = $2;
                                     loc = srcspan vConstrLoc $>
-                                in CaseEnum (EnumPattern vConstr vConstrLoc) $> loc }
+                                in CaseEnum (EnumPattern vConstr NoInfo vConstrLoc) $> loc }
 
 -- VConstr0 :: { (Name, SrcLoc) }
 

@@ -632,21 +632,23 @@ patternOrderZero pat = case pat of
 
 -- | The set of identifiers bound in a pattern.
 patIdentSet :: (Functor f, Ord vn) => PatternBase f vn -> S.Set (IdentBase f vn)
-patIdentSet (Id v t loc)            = S.singleton $ Ident v (removeShapeAnnotations <$> t) loc
+patIdentSet (Id v t loc)              = S.singleton $ Ident v (removeShapeAnnotations <$> t) loc
 patIdentSet (PatternParens p _)       = patIdentSet p
 patIdentSet (TuplePattern pats _)     = mconcat $ map patIdentSet pats
 patIdentSet (RecordPattern fs _)      = mconcat $ map (patIdentSet . snd) fs
 patIdentSet Wildcard{}                = mempty
 patIdentSet (PatternAscription p _ _) = patIdentSet p
+patIdentSet EnumPattern{}             = mempty
 
 -- | The type of values bound by the pattern.
 patternType :: PatternBase Info VName -> CompType
-patternType (Wildcard (Info t) _)     = removeShapeAnnotations t
-patternType (PatternParens p _)       = patternType p
-patternType (Id _ (Info t) _)         = removeShapeAnnotations t
-patternType (TuplePattern pats _)     = tupleRecord $ map patternType pats
-patternType (RecordPattern fs _)      = Record $ patternType <$> M.fromList fs
-patternType (PatternAscription p _ _) = patternType p
+patternType (Wildcard (Info t) _)      = removeShapeAnnotations t
+patternType (PatternParens p _)        = patternType p
+patternType (Id _ (Info t) _)          = removeShapeAnnotations t
+patternType (TuplePattern pats _)      = tupleRecord $ map patternType pats
+patternType (RecordPattern fs _)       = Record $ patternType <$> M.fromList fs
+patternType (PatternAscription p _ _)  = patternType p
+patternType (EnumPattern _ (Info t) _) = removeShapeAnnotations t
 
 -- | The type matched by the pattern, including shape declarations if present.
 patternStructType :: PatternBase Info VName -> StructType

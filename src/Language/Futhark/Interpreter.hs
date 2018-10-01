@@ -728,7 +728,7 @@ eval env (Match e cs _ _) =
         Just i  -> eval env $ getExpr (cs!!i)
         Nothing -> fail $ show cs ++ "\n" ++ show c ++ "No pattern matching expression."
     _           -> fail "Not supported yet."
-  where getConstr (CaseEnum (EnumPattern n _) _ _) = n
+  where getConstr (CaseEnum (EnumPattern n _ _) _ _) = n
         getExpr   (CaseEnum _ e _) = e
 
 

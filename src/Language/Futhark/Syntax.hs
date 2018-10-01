@@ -797,7 +797,7 @@ data PatternBase f vn = TuplePattern [PatternBase f vn] SrcLoc
                       | Id vn (f PatternType) SrcLoc
                       | Wildcard (f PatternType) SrcLoc -- Nothing, i.e. underscore.
                       | PatternAscription (PatternBase f vn) (TypeDeclBase f vn) SrcLoc
-                      | EnumPattern Name SrcLoc
+                      | EnumPattern Name (f PatternType) SrcLoc
 deriving instance Showable f vn => Show (PatternBase f vn)
 
 instance Located (PatternBase f vn) where
@@ -807,7 +807,7 @@ instance Located (PatternBase f vn) where
   locOf (Id _ _ loc)                = locOf loc
   locOf (Wildcard _ loc)            = locOf loc
   locOf (PatternAscription _ _ loc) = locOf loc
-  locOf (EnumPattern _ loc)         = locOf loc
+  locOf (EnumPattern _ _ loc)       = locOf loc
 
 -- | Documentation strings, including source location.
 data DocComment = DocComment String SrcLoc

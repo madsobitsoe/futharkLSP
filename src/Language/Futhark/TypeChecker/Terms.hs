@@ -613,6 +613,16 @@ checkPattern' (PatternAscription p (TypeDecl t NoInfo) loc) maybe_outer_t = do
       pure (TypeDecl t' (Info st)) <*> pure loc
  where unifyUniqueness u1 u2 = if u2 `subuniqueOf` u1 then Just u1 else Nothing
 
+checkPattern' (EnumPattern c NoInfo loc) (Ascribed t) = do
+  mustHaveConstr loc c t
+  return $ EnumPattern c (Info t) loc
+
+checkPattern' (EnumPattern c NoInfo loc) NoneInferred = do
+  t <- newTypeVar loc "t"
+  mustHaveConstr loc c t
+  return $ EnumPattern c (Info t) loc
+
+
 bindPatternNames :: PatternBase NoInfo Name -> TermTypeM a -> TermTypeM a
 bindPatternNames = bindSpaced . map asTerm . S.toList . patIdentSet
   where asTerm v = (Term, identName v)
@@ -764,6 +774,7 @@ checkShapeParamUses tps ps = do
 patternUses :: Pattern -> ([VName], [VName])
 patternUses Id{} = mempty
 patternUses Wildcard{} = mempty
+patternUses EnumPattern{} = mempty
 patternUses (PatternParens p _) = patternUses p
 patternUses (TuplePattern ps _) = foldMap patternUses ps
 patternUses (RecordPattern fs _) = foldMap (patternUses . snd) fs
@@ -778,6 +789,7 @@ patternUses (PatternAscription p (TypeDecl declte _) _) =
         typeExpUses (TEArrow _ t1 t2 _) =
           let (pos, neg) = typeExpUses t1 <> typeExpUses t2
           in (mempty, pos <> neg)
+        typeExpUses TEEnum{} = mempty
         typeArgUses (TypeArgExpDim d _) = dimDeclUses d
         typeArgUses (TypeArgExpType te) = typeExpUses te
 
@@ -1346,29 +1358,46 @@ checkExp (VConstr0 name NoInfo loc) = do
   return $ VConstr0 name (Info t) loc
 
 checkExp (Match e cs NoInfo loc) = do
-  e'        <- checkExp e
-  t'        <- expType e'
-  (mt, cs') <- checkCases t' loc cs
-  return $ Match e' cs' (Info mt) loc
+  e'  <- checkExp e
+  t  <- expType e'
+  (t', cs') <- mustHaveSameType loc t cs
+  --traceM $ show (Match e' cs' (Info t') loc) ++ "\n"
+  return $ Match e' cs' (Info t') loc
 
-checkCases :: CompType -> SrcLoc
-              -> [CaseBase NoInfo Name] -> TermTypeM (CompType, [CaseBase Info VName])
-checkCases _ loc []    = typeError loc $ "A match expression must have a least one case."
-checkCases t loc cs = do
-  (c':cs') <- mapM (checkCase t) cs 
-  let CaseEnum _ firstCaseExp _ = c'
-  t <- expType firstCaseExp
-  cs'' <- mapM (unifyCase (toStructural t)) cs'
-  return (t, c':cs'')
-  where unifyCase t c@(CaseEnum _ cExp' cLoc) = do
-          t' <- toStructural <$> expType cExp'
-          unify cLoc t t'
-          return c
-        checkCase t (CaseEnum (EnumPattern name pLoc) cExp cLoc) = do
-          cExp' <- checkExp cExp
-          tExp' <- expType cExp'
-          mustHaveConstr pLoc name t
-          return $ CaseEnum (EnumPattern name pLoc) cExp' cLoc
+mustHaveSameType :: SrcLoc -> CompType -> [CaseBase NoInfo Name] -> TermTypeM (CompType, [CaseBase Info VName])
+mustHaveSameType loc _ [] = typeError loc "Match expressions must have a least one case."
+mustHaveSameType loc t cases@(CaseEnum _ e _:cs) = do
+  e' <- checkExp e
+  t' <- expType e'
+  let checkCaseExp (CaseEnum pat caseExp cLoc) = do
+          pat' <- bindingPattern [] pat (Ascribed $ vacuousShapeAnnotations t) $ \_ p' -> do
+                    unify cLoc (toStructural . patternType $ p') (toStructural t)
+                    return p'
+          caseExp' <- checkExp caseExp
+          caseT'   <- expType caseExp'
+          unify cLoc (toStructural t') (toStructural caseT')
+          return $ CaseEnum pat' caseExp' loc
+  cases' <- mapM checkCaseExp cases
+  return (t', cases')
+
+--checkCases :: CompType -> SrcLoc
+--              -> [CaseBase NoInfo Name] -> TermTypeM (CompType, [CaseBase Info VName])
+--checkCases _ loc []    = typeError loc "The match expression must have a least one case."
+--checkCases t loc cs = do
+--  (c':cs') <- mapM (checkCase t) cs
+--  let CaseEnum _ firstCaseExp _ = c'
+--  t' <- expType firstCaseExp
+--  cs'' <- mapM (unifyCase (toStructural t')) cs'
+--  return (t', c':cs'')
+--  where unifyCase t c@(CaseEnum _ cExp' cLoc) = do
+--          t' <- toStructural <$> expType cExp'
+--          unify cLoc t t'
+--          return c
+--        checkCase t (CaseEnum (EnumPattern name _ pLoc) cExp cLoc) = do
+--          cExp' <- checkExp cExp
+--          tExp' <- expType cExp'
+--          mustHaveConstr pLoc name t
+--          return $ CaseEnum (EnumPattern name pLoc) cExp' cLoc
 
 
 checkIdent :: IdentBase NoInfo Name -> TermTypeM Ident
@@ -1997,6 +2026,8 @@ mustHaveConstr loc c t = do
       | otherwise   -> throwError $ TypeError loc $
                        "Type " ++ pretty (toStructural t) ++
                        " does not have a" ++ pretty c ++ " constructor."
+    _ -> do unify loc (toStructural t) $ Enum [c]
+            return ()
 
 mustHaveField :: Monoid as => SrcLoc -> Name -> TypeBase dim as -> TermTypeM (TypeBase dim as)
 mustHaveField loc l t = do
