@@ -716,12 +716,19 @@ Cases :: { [CaseBase NoInfo Name] }
 Cases : Case  %prec caseprec { [$1] }
       | Case Cases           { $1 : $2 }
 
-Case :: { CaseBase NoInfo Name }
-Case : case VConstr0 '->' Exp { let (vConstr, vConstrLoc) = $2;
-                                    loc = srcspan vConstrLoc $>
-                                in CaseEnum (EnumPattern vConstr NoInfo vConstrLoc) $> loc }
+--Case :: { CaseBase NoInfo Name }
+--Case : case VConstr0 '->' Exp { let (vConstr, vConstrLoc) = $2;
+--                                    loc = srcspan vConstrLoc $>
+--                                in CaseEnum (EnumPattern vConstr NoInfo vConstrLoc) $> loc }
 
--- VConstr0 :: { (Name, SrcLoc) }
+Case :: { CaseBase NoInfo Name }
+Case : case CasePattern '->' Exp { let loc = srcspan $1 $>
+                                    in CaseEnum $2 $> loc }
+
+CasePattern :: { PatternBase NoInfo Name}
+CasePattern : Pattern { $1 }
+            | VConstr0     { let (name, loc) = $1 in EnumPattern name NoInfo loc }
+
 
 LoopForm :: { LoopFormBase NoInfo Name }
 LoopForm : for VarId '<' Exp
@@ -771,6 +778,7 @@ FieldId :: { (Name, SrcLoc) }
 Pattern :: { PatternBase NoInfo Name }
 Pattern : InnerPattern ':' TypeExpDecl { PatternAscription $1 $3 (srcspan $1 $>) }
         | InnerPattern                 { $1 }
+
 
 Patterns1 :: { [PatternBase NoInfo Name] }
            : Pattern               { [$1] }
