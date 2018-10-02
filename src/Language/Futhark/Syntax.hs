@@ -776,12 +776,14 @@ instance Located (FieldBase f vn) where
   locOf (RecordFieldImplicit _ _ loc) = locOf loc
 
 -- | A case in a match expression.
-data CaseBase f vn = CaseEnum (PatternBase f vn) (ExpBase f vn) SrcLoc
+data CaseBase f vn = CasePat (PatternBase f vn) (ExpBase f vn) SrcLoc
+                   | CaseLit (ExpBase f vn) (ExpBase f vn) SrcLoc
 
 deriving instance Showable f vn => Show (CaseBase f vn)
 
 instance Located (CaseBase f vn) where
-  locOf (CaseEnum _ _ loc ) = locOf loc
+  locOf (CasePat _ _ loc) = locOf loc
+  locOf (CaseLit _ _ loc) = locOf loc
 
 -- | Whether the loop is a @for@-loop or a @while@-loop.
 data LoopFormBase f vn = For (IdentBase f vn) (ExpBase f vn)
@@ -798,7 +800,6 @@ data PatternBase f vn = TuplePattern [PatternBase f vn] SrcLoc
                       | Wildcard (f PatternType) SrcLoc -- Nothing, i.e. underscore.
                       | PatternAscription (PatternBase f vn) (TypeDeclBase f vn) SrcLoc
                       | EnumPattern Name (f PatternType) SrcLoc
-                      | LitPattern (ExpBase f vn) (f PatternType) SrcLoc
 deriving instance Showable f vn => Show (PatternBase f vn)
 
 instance Located (PatternBase f vn) where

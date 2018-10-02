@@ -622,18 +622,6 @@ checkPattern' (EnumPattern c NoInfo loc) NoneInferred = do
   mustHaveConstr loc c t
   return $ EnumPattern c (Info t) loc
 
-checkPattern' (LitPattern e NoInfo loc) (Ascribed t) = do
-  e' <- checkExp e
-  t' <- expType e'
-  unify loc (toStructural t') (toStructural t)
-  return $ LitPattern e' (Info (vacuousShapeAnnotations t')) loc
-
-checkPattern' (LitPattern e NoInfo loc) NoneInferred = do
-  e' <- checkExp e
-  t' <- expType e'
-  return $ LitPattern e' (Info (vacuousShapeAnnotations t')) loc
-
-
 bindPatternNames :: PatternBase NoInfo Name -> TermTypeM a -> TermTypeM a
 bindPatternNames = bindSpaced . map asTerm . S.toList . patIdentSet
   where asTerm v = (Term, identName v)
@@ -786,7 +774,6 @@ patternUses :: Pattern -> ([VName], [VName])
 patternUses Id{} = mempty
 patternUses Wildcard{} = mempty
 patternUses EnumPattern{} = mempty
-patternUses LitPattern{} = mempty
 patternUses (PatternParens p _) = patternUses p
 patternUses (TuplePattern ps _) = foldMap patternUses ps
 patternUses (RecordPattern fs _) = foldMap (patternUses . snd) fs
@@ -1370,47 +1357,39 @@ checkExp (VConstr0 name NoInfo loc) = do
   return $ VConstr0 name (Info t) loc
 
 checkExp (Match e cs NoInfo loc) = do
-  e'  <- checkExp e
-  t  <- expType e'
-  (t', cs') <- mustHaveSameType loc t cs
-  --traceM $ show (Match e' cs' (Info t') loc) ++ "\n"
+  e' <- checkExp e
+  mt <- expType e'
+  (t', cs') <- mustHaveSameType loc mt cs
   return $ Match e' cs' (Info t') loc
 
-mustHaveSameType :: SrcLoc -> CompType -> [CaseBase NoInfo Name] -> TermTypeM (CompType, [CaseBase Info VName])
-mustHaveSameType loc _ [] = typeError loc "Match expressions must have a least one case."
-mustHaveSameType loc t cases@(CaseEnum _ e _:_) = do
-  e' <- checkExp e
-  t' <- expType e'
-  let checkCaseExp (CaseEnum pat caseExp cLoc) = do
-          pat' <- bindingPattern [] pat (Ascribed $ vacuousShapeAnnotations t) $ \_ p' -> do
-                    unify cLoc (toStructural . patternType $ p') (toStructural t)
-                    return p'
-          caseExp' <- checkExp caseExp
-          caseT'   <- expType caseExp'
-          unify cLoc (toStructural t') (toStructural caseT')
-          return $ CaseEnum pat' caseExp' loc
-  cases' <- mapM checkCaseExp cases
-  return (t', cases')
+mustHaveSameType :: SrcLoc -> CompType -> [CaseBase NoInfo Name]
+                    -> TermTypeM (CompType, [CaseBase Info VName])
+mustHaveSameType loc _ [] = typeError loc "Match expressions must have at least one case."
+mustHaveSameType loc mt (c:cs) = do
+  s  <- newTypeVar loc "s"
+  c' <- checkCase mt s c
+  ft <- expType $ caseExp c'
+  cs'<- mapM (checkCase mt ft) cs
+  return (ft, c':cs')
+  where caseExp (CasePat _ cExp _) = cExp
+        caseExp (CaseLit _ cExp _) = cExp
 
---checkCases :: CompType -> SrcLoc
---              -> [CaseBase NoInfo Name] -> TermTypeM (CompType, [CaseBase Info VName])
---checkCases _ loc []    = typeError loc "The match expression must have a least one case."
---checkCases t loc cs = do
---  (c':cs') <- mapM (checkCase t) cs
---  let CaseEnum _ firstCaseExp _ = c'
---  t' <- expType firstCaseExp
---  cs'' <- mapM (unifyCase (toStructural t')) cs'
---  return (t', c':cs'')
---  where unifyCase t c@(CaseEnum _ cExp' cLoc) = do
---          t' <- toStructural <$> expType cExp'
---          unify cLoc t t'
---          return c
---        checkCase t (CaseEnum (EnumPattern name _ pLoc) cExp cLoc) = do
---          cExp' <- checkExp cExp
---          tExp' <- expType cExp'
---          mustHaveConstr pLoc name t
---          return $ CaseEnum (EnumPattern name pLoc) cExp' cLoc
-
+checkCase :: CompType -> CompType -> CaseBase NoInfo Name -> TermTypeM (CaseBase Info VName)
+checkCase mt ft (CasePat p caseExp loc) =
+  bindingPattern [] p (Ascribed $ vacuousShapeAnnotations mt) $ \_ p' -> do
+    unify loc (toStructural . patternType $ p') (toStructural mt)
+    caseExp' <- checkExp caseExp
+    caseType <- expType caseExp'
+    unify loc (toStructural ft) (toStructural caseType)
+    return $ CasePat p' caseExp' loc
+checkCase mt ft (CaseLit pExp caseExp loc) = do
+  pExp'    <- checkExp pExp
+  caseExp' <- checkExp caseExp
+  pExpType <- expType pExp'
+  caseType <- expType caseExp'
+  unify loc (toStructural mt) (toStructural pExpType)
+  unify loc (toStructural ft) (toStructural caseType)
+  return $ CaseLit pExp' caseExp' loc
 
 checkIdent :: IdentBase NoInfo Name -> TermTypeM Ident
 checkIdent (Ident name _ loc) = do

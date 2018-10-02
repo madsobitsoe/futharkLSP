@@ -276,7 +276,6 @@ checkForDuplicateNames = (`evalStateT` mempty) . mapM_ check
         check (RecordPattern fs _) = mapM_ (check . snd) fs
         check (PatternAscription p _ _) = check p
         check EnumPattern{} = return ()
-        check LitPattern{}  = return ()
 
         seen v loc = do
           already <- gets $ M.lookup v

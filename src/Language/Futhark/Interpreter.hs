@@ -17,6 +17,7 @@ module Language.Futhark.Interpreter
   , isEmptyArray
   ) where
 
+import Control.Monad.Trans.Maybe
 import Control.Monad.Free.Church
 import Control.Monad.Except
 import Control.Monad.Reader
@@ -29,6 +30,7 @@ import qualified Data.Map as M
 import qualified Data.Semigroup as Sem
 import Data.Monoid
 import Data.Loc
+import Debug.Trace hiding ( trace )
 
 import Language.Futhark hiding (Value)
 import Futhark.Representation.Primitive (intValue, floatValue)
@@ -90,10 +92,18 @@ data Value = ValuePrim !PrimValue
            | ValueFun (Value -> EvalM Value)
            | ValueEnum Name
 
+instance Show Value where
+  show (ValuePrim v)    = "ValuePrim " ++ show v
+  show (ValueArray a)   = "ValueArray" ++ show a
+  show (ValueRecord m)  = "ValueRecord" ++ show m
+  show (ValueFun _)     = "ValueFun <fun>"
+  show (ValueEnum name) = "ValueEnum" ++ show name
+
 instance Eq Value where
   ValuePrim x == ValuePrim y = x == y
   ValueArray x == ValueArray y = x == y
   ValueRecord x == ValueRecord y = x == y
+  ValueEnum x == ValueEnum y = x == y
   _ == _ = False
 
 instance Pretty Value where
@@ -177,9 +187,14 @@ lookupType = lookupInEnv envType
 -- | A TermValue with a 'Nothing' type annotation is an intrinsic.
 data TermBinding = TermValue (Maybe T.BoundV) Value
                  | TermModule Module
+                 deriving (Show) --TODO : Delete
 
 data Module = Module Env
             | ModuleFun (Module -> EvalM Module)
+
+--TODO: Delete
+instance Show Module where
+  show _ = ""
 
 data Env = Env { envTerm :: M.Map VName TermBinding
                , envType :: M.Map VName T.TypeBinding
@@ -286,6 +301,8 @@ matchPattern' env m (PatternAscription pat td loc) v = do
   case matchValueToType env m t v of
     Left err -> bad loc env err
     Right m' -> matchPattern' env m' pat v
+matchPattern' _ m EnumPattern{} _ = pure m
+
 matchPattern' _ _ pat v =
   error $ "matchPattern': missing case for " ++ pretty pat ++ " and " ++ pretty v
 
@@ -716,33 +733,59 @@ eval env (Assert what e (Info s) loc) = do
   unless cond $ bad loc env s
   eval env e
 
-eval env (VConstr0 c _ _) = return $ ValueEnum c
+eval _ (VConstr0 c _ _) = return $ ValueEnum c
 
-eval env (Match e cs _ _) =
-  do
-  e' <- eval env e
-  case e' of
-    ValueEnum c ->
-      let mi = findIndex (\cEnum -> c == getConstr cEnum) cs
-      in case mi of
-        Just i  -> eval env $ getExpr (cs!!i)
-        Nothing -> fail $ show cs ++ "\n"
-                   ++ show c ++ "No pattern matching expression."
-    v -> do
-      cs' <- mapM (eval env . getPrim) cs
-      let mi = findIndex (v==) cs'
-      case mi of
-        Just i  -> eval env $ getExpr (cs!!i)
-        Nothing -> fail $ show cs
-                   ++ "\n" ++ "No pattern matching expression."
-
-    _           -> fail "Not supported yet."
-  where getConstr (CaseEnum (EnumPattern n _ _) _ _) = n
-        getPrim   (CaseEnum (LitPattern e _ _) _ _)  = e
-        getExpr   (CaseEnum _ e _) = e
-
+eval env (Match e cs _ _) = do
+  v <- eval env e
+  cs' <- mapM (runMaybeT . evalCase v env) cs
+  case catMaybes cs' of
+    []     -> fail "No match found."
+    (v':_) -> return v'
 
 eval _ e = error $ "eval not yet: " ++ show e
+
+evalCase :: Value -> Env -> CaseBase Info VName
+            -> MaybeT EvalM Value
+evalCase v env (CasePat p cExp _) = do
+  pEnv <- valEnv <$> patternMatch env p v
+  lift $ eval pEnv cExp
+evalCase v env (CaseLit lit cExp _) = do
+  vLit <- lift $ eval env lit
+  if vLit == v
+    then lift $ eval env cExp
+    else mzero
+
+patternMatch :: Env -> Pattern -> Value
+             -> MaybeT EvalM (M.Map VName (Maybe T.BoundV, Value))
+patternMatch env = patternMatch' env mempty
+
+patternMatch' :: Env -> M.Map VName (Maybe T.BoundV, Value)
+             -> Pattern -> Value
+             -> MaybeT EvalM (M.Map VName (Maybe T.BoundV, Value))
+patternMatch' env m p@Id{} v = lift $ matchPattern' env m p v
+patternMatch' env m p@Wildcard{} v = lift $ matchPattern' env m p v
+patternMatch' env m p@(EnumPattern c _ _) v@(ValueEnum c')
+  | c == c' = lift $ matchPattern' env m p v
+patternMatch' env m (TuplePattern ps _) (ValueRecord vs)
+  | length ps == length vs' = do
+    foldM (\m' (p',v) -> patternMatch' env m' p' v) m $
+      zip ps (map snd $ sortFields vs)
+    where vs' = sortFields vs
+patternMatch' env m (RecordPattern ps _) (ValueRecord vs)
+  | length ps == length vs' = 
+    foldM (\m' (p,v) -> patternMatch' env m' p v) m $
+    zip (map snd $ sortFields $ M.fromList ps) (map snd $ sortFields vs)
+    where vs' = sortFields vs
+patternMatch' env m (PatternParens p _) v = patternMatch' env m p v
+patternMatch' env m (PatternAscription p td _) v = do
+  t <- lift $ evalType env $ unInfo $ expandedType td
+  case matchValueToType env m t v of
+    Left _   -> mzero  -- TODO : fix this
+    Right m' -> patternMatch' env m' p v
+
+
+  patternMatch' env m p v
+patternMatch' _ _ _ _ = mzero
 
 substituteInModule :: M.Map VName VName -> Module -> Module
 substituteInModule substs = onModule

@@ -300,8 +300,6 @@ instance ASTMappable (PatternBase Info VName) where
     Wildcard <$> (Info <$> mapOnPatternType tv t) <*> pure loc
   astMap tv (EnumPattern name (Info t) loc) =
     EnumPattern name <$> (Info <$> mapOnPatternType tv t) <*> pure loc
-  astMap tv (LitPattern e (Info t) loc) =
-    LitPattern <$> astMap tv e <*> (Info <$> mapOnPatternType tv t) <*> pure loc
 
 instance ASTMappable (FieldBase Info VName) where
   astMap tv (RecordFieldExplicit name e loc) =
@@ -311,8 +309,10 @@ instance ASTMappable (FieldBase Info VName) where
     <*> traverse (mapOnCompType tv) t <*> pure loc
 
 instance ASTMappable (CaseBase Info VName) where
-  astMap tv (CaseEnum pat e loc) =
-    CaseEnum <$> astMap tv pat <*> astMap tv e <*> pure loc
+  astMap tv (CasePat pat e loc) =
+    CasePat <$> astMap tv pat <*> astMap tv e <*> pure loc
+  astMap tv (CaseLit e e' loc) =
+    CaseLit <$> astMap tv e <*> astMap tv e' <*> pure loc
 
 instance ASTMappable a => ASTMappable (Info a) where
   astMap tv = traverse $ astMap tv
