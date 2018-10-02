@@ -300,6 +300,8 @@ instance ASTMappable (PatternBase Info VName) where
     Wildcard <$> (Info <$> mapOnPatternType tv t) <*> pure loc
   astMap tv (EnumPattern name (Info t) loc) =
     EnumPattern name <$> (Info <$> mapOnPatternType tv t) <*> pure loc
+  astMap tv (PatternLit e (Info t) loc) =
+    PatternLit <$> astMap tv e <*> (Info <$> mapOnPatternType tv t) <*>  pure loc
 
 instance ASTMappable (FieldBase Info VName) where
   astMap tv (RecordFieldExplicit name e loc) =

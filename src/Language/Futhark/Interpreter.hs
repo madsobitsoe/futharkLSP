@@ -302,6 +302,7 @@ matchPattern' env m (PatternAscription pat td loc) v = do
     Left err -> bad loc env err
     Right m' -> matchPattern' env m' pat v
 matchPattern' _ m EnumPattern{} _ = pure m
+matchPattern' _ m PatternLit{} _ = pure m
 
 matchPattern' _ _ pat v =
   error $ "matchPattern': missing case for " ++ pretty pat ++ " and " ++ pretty v
@@ -755,6 +756,7 @@ evalCase v env (CaseLit lit cExp _) = do
     then lift $ eval env cExp
     else mzero
 
+-- TODO: Merge this with matchPattern
 patternMatch :: Env -> Pattern -> Value
              -> MaybeT EvalM (M.Map VName (Maybe T.BoundV, Value))
 patternMatch env = patternMatch' env mempty
@@ -767,12 +769,12 @@ patternMatch' env m p@Wildcard{} v = lift $ matchPattern' env m p v
 patternMatch' env m p@(EnumPattern c _ _) v@(ValueEnum c')
   | c == c' = lift $ matchPattern' env m p v
 patternMatch' env m (TuplePattern ps _) (ValueRecord vs)
-  | length ps == length vs' = do
+  | length ps == length vs' =
     foldM (\m' (p',v) -> patternMatch' env m' p' v) m $
-      zip ps (map snd $ sortFields vs)
+    zip ps (map snd $ sortFields vs)
     where vs' = sortFields vs
 patternMatch' env m (RecordPattern ps _) (ValueRecord vs)
-  | length ps == length vs' = 
+  | length ps == length vs' =
     foldM (\m' (p,v) -> patternMatch' env m' p v) m $
     zip (map snd $ sortFields $ M.fromList ps) (map snd $ sortFields vs)
     where vs' = sortFields vs
@@ -782,9 +784,12 @@ patternMatch' env m (PatternAscription p td _) v = do
   case matchValueToType env m t v of
     Left _   -> mzero  -- TODO : fix this
     Right m' -> patternMatch' env m' p v
+patternMatch' env m p@(PatternLit e _ _) v = do
+  v' <- lift $ eval env e
+  if v == v'
+    then lift $ matchPattern' env m p v
+    else mzero
 
-
-  patternMatch' env m p v
 patternMatch' _ _ _ _ = mzero
 
 substituteInModule :: M.Map VName VName -> Module -> Module

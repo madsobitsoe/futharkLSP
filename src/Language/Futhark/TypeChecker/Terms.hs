@@ -622,6 +622,17 @@ checkPattern' (EnumPattern c NoInfo loc) NoneInferred = do
   mustHaveConstr loc c t
   return $ EnumPattern c (Info t) loc
 
+checkPattern' (PatternLit e NoInfo loc) (Ascribed t) = do
+  e' <- checkExp e
+  t' <- expType e'
+  unify loc (toStructural t') (toStructural t)
+  return $ PatternLit e' (Info (vacuousShapeAnnotations t')) loc
+
+checkPattern' (PatternLit e NoInfo loc) NoneInferred = do
+  e' <- checkExp e
+  t' <- expType e'
+  return $ PatternLit e' (Info (vacuousShapeAnnotations t')) loc
+
 bindPatternNames :: PatternBase NoInfo Name -> TermTypeM a -> TermTypeM a
 bindPatternNames = bindSpaced . map asTerm . S.toList . patIdentSet
   where asTerm v = (Term, identName v)
@@ -774,6 +785,7 @@ patternUses :: Pattern -> ([VName], [VName])
 patternUses Id{} = mempty
 patternUses Wildcard{} = mempty
 patternUses EnumPattern{} = mempty
+patternUses PatternLit{} = mempty
 patternUses (PatternParens p _) = patternUses p
 patternUses (TuplePattern ps _) = foldMap patternUses ps
 patternUses (RecordPattern fs _) = foldMap (patternUses . snd) fs

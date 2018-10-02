@@ -719,8 +719,8 @@ Cases : Case  %prec caseprec { [$1] }
 Case :: { CaseBase NoInfo Name }
 Case : case CPattern '->'Exp       { let loc = srcspan $1 $>
                                           in CasePat $2 $> loc }
-     | case CaseLiteral '->' Exp  { let loc =srcspan $1 $>
-                                          in CaseLit $2 $> loc }
+--     | case CaseLiteral '->' Exp  { let loc =srcspan $1 $>
+--                                          in CaseLit $2 $> loc }
 
 CPattern :: { PatternBase NoInfo Name }
 CPattern : CInnerPattern ':' TypeExpDecl { PatternAscription $1 $3 (srcspan $1 $>) }
@@ -741,13 +741,14 @@ CInnerPattern : id                                { let L loc (ID name) = $1 in 
              | '(' CPattern ',' CPatterns1 ')'    { TuplePattern ($2:$4) (srcspan $1 $>) }
              | '{' FieldPatterns '}'              { RecordPattern $2 (srcspan $1 $>) }
              | VConstr0                           { let (name, loc) = $1 in EnumPattern name NoInfo loc }
+             | CaseLiteral                        { PatternLit (fst $1) NoInfo (snd $1) }
 
-CaseLiteral :: { UncheckedExp }
-CaseLiteral : PrimLit        { Literal (fst $1) (snd $1) }
-            | intlit         { let L loc (INTLIT x) = $1 in IntLit x NoInfo loc }
-            | floatlit       { let L loc (FLOATLIT x) = $1 in FloatLit x NoInfo loc }
+CaseLiteral :: { (UncheckedExp, SrcLoc) }
+CaseLiteral : PrimLit        { (Literal (fst $1) (snd $1), snd $1) }
+            | intlit         { let L loc (INTLIT x) = $1 in (IntLit x NoInfo loc, loc) }
+            | floatlit       { let L loc (FLOATLIT x) = $1 in (FloatLit x NoInfo loc, loc) }
             | stringlit      { let L loc (STRINGLIT s) = $1 in
-                        ArrayLit (map (flip Literal loc . SignedValue . Int32Value . fromIntegral . ord) s) NoInfo loc }
+                        (ArrayLit (map (flip Literal loc . SignedValue . Int32Value . fromIntegral . ord) s) NoInfo loc, loc) }
 
 
 LoopForm :: { LoopFormBase NoInfo Name }

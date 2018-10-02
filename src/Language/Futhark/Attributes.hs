@@ -639,6 +639,7 @@ patIdentSet (RecordPattern fs _)      = mconcat $ map (patIdentSet . snd) fs
 patIdentSet Wildcard{}                = mempty
 patIdentSet (PatternAscription p _ _) = patIdentSet p
 patIdentSet EnumPattern{}             = mempty
+patIdentSet PatternLit{}              = mempty
 
 -- | The type of values bound by the pattern.
 patternType :: PatternBase Info VName -> CompType
@@ -649,6 +650,7 @@ patternType (TuplePattern pats _)      = tupleRecord $ map patternType pats
 patternType (RecordPattern fs _)       = Record $ patternType <$> M.fromList fs
 patternType (PatternAscription p _ _)  = patternType p
 patternType (EnumPattern _ (Info t) _) = removeShapeAnnotations t
+patternType (PatternLit _ (Info t) _)  = removeShapeAnnotations t
 
 -- | The type matched by the pattern, including shape declarations if present.
 patternStructType :: PatternBase Info VName -> StructType
