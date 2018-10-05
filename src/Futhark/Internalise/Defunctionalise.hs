@@ -362,9 +362,31 @@ defuncExp (Assert e1 e2 desc loc) = do
   (e2', sv) <- defuncExp e2
   return (Assert e1' e2' desc loc, sv)
 
+defuncExp e@VConstr0{} = return (e, Dynamic $ typeOf e)
+
+defuncExp (Match e cs t loc) = do
+  e'      <- defuncExp' e
+  csPairs <- mapM defuncCase cs
+  let cs' = map fst csPairs
+      sv  = case csPairs of
+              []   -> error "Matches always have at least one case."
+              c':_ -> snd c'
+  return (Match e' cs' t loc, sv)
+  -- TODO: Is this right?
+
 -- | Same as 'defuncExp', except it ignores the static value.
 defuncExp' :: Exp -> DefM Exp
 defuncExp' = fmap fst . defuncExp
+
+defuncCase :: Case -> DefM (Case, StaticVal)
+defuncCase (CasePat p e loc) = do
+  (e', sv) <- defuncExp e
+  let p'  = updatePattern p sv
+  return (CasePat p' e' loc, sv)
+defuncCase (CaseLit eCase e loc) = do
+  eCase'   <- defuncExp' eCase
+  (e', sv) <- defuncExp e
+  return (CaseLit eCase' e' loc, sv)
 
 -- | Defunctionalize the function argument to a SOAC by eta-expanding if
 -- necessary and then defunctionalizing the body of the introduced lambda.

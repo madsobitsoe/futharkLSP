@@ -312,6 +312,7 @@ data ArrayElemTypeBase dim as =
     ArrayPrimElem PrimType as
   | ArrayPolyElem TypeName [TypeArg dim as] as
   | ArrayRecordElem (M.Map Name (RecordArrayElemTypeBase dim as))
+  | ArrayEnumElem [Name] as
   deriving (Eq, Show)
 
 instance Bitraversable ArrayElemTypeBase where

@@ -311,10 +311,16 @@ instance (Eq vn, IsName vn, Annot f) => Pretty (ExpBase f vn) where
     text "loop" <+> spread (map ppr tparams ++ [ppr pat]) <+>
     equals <+> ppr initexp <+> ppr form <+> text "do" </>
     indent 2 (ppr loopbody)
+  pprPrec _ (VConstr0 n _ _) = text "#" <> ppr n
+  pprPrec _ (Match e cs _ _) = text "match" <+> ppr e </> ppr cs
 
 instance (Eq vn, IsName vn, Annot f) => Pretty (FieldBase f vn) where
   ppr (RecordFieldExplicit name e _) = ppr name <> equals <> ppr e
   ppr (RecordFieldImplicit name _ _) = pprName name
+
+instance (Eq vn, IsName vn, Annot f) => Pretty (CaseBase f vn) where
+  ppr (CasePat p e _) = ppr p <+> text "->" <+> ppr e
+  ppr (CaseLit eCase e _) = ppr eCase <+> text "->" <+> ppr e
 
 instance (Eq vn, IsName vn, Annot f) => Pretty (LoopFormBase f vn) where
   ppr (For i ubound) =

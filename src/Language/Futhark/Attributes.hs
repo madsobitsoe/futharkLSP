@@ -94,6 +94,7 @@ module Language.Futhark.Attributes
   , UncheckedValBind
   , UncheckedDec
   , UncheckedProg
+  , UncheckedCase
   )
   where
 
@@ -144,6 +145,7 @@ nestedDims t =
           concatMap typeArgDims targs
         arrayNestedDims (ArrayRecordElem ts) =
           fold (fmap recordArrayElemNestedDims ts)
+        arrayNestedDims ArrayEnumElem{} = mempty
 
         recordArrayElemNestedDims (RecordArrayArrayElem a ds _) =
           arrayNestedDims a <> shapeDims ds
@@ -204,6 +206,7 @@ diet TypeVar{}             = Observe
 diet (Arrow _ _ t1 t2)     = FuncDiet (diet t1) (diet t2)
 diet (Array _ _ Unique)    = Consume
 diet (Array _ _ Nonunique) = Observe
+diet (Enum _)              = Observe
 
 -- | @t `maskAliases` d@ removes aliases (sets them to 'mempty') from
 -- the parts of @t@ that are denoted as 'Consumed' by the 'Diet' @d@.
@@ -251,6 +254,7 @@ peelArray n (Array (ArrayRecordElem ts) shape u)
   where asType (RecordArrayElem (ArrayPrimElem bt _)) = Prim bt
         asType (RecordArrayElem (ArrayPolyElem bt targs als)) = TypeVar als u bt targs
         asType (RecordArrayElem (ArrayRecordElem ts')) = Record $ fmap asType ts'
+        asType (RecordArrayElem (ArrayEnumElem cs _)) = Enum cs
         asType (RecordArrayArrayElem et e_shape _) = Array et e_shape u
 peelArray n (Array et shape u) = do
   shape' <- stripDims n shape
@@ -293,6 +297,8 @@ arrayOfWithAliases (Record ts) as shape u = do
   ts' <- traverse (typeToRecordArrayElem' as) ts
   return $ Array (ArrayRecordElem ts') shape u
 arrayOfWithAliases Arrow{} _ _ _ = Nothing
+arrayOfWithAliases (Enum cs) as shape u  =
+  Just $ Array (ArrayEnumElem cs as) shape u
 
 typeToRecordArrayElem :: Monoid as =>
                          TypeBase dim as
@@ -312,6 +318,8 @@ typeToRecordArrayElem' as (Record ts') =
 typeToRecordArrayElem' _ (Array et shape u) =
   Just $ RecordArrayArrayElem et shape u
 typeToRecordArrayElem' _ Arrow{} = Nothing
+typeToRecordArrayElem' as (Enum cs) =
+  Just $ RecordArrayElem $ ArrayEnumElem cs as
 
 recordArrayElemToType :: Monoid as =>
                          RecordArrayElemTypeBase dim as
@@ -325,6 +333,7 @@ arrayElemToType (ArrayPolyElem bt targs als) = (TypeVar als Nonunique bt targs, 
 arrayElemToType (ArrayRecordElem ts) =
   let ts' = fmap recordArrayElemToType ts
   in (Record $ fmap fst ts', foldMap snd ts')
+arrayElemToType (ArrayEnumElem cs als) = (Enum cs, als)
 
 -- | @stripArray n t@ removes the @n@ outermost layers of the array.
 -- Essentially, it is the type of indexing an array of type @t@ with
@@ -394,6 +403,7 @@ setArrayElemUniqueness (ArrayRecordElem r) u =
           RecordArrayElem $ setArrayElemUniqueness et u
         set (RecordArrayArrayElem et shape e_u) =
           RecordArrayArrayElem (setArrayElemUniqueness et u) shape e_u
+setArrayElemUniqueness (ArrayEnumElem cs as) _ = ArrayEnumElem cs as
 
 -- | @t \`setAliases\` als@ returns @t@, but with @als@ substituted for
 -- any already present aliasing.
@@ -494,7 +504,7 @@ typeOf (ProjectSection _ (Info t) _) =
   removeShapeAnnotations t
 typeOf (IndexSection _ (Info t) _) =
   removeShapeAnnotations t
-typeOf (VConstr0 n (Info t) _)  = t
+typeOf (VConstr0 _ (Info t) _)  = t
 typeOf (Match _ _ (Info t) _) = t
 
 foldFunType :: Monoid as => [TypeBase dim as] -> TypeBase dim as -> TypeBase dim as
@@ -521,7 +531,8 @@ typeVars t =
       mconcat $ typeVarFree tn : map typeArgFree targs
     Array (ArrayRecordElem fields) _ _ ->
       foldMap (typeVars . fst . recordArrayElemToType) fields
-    Enum names -> mempty
+    Array ArrayEnumElem{} _ _ -> mempty
+    Enum{} -> mempty
   where typeVarFree = S.singleton . typeLeaf
         typeArgFree (TypeArgType ta _) = typeVars ta
         typeArgFree TypeArgDim{} = mempty
@@ -548,6 +559,7 @@ returnType (TypeVar () Nonunique t targs) ds args =
 returnType (Arrow _ v t1 t2) ds args =
   Arrow als v (bimap id (const mempty) t1) (returnType t2 ds args)
   where als = foldMap aliases $ zipWith maskAliases args ds
+returnType (Enum cs) _ _ = Enum cs
 
 typeArgReturnType :: TypeArg shape () -> [Diet] -> [CompType]
                   -> TypeArg shape Names
@@ -568,6 +580,10 @@ arrayElemReturnType (ArrayPolyElem bt targs ()) ds args =
   where als = mconcat $ map aliases $ zipWith maskAliases args ds
 arrayElemReturnType (ArrayRecordElem et) ds args =
   ArrayRecordElem $ fmap (\t -> recordArrayElemReturnType t ds args) et
+arrayElemReturnType (ArrayEnumElem cs ()) ds args =
+  ArrayEnumElem cs als
+  where als = mconcat $ map aliases $ zipWith maskAliases args ds
+
 
 recordArrayElemReturnType :: RecordArrayElemTypeBase dim ()
                          -> [Diet]
@@ -584,10 +600,12 @@ concreteType Prim{} = True
 concreteType TypeVar{} = False
 concreteType Arrow{} = False
 concreteType (Record ts) = all concreteType ts
+concreteType Enum{} = True
 concreteType (Array at _ _) = concreteArrayType at
   where concreteArrayType ArrayPrimElem{}      = True
         concreteArrayType ArrayPolyElem{}      = False
         concreteArrayType (ArrayRecordElem ts) = all concreteRecordArrayElem ts
+        concreteArrayType ArrayEnumElem{}      = True
 
         concreteRecordArrayElem (RecordArrayElem et) = concreteArrayType et
         concreteRecordArrayElem (RecordArrayArrayElem et _ _) = concreteArrayType et
@@ -601,6 +619,7 @@ orderZero Array{}         = True
 orderZero (Record fs)     = all orderZero $ M.elems fs
 orderZero TypeVar{}       = True
 orderZero Arrow{}         = False
+orderZero (Enum _)        = True
 
 -- | Extract all the shape names that occur in a given pattern.
 patternDimNames :: PatternBase Info VName -> Names
@@ -611,6 +630,9 @@ patternDimNames (Id _ (Info tp) _)     = typeDimNames tp
 patternDimNames (Wildcard (Info tp) _) = typeDimNames tp
 patternDimNames (PatternAscription p (TypeDecl _ (Info t)) _) =
   patternDimNames p <> typeDimNames t
+patternDimNames (EnumPattern _ (Info tp) _) = typeDimNames tp
+patternDimNames (PatternLit _ (Info tp) _) = typeDimNames tp
+  -- TODO : Does the expression need to be included?
 
 -- | Extract all the shape names that occur in a given type.
 typeDimNames :: TypeBase (DimDecl VName) als -> Names
@@ -1043,3 +1065,6 @@ type UncheckedDec = DecBase NoInfo Name
 
 -- | A Futhark program with no type annotations.
 type UncheckedProg = ProgBase NoInfo Name
+
+-- | A case (of a match expression) wit no type annotations.
+type UncheckedCase = CaseBase NoInfo Name

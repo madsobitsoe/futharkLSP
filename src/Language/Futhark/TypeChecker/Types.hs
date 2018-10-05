@@ -352,6 +352,7 @@ substituteTypes substs ot = case ot of
     Record $ fmap (substituteTypes substs) ts
   Arrow als v t1 t2 ->
     Arrow als v (substituteTypes substs t1) (substituteTypes substs t2)
+  Enum cs -> Enum cs
   where nope = error "substituteTypes: Cannot create array after substitution."
 
         substituteTypesInArrayElem (ArrayPrimElem t ()) =

@@ -2028,7 +2028,7 @@ mustHaveConstr loc c t = do
       | c `elem` cs -> return ()
       | otherwise   -> throwError $ TypeError loc $
                        "Type " ++ pretty (toStructural t) ++
-                       " does not have a" ++ pretty c ++ " constructor."
+                       " does not have a " ++ pretty c ++ " constructor."
     _ -> do unify loc (toStructural t) $ Enum [c]
             return ()
 

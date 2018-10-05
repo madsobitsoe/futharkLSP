@@ -17,6 +17,7 @@ import Data.Semigroup ((<>))
 import Data.List
 import Data.Loc
 import Data.Char (chr)
+import Debug.Trace
 
 import Language.Futhark as E hiding (TypeArg)
 import Language.Futhark.Semantic (Imports)
@@ -837,6 +838,10 @@ internaliseExp desc (E.Project k e (Info rt) _) = do
                Record fs -> map snd $ takeWhile ((/=k) . fst) $ sortFields fs
                t         -> [t]
   take n . drop i' <$> internaliseExp desc e
+
+internaliseExp _ (VConstr0 c (Info (Enum cs)) _) = do
+  let Just i = elemIndex c $ sort cs
+  return [I.Constant $ I.IntValue $ intValue I.Int8 i]
 
 internaliseExp _ e@E.Lambda{} =
   fail $ "internaliseExp: Unexpected lambda at " ++ locStr (srclocOf e)
