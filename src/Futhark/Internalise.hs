@@ -17,7 +17,6 @@ import Data.Semigroup ((<>))
 import Data.List
 import Data.Loc
 import Data.Char (chr)
-import Debug.Trace
 
 import Language.Futhark as E hiding (TypeArg)
 import Language.Futhark.Semantic (Imports)
@@ -793,6 +792,26 @@ internaliseExp desc (E.Stream (E.RedLike o comm lam0) lam arr _) = do
   w <- arraysSize 0 <$> mapM lookupType arrs
   letTupExp' desc $ I.Op $ I.Stream w form lam' arrs
 
+internaliseExp _ (VConstr0 c (Info t) loc) =
+  case t of
+    Enum cs -> do
+      let Just i = elemIndex c $ sort cs
+      return [I.Constant $ I.IntValue $ intValue I.Int8 i]
+    _ -> fail $ "internaliseExp: nonsensical type for enum at "
+                ++ locStr loc ++ ": " ++ pretty t
+
+internaliseExp desc (Match  e cs _ loc) =
+  case cs of
+    (c@(CasePat _ eCase _):cs') -> do
+      bFalse' <- bFalse
+      letTupExp' desc =<< generateCaseIf desc e bFalse' c
+      where bFalse = do
+              patFail' <- internaliseBody patFail
+              foldM (\bf c' -> eBody $ return $ generateCaseIf desc e bf c') patFail' cs'
+            patFail = E.Assert (E.Literal (E.BoolValue False) noLoc)
+                        eCase (Info "pattern match failure") loc
+    [] -> fail $ "internaliseExp: match with no cases at: " ++ locStr loc
+
 -- The "interesting" cases are over, now it's mostly boilerplate.
 
 internaliseExp _ (E.Literal v _) =
@@ -839,10 +858,6 @@ internaliseExp desc (E.Project k e (Info rt) _) = do
                t         -> [t]
   take n . drop i' <$> internaliseExp desc e
 
-internaliseExp _ (VConstr0 c (Info (Enum cs)) _) = do
-  let Just i = elemIndex c $ sort cs
-  return [I.Constant $ I.IntValue $ intValue I.Int8 i]
-
 internaliseExp _ e@E.Lambda{} =
   fail $ "internaliseExp: Unexpected lambda at " ++ locStr (srclocOf e)
 
@@ -860,6 +875,48 @@ internaliseExp _ e@E.ProjectSection{} =
 
 internaliseExp _ e@E.IndexSection{} =
   fail $ "internaliseExp: Unexpected index section at " ++ locStr (srclocOf e)
+
+boolOp :: Name -> E.Exp -> E.Exp -> E.Exp
+boolOp op l r = E.BinOp (qualName (VName op 0)) (Info $ vacuousShapeAnnotations ft)
+                (l, sType l) (r, sType r) (Info (E.Prim E.Bool)) noLoc
+  where sType e = Info $ toStruct $ vacuousShapeAnnotations $ E.typeOf e
+        arrow   = Arrow S.empty Nothing
+        ft      = E.typeOf l `arrow` E.typeOf r `arrow` E.Prim E.Bool
+
+generateCond :: E.Pattern -> E.Exp -> E.Exp
+generateCond p e = foldr (boolOp "&&") (E.Literal (E.BoolValue True) noLoc) conds
+  where conds = map (\(condTemplate, _) -> condTemplate e) $ generateCond' p
+
+        generateCond' :: E.Pattern -> [(E.Exp -> E.Exp, CompType)]
+        generateCond' (E.TuplePattern ps _) = concatMap instCond allTemplates
+          where allTemplates = zip (map generateCond' ps) ([1..] :: [Integer])
+                projectTemplate i (condTemplate, t) =
+                  (\e' -> condTemplate $ Project (nameFromString (show i)) e' (Info t) noLoc, t)
+                instCond (condTemplates, i) = map (projectTemplate i) condTemplates
+        generateCond' (E.RecordPattern fs loc) =
+          generateCond' $ E.TuplePattern (map snd $ sortFields $ M.fromList fs) loc
+        generateCond' (E.PatternParens p' _) = generateCond' p'
+        generateCond' E.Id{} = mempty
+        generateCond' E.Wildcard{} = mempty
+        generateCond' (E.PatternAscription p' _ _) = generateCond' p'
+        generateCond' (E.EnumPattern c (Info t) loc ) =
+          let compT = removeShapeAnnotations t
+          in [(boolOp "==" (VConstr0 c (Info compT) loc), compT)]
+        generateCond' (E.PatternLit ePat (Info t) _) =
+          [(boolOp "==" ePat, removeShapeAnnotations t)]
+
+generateCaseIf :: String -> E.Exp -> I.Body -> Case -> InternaliseM I.Exp
+generateCaseIf desc e bFail (CasePat p eCase loc) = do
+  ses <- internaliseExp desc e
+  t <- I.staticShapes <$> mapM I.subExpType ses
+  eCase' <- stmPattern [] p t $ \cm pat_names match -> do
+      mapM_ (uncurry (internaliseDimConstant loc)) cm
+      ses' <- match loc ses
+      forM_ (zip pat_names ses') $ \(v,se) ->
+        letBindNames_ [v] $ I.BasicOp $ I.SubExp se
+      internaliseBody eCase
+  let cond = BasicOp . SubExp <$> internaliseExp1 "cond" (generateCond p e)
+  eIf cond (return eCase') (return bFail)
 
 internaliseSlice :: SrcLoc
                  -> [SubExp]
@@ -1691,6 +1748,8 @@ typeExpForError cm (E.TEApply t arg _) = do
   arg' <- case arg of TypeArgExpType argt -> typeExpForError cm argt
                       TypeArgExpDim d _   -> pure <$> dimDeclForError cm d
   return $ t' ++ [" "] ++ arg'
+typeExpForError _ (E.TEEnum cs _) =
+  return [ErrorString $ pretty cs]
 
 dimDeclForError :: ConstParams -> E.DimDecl VName -> InternaliseM (ErrorMsgPart SubExp)
 dimDeclForError cm (NamedDim d) = do

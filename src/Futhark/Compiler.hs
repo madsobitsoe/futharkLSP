@@ -26,7 +26,6 @@ import System.Exit (exitWith, ExitCode(..))
 import System.IO
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
-import Debug.Trace
 
 import Futhark.Internalise
 import Futhark.Pipeline

@@ -342,6 +342,7 @@ instance (Eq vn, IsName vn, Annot f) => Pretty (PatternBase f vn) where
   ppr (Wildcard t _)            = case unAnnot t of
                                     Just t' -> parens $ text "_" <> colon <+> ppr t'
                                     Nothing -> text "_"
+  ppr (PatternLit e _ _) = ppr e
 
 ppAscription :: (Eq vn, IsName vn, Annot f) => Maybe (TypeDeclBase f vn) -> Doc
 ppAscription Nothing  = mempty
