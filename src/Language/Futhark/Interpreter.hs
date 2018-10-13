@@ -750,11 +750,6 @@ evalCase :: Value -> Env -> CaseBase Info VName
 evalCase v env (CasePat p cExp _) = do
   pEnv <- valEnv <$> patternMatch env p v
   lift $ eval pEnv cExp
-evalCase v env (CaseLit lit cExp _) = do
-  vLit <- lift $ eval env lit
-  if vLit == v
-    then lift $ eval env cExp
-    else mzero
 
 -- TODO: Merge this with matchPattern
 patternMatch :: Env -> Pattern -> Value

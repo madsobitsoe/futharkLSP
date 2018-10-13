@@ -383,10 +383,6 @@ defuncCase sv (CasePat p e loc) = do
       env = matchPatternSV p sv
   (e', sv') <- localEnv env $ defuncExp e
   return (CasePat p' e' loc, sv')
-defuncCase sv (CaseLit eCase e loc) = do
-  eCase'   <- defuncExp' eCase
-  (e', sv) <- defuncExp e
-  return (CaseLit eCase' e' loc, sv)
 
 -- | Defunctionalize the function argument to a SOAC by eta-expanding if
 -- necessary and then defunctionalizing the body of the introduced lambda.

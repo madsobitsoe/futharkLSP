@@ -719,8 +719,6 @@ Cases : Case  %prec caseprec { [$1] }
 Case :: { CaseBase NoInfo Name }
 Case : case CPattern '->'Exp       { let loc = srcspan $1 $>
                                           in CasePat $2 $> loc }
---     | case CaseLiteral '->' Exp  { let loc =srcspan $1 $>
---                                          in CaseLit $2 $> loc }
 
 CPattern :: { PatternBase NoInfo Name }
 CPattern : CInnerPattern ':' TypeExpDecl { PatternAscription $1 $3 (srcspan $1 $>) }

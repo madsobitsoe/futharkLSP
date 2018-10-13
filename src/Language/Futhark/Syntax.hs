@@ -778,13 +778,11 @@ instance Located (FieldBase f vn) where
 
 -- | A case in a match expression.
 data CaseBase f vn = CasePat (PatternBase f vn) (ExpBase f vn) SrcLoc
-                   | CaseLit (ExpBase f vn) (ExpBase f vn) SrcLoc
 
 deriving instance Showable f vn => Show (CaseBase f vn)
 
 instance Located (CaseBase f vn) where
   locOf (CasePat _ _ loc) = locOf loc
-  locOf (CaseLit _ _ loc) = locOf loc
 
 -- | Whether the loop is a @for@-loop or a @while@-loop.
 data LoopFormBase f vn = For (IdentBase f vn) (ExpBase f vn)

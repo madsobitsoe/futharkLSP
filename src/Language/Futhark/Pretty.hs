@@ -320,7 +320,6 @@ instance (Eq vn, IsName vn, Annot f) => Pretty (FieldBase f vn) where
 
 instance (Eq vn, IsName vn, Annot f) => Pretty (CaseBase f vn) where
   ppr (CasePat p e _) = ppr p <+> text "->" <+> ppr e
-  ppr (CaseLit eCase e _) = ppr eCase <+> text "->" <+> ppr e
 
 instance (Eq vn, IsName vn, Annot f) => Pretty (LoopFormBase f vn) where
   ppr (For i ubound) =

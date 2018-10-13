@@ -1384,7 +1384,6 @@ mustHaveSameType loc mt (c:cs) = do
   cs'<- mapM (checkCase mt ft) cs
   return (ft, c':cs')
   where caseExp (CasePat _ cExp _) = cExp
-        caseExp (CaseLit _ cExp _) = cExp
 
 checkCase :: CompType -> CompType -> CaseBase NoInfo Name -> TermTypeM (CaseBase Info VName)
 checkCase mt ft (CasePat p caseExp loc) =
@@ -1394,14 +1393,6 @@ checkCase mt ft (CasePat p caseExp loc) =
     caseType <- expType caseExp'
     unify loc (toStructural ft) (toStructural caseType)
     return $ CasePat p' caseExp' loc
-checkCase mt ft (CaseLit pExp caseExp loc) = do
-  pExp'    <- checkExp pExp
-  caseExp' <- checkExp caseExp
-  pExpType <- expType pExp'
-  caseType <- expType caseExp'
-  unify loc (toStructural mt) (toStructural pExpType)
-  unify loc (toStructural ft) (toStructural caseType)
-  return $ CaseLit pExp' caseExp' loc
 
 checkIdent :: IdentBase NoInfo Name -> TermTypeM Ident
 checkIdent (Ident name _ loc) = do

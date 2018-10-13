@@ -378,10 +378,6 @@ transformCase :: Case -> MonoM Case
 transformCase (CasePat p e loc) = do
   (p', rr) <- expandRecordPattern p
   CasePat <$> pure p' <*> withRecordReplacements rr (transformExp e) <*> pure loc
-transformCase (CaseLit eCase e loc) = do
-  CaseLit <$> transformExp eCase <*> transformExp e <*> pure loc
-
-
 
 transformDimIndex :: DimIndexBase Info VName -> MonoM (DimIndexBase Info VName)
 transformDimIndex (DimFix e) = DimFix <$> transformExp e
