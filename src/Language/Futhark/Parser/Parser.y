@@ -738,7 +738,6 @@ CInnerPattern : id                                { let L loc (ID name) = $1 in 
              | '(' CPattern ')'                   { PatternParens $2 (srcspan $1 $>) }
              | '(' CPattern ',' CPatterns1 ')'    { TuplePattern ($2:$4) (srcspan $1 $>) }
              | '{' FieldPatterns '}'              { RecordPattern $2 (srcspan $1 $>) }
-             | VConstr0                           { let (name, loc) = $1 in EnumPattern name NoInfo loc }
              | CaseLiteral                        { PatternLit (fst $1) NoInfo (snd $1) }
 
 CaseLiteral :: { (UncheckedExp, SrcLoc) }
@@ -747,7 +746,7 @@ CaseLiteral : PrimLit        { (Literal (fst $1) (snd $1), snd $1) }
             | floatlit       { let L loc (FLOATLIT x) = $1 in (FloatLit x NoInfo loc, loc) }
             | stringlit      { let L loc (STRINGLIT s) = $1 in
                         (ArrayLit (map (flip Literal loc . SignedValue . Int32Value . fromIntegral . ord) s) NoInfo loc, loc) }
-
+       | VConstr0       { (VConstr0 (fst $1) NoInfo (snd $1), snd $1) }
 
 LoopForm :: { LoopFormBase NoInfo Name }
 LoopForm : for VarId '<' Exp

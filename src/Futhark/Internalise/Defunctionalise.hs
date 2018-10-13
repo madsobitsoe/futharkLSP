@@ -602,7 +602,6 @@ envFromPattern pat = case pat of
   Id vn (Info t) _        -> M.singleton vn $ Dynamic $ removeShapeAnnotations t
   Wildcard _ _            -> mempty
   PatternAscription p _ _ -> envFromPattern p
-  EnumPattern{}           -> mempty
   PatternLit{}            -> mempty
 
 -- | Create an environment that binds the shape parameters.
@@ -734,7 +733,6 @@ updatePattern (PatternAscription pat tydecl loc) sv
   | orderZero . unInfo $ expandedType tydecl =
       PatternAscription (updatePattern pat sv) tydecl loc
   | otherwise = updatePattern pat sv
-updatePattern p@EnumPattern{} _ = p
 updatePattern p@PatternLit{} _ = p
 updatePattern pat (Dynamic t) = updatePattern pat (svFromType t)
 updatePattern pat sv =

@@ -459,7 +459,6 @@ expandRecordPattern (Wildcard t loc) = return (Wildcard t loc, mempty)
 expandRecordPattern (PatternAscription pat td loc) = do
   (pat', rr) <- expandRecordPattern pat
   return (PatternAscription pat' td loc, rr)
-expandRecordPattern (EnumPattern n t loc) = return (EnumPattern n t loc, mempty)
 expandRecordPattern (PatternLit e t loc) = return (PatternLit e t loc, mempty)
 
 -- | Monomorphize a polymorphic function at the types given in the instance
@@ -534,7 +533,6 @@ substPattern f pat = case pat of
   Id vn (Info tp) loc         -> Id vn (Info $ f tp) loc
   Wildcard (Info tp) loc      -> Wildcard (Info $ f tp) loc
   PatternAscription p td loc  -> PatternAscription (substPattern f p) td loc
-  EnumPattern n (Info tp) loc -> EnumPattern n (Info $ f tp) loc
   PatternLit e (Info tp) loc  -> PatternLit e (Info $ f tp) loc
 
 toPolyBinding :: ValBind -> PolyBinding

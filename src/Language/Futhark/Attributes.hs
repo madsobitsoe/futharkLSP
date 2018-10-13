@@ -630,7 +630,6 @@ patternDimNames (Id _ (Info tp) _)     = typeDimNames tp
 patternDimNames (Wildcard (Info tp) _) = typeDimNames tp
 patternDimNames (PatternAscription p (TypeDecl _ (Info t)) _) =
   patternDimNames p <> typeDimNames t
-patternDimNames (EnumPattern _ (Info tp) _) = typeDimNames tp
 patternDimNames (PatternLit _ (Info tp) _) = typeDimNames tp
   -- TODO : Does the expression need to be included?
 
@@ -660,7 +659,6 @@ patIdentSet (TuplePattern pats _)     = mconcat $ map patIdentSet pats
 patIdentSet (RecordPattern fs _)      = mconcat $ map (patIdentSet . snd) fs
 patIdentSet Wildcard{}                = mempty
 patIdentSet (PatternAscription p _ _) = patIdentSet p
-patIdentSet EnumPattern{}             = mempty
 patIdentSet PatternLit{}              = mempty
 
 -- | The type of values bound by the pattern.
@@ -671,7 +669,6 @@ patternType (Id _ (Info t) _)          = removeShapeAnnotations t
 patternType (TuplePattern pats _)      = tupleRecord $ map patternType pats
 patternType (RecordPattern fs _)       = Record $ patternType <$> M.fromList fs
 patternType (PatternAscription p _ _)  = patternType p
-patternType (EnumPattern _ (Info t) _) = removeShapeAnnotations t
 patternType (PatternLit _ (Info t) _)  = removeShapeAnnotations t
 
 -- | The type matched by the pattern, including shape declarations if present.

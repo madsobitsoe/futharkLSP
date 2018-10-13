@@ -301,7 +301,6 @@ matchPattern' env m (PatternAscription pat td loc) v = do
   case matchValueToType env m t v of
     Left err -> bad loc env err
     Right m' -> matchPattern' env m' pat v
-matchPattern' _ m EnumPattern{} _ = pure m
 matchPattern' _ m PatternLit{} _ = pure m
 
 matchPattern' _ _ pat v =
@@ -761,8 +760,6 @@ patternMatch' :: Env -> M.Map VName (Maybe T.BoundV, Value)
              -> MaybeT EvalM (M.Map VName (Maybe T.BoundV, Value))
 patternMatch' env m p@Id{} v = lift $ matchPattern' env m p v
 patternMatch' env m p@Wildcard{} v = lift $ matchPattern' env m p v
-patternMatch' env m p@(EnumPattern c _ _) v@(ValueEnum c')
-  | c == c' = lift $ matchPattern' env m p v
 patternMatch' env m (TuplePattern ps _) (ValueRecord vs)
   | length ps == length vs' =
     foldM (\m' (p',v) -> patternMatch' env m' p' v) m $

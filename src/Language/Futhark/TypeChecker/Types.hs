@@ -275,7 +275,6 @@ checkForDuplicateNames = (`evalStateT` mempty) . mapM_ check
         check (TuplePattern ps _) = mapM_ check ps
         check (RecordPattern fs _) = mapM_ (check . snd) fs
         check (PatternAscription p _ _) = check p
-        check EnumPattern{} = return ()
         check PatternLit{} = return ()
 
         seen v loc = do

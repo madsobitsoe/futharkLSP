@@ -613,15 +613,6 @@ checkPattern' (PatternAscription p (TypeDecl t NoInfo) loc) maybe_outer_t = do
       pure (TypeDecl t' (Info st)) <*> pure loc
  where unifyUniqueness u1 u2 = if u2 `subuniqueOf` u1 then Just u1 else Nothing
 
-checkPattern' (EnumPattern c NoInfo loc) (Ascribed t) = do
-  mustHaveConstr loc c t
-  return $ EnumPattern c (Info t) loc
-
-checkPattern' (EnumPattern c NoInfo loc) NoneInferred = do
-  t <- newTypeVar loc "t"
-  mustHaveConstr loc c t
-  return $ EnumPattern c (Info t) loc
-
 checkPattern' (PatternLit e NoInfo loc) (Ascribed t) = do
   e' <- checkExp e
   t' <- expType e'
@@ -784,7 +775,6 @@ checkShapeParamUses tps ps = do
 patternUses :: Pattern -> ([VName], [VName])
 patternUses Id{} = mempty
 patternUses Wildcard{} = mempty
-patternUses EnumPattern{} = mempty
 patternUses PatternLit{} = mempty
 patternUses (PatternParens p _) = patternUses p
 patternUses (TuplePattern ps _) = foldMap patternUses ps

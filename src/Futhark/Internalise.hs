@@ -899,9 +899,6 @@ generateCond p e = foldr (boolOp "&&") (E.Literal (E.BoolValue True) noLoc) cond
         generateCond' E.Id{} = mempty
         generateCond' E.Wildcard{} = mempty
         generateCond' (E.PatternAscription p' _ _) = generateCond' p'
-        generateCond' (E.EnumPattern c (Info t) loc ) =
-          let compT = removeShapeAnnotations t
-          in [(boolOp "==" (VConstr0 c (Info compT) loc), compT)]
         generateCond' (E.PatternLit ePat (Info t) _) =
           [(boolOp "==" ePat, removeShapeAnnotations t)]
 
