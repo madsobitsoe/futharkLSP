@@ -127,6 +127,8 @@ internaliseTypeM orig_t =
           return [I.Prim $ internalisePrimType bt]
         internaliseElemType (E.ArrayRecordElem elemts) =
           concat <$> mapM (internaliseRecordElem . snd) (E.sortFields elemts)
+        internaliseElemType (E.ArrayEnumElem _ _) =
+          return [I.Prim $ I.IntType I.Int8]
 
         internaliseRecordElem (E.RecordArrayElem et) =
           internaliseElemType et

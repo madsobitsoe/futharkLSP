@@ -97,6 +97,7 @@ import           Data.Ord
 import qualified Data.Set                         as S
 import           Data.Traversable
 import qualified Data.Semigroup as Sem
+import           Data.List
 import           Prelude
 
 import           Futhark.Representation.Primitive (FloatType (..),
@@ -322,6 +323,8 @@ instance Bitraversable ArrayElemTypeBase where
     ArrayPolyElem t <$> traverse (bitraverse f g) args <*> g as
   bitraverse f g (ArrayRecordElem fs) =
     ArrayRecordElem <$> traverse (bitraverse f g) fs
+  bitraverse _ g (ArrayEnumElem cs as) =
+    ArrayEnumElem cs <$> g as
 
 instance Bifunctor ArrayElemTypeBase where
   bimap = bimapDefault
@@ -349,7 +352,7 @@ instance (Eq dim, Eq as) => Eq (TypeBase dim as) where
   Record x1 == Record x2 = x1 == x2
   TypeVar _ u1 x1 y1 == TypeVar _ u2 x2 y2 = u1 == u2 && x1 == x2 && y1 == y2
   Arrow _ _ x1 y1 == Arrow _ _ x2 y2 = x1 == x2 && y1 == y2
-  Enum ns1 == Enum ns2 = ns1 == ns2 -- TODO: fix.
+  Enum ns1 == Enum ns2 = sort ns1 == sort ns2
   _ == _ = False
 
 instance Bitraversable TypeBase where

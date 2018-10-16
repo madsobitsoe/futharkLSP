@@ -122,6 +122,8 @@ instance Pretty (ShapeDecl dim) => Pretty (ArrayElemTypeBase dim as) where
     | otherwise =
         braces (commasep $ map ppField $ M.toList fs)
     where ppField (name, t) = text (nameToString name) <> colon <+> ppr t
+  ppr (ArrayEnumElem cs _) =
+    cat $ punctuate (text " | ") $ map ((text "#" <>) . ppr) $ cs
 
 instance Pretty (ShapeDecl dim) => Pretty (TypeBase dim as) where
   ppr (Prim et) = ppr et
@@ -138,8 +140,8 @@ instance Pretty (ShapeDecl dim) => Pretty (TypeBase dim as) where
     parens (pprName v <> colon <+> ppr t1) <+> text "->" <+> ppr t2
   ppr (Arrow _ Nothing t1 t2) =
     ppr t1 <+> text "->" <+> ppr t2
-  ppr (Enum names) =
-    cat . punctuate (text " | ") . map ((text "#" <>) . ppr) $ names
+  ppr (Enum cs) =
+    cat $ punctuate (text " | ") $ map ((text "#" <>) . ppr) $ cs
 
 instance Pretty (ShapeDecl dim) => Pretty (TypeArg dim as) where
   ppr (TypeArgDim d _) = ppr $ ShapeDecl [d]
@@ -156,6 +158,8 @@ instance (Eq vn, IsName vn) => Pretty (TypeExp vn) where
   ppr (TEArrow (Just v) t1 t2 _) = parens v' <+> text "->" <+> ppr t2
     where v' = pprName v <> colon <+> ppr t1
   ppr (TEArrow Nothing t1 t2 _) = ppr t1 <+> text "->" <+> ppr t2
+  ppr (TEEnum cs _) =
+    cat $ punctuate (text " | ") $ map ((text "#" <>) . ppr) $ cs
 
 instance (Eq vn, IsName vn) => Pretty (TypeArgExp vn) where
   ppr (TypeArgExpDim d _) = ppr $ ShapeDecl [d]

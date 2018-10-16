@@ -196,7 +196,7 @@ instance ASTMappable (TypeExp VName) where
     TEApply <$> astMap tv t1 <*> astMap tv t2 <*> pure loc
   astMap tv (TEArrow v t1 t2 loc) =
     TEArrow v <$> astMap tv t1 <*> astMap tv t2 <*> pure loc
-  astMap tv te@(TEEnum names loc) = pure te
+  astMap _ te@TEEnum{} = pure te
 
 instance ASTMappable (TypeArgExp VName) where
   astMap tv (TypeArgExpDim dim loc) =
@@ -247,6 +247,8 @@ traverseArrayElemType f g h (ArrayPolyElem t args as) =
   ArrayPolyElem <$> f t <*> traverse (traverseTypeArg f g h) args <*> h as
 traverseArrayElemType f g h (ArrayRecordElem fs) =
   ArrayRecordElem <$> traverse (traverseRecordArrayElemType f g h) fs
+traverseArrayElemType _ _ h (ArrayEnumElem cs as) =
+  ArrayEnumElem cs <$> h as
 
 traverseRecordArrayElemType :: Applicative f =>
                                TypeTraverser f RecordArrayElemTypeBase dim1 als1 dim2 als2

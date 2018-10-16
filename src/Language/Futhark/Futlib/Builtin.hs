@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -Wwarn #-}
 -- | The Futhark prelude embedded into the Futhark compiler.  This
 -- means we do not have to parse and type-check it whenever we compile
 -- a Futhark program.

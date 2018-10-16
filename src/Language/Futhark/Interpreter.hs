@@ -30,7 +30,6 @@ import qualified Data.Map as M
 import qualified Data.Semigroup as Sem
 import Data.Monoid
 import Data.Loc
-import Debug.Trace hiding ( trace )
 
 import Language.Futhark hiding (Value)
 import Futhark.Representation.Primitive (intValue, floatValue)

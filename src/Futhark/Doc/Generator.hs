@@ -404,6 +404,8 @@ typeHtml t = case t of
         parens (vnameHtml v <> ": " <> t1') <> " -> " <> t2'
       Nothing ->
         t1' <> " -> " <> t2'
+  Enum cs ->
+    return $ pipes $ map (("#"<>) . renderName) cs
 
 prettyElem :: ArrayElemTypeBase (DimDecl VName) () -> DocM Html
 prettyElem (ArrayPrimElem et _) = return $ primTypeHtml et
@@ -418,6 +420,9 @@ prettyElem (ArrayRecordElem fs)
   where ppField (name, tp) = do
           tp' <- prettyRecordElem tp
           return $ toHtml (nameToString name) <> ": " <> tp'
+prettyElem (ArrayEnumElem cs _ ) =
+  return $ pipes $ map (("#"<>) . renderName) cs
+
 
 prettyRecordElem :: RecordArrayElemTypeBase (DimDecl VName) () -> DocM Html
 prettyRecordElem (RecordArrayElem et) = prettyElem et
@@ -529,6 +534,8 @@ typeExpHtml e = case e of
         parens (vnameHtml v <> ": " <> t1') <> " -> " <> t2'
       Nothing ->
         t1' <> " -> " <> t2'
+  TEEnum cs _ ->
+    return $ pipes $ map (("#"<>) . renderName) cs
 
 qualNameHtml :: QualName VName -> DocM Html
 qualNameHtml (QualName names vname@(VName name tag)) =

@@ -67,9 +67,8 @@ unifyTypesU uf (Record ts1) (Record ts2)
       (M.intersectionWith (,) ts1 ts2)
 unifyTypesU uf (Arrow as1 mn1 t1 t1') (Arrow as2 _ t2 t2') =
   Arrow (as1 <> as2) mn1 <$> unifyTypesU (flip uf) t1 t2 <*> unifyTypesU uf t1' t2'
-unifyTypesU uf (Enum ns1) (Enum ns2)
-  | sort ns1 == sort ns2 =
-    Just $ Enum ns1
+unifyTypesU _ e1@Enum{} e2@Enum{}
+  | e1 == e2 = Just e1
 unifyTypesU _ _ _ = Nothing
 
 unifyTypeArgs :: (Monoid als, Eq als, ArrayDim dim) =>
@@ -192,6 +191,7 @@ checkTypeExp (TEUnique t loc) = do
         mayContainArray (Record fs) = any mayContainArray fs
         mayContainArray TypeVar{} = True
         mayContainArray Arrow{} = False
+        mayContainArray Enum{} = False
 checkTypeExp (TEArrow (Just v) t1 t2 loc) = do
   (t1', st1, _) <- checkTypeExp t1
   bindSpaced [(Term, v)] $ do
@@ -366,6 +366,8 @@ substituteTypes substs ot = case ot of
           Record ts'
           where ts' = fmap (substituteTypes substs .
                             fst . recordArrayElemToType) ts
+        substituteTypesInArrayElem (ArrayEnumElem cs ()) =
+          Enum cs
 
         substituteInTypeArg (TypeArgDim d loc) =
           TypeArgDim (substituteInDim d) loc
@@ -515,6 +517,7 @@ substTypesAny lookupSubst ot = case ot of
         subsArrayElem (ArrayRecordElem ts) =
           let ts' = fmap recordArrayElemToType ts
           in (Record $ fmap (substTypesAny lookupSubst . fst) ts', foldMap snd ts')
+        subsArrayElem (ArrayEnumElem cs as) = (Enum cs, as)
 
         subsTypeArg (TypeArgType t loc) =
           TypeArgType (substTypesAny lookupSubst t) loc

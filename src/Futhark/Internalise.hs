@@ -17,6 +17,8 @@ import Data.Semigroup ((<>))
 import Data.List
 import Data.Loc
 import Data.Char (chr)
+import Data.Maybe
+import Debug.Trace
 
 import Language.Futhark as E hiding (TypeArg)
 import Language.Futhark.Semantic (Imports)
@@ -46,6 +48,7 @@ internaliseProg always_safe prog = do
   prog_decs' <- Monomorphise.transformProg prog_decs
   prog_decs'' <- Defunctionalise.transformProg prog_decs'
   prog' <- fmap (fmap I.Prog) $ runInternaliseM always_safe $ internaliseValBinds prog_decs''
+  --traceM $ show prog'
   traverse I.renameProg prog'
 
 internaliseValBinds :: [E.ValBind] -> InternaliseM ()
@@ -194,7 +197,10 @@ internaliseIdent (E.Ident name (Info tp) loc) =
                        " at " ++ locStr loc ++ "."
 
 internaliseBody :: E.Exp -> InternaliseM Body
-internaliseBody e = insertStmsM $ resultBody <$> internaliseExp "res" e
+internaliseBody e = do
+  foo <- insertStmsM $ resultBody <$> internaliseExp "res" e
+  --traceM $ show foo
+  return foo
 
 internaliseBodyStms :: E.Exp -> ([SubExp] -> InternaliseM (Body, a))
                     -> InternaliseM (Body, a)
@@ -839,23 +845,32 @@ internaliseExp desc (E.If ce te fe _ _) =
 
 -- Builtin operators are handled specially because they are
 -- overloaded.
-internaliseExp desc (E.BinOp op _ (xe,_) (ye,_) _ loc)
-  | Just internalise <- isOverloadedFunction op [xe, ye] loc =
+internaliseExp desc e@(E.BinOp op _ (xe,_) (ye,_) _ loc)
+  | Just internalise <- isOverloadedFunction op [xe, ye] loc = do
+      traceM $ "from E.BinOp: " ++ pretty e
       internalise desc
 
 -- User-defined operators are just the same as a function call.
 internaliseExp desc (E.BinOp op (Info t) (xarg, Info xt) (yarg, Info yt) _ loc) =
   internaliseExp desc $
-  E.Apply (E.Apply (E.Var op (Info t) loc) xarg (Info $ E.diet xt)
+   E.Apply (E.Apply (E.Var op (Info t) loc) xarg (Info $ E.diet xt)
            (Info $ foldFunType [E.fromStruct yt] t) loc)
           yarg (Info $ E.diet yt) (Info t) loc
 
-internaliseExp desc (E.Project k e (Info rt) _) = do
+internaliseExp desc e'@(E.Project k e (Info rt) _) = do
   n <- internalisedTypeSize $ rt `setAliases` ()
   i' <- fmap sum $ mapM internalisedTypeSize $
         case E.typeOf e `setAliases` () of
                Record fs -> map snd $ takeWhile ((/=k) . fst) $ sortFields fs
                t         -> [t]
+  foo <- internaliseExp desc e
+  traceM $  "whoop e':" ++"\n" ++ pretty e' ++ "\n"
+            ++ "unpretty e': " ++ show e' ++ "\n"
+            ++ "e: " ++ show e ++ "\n"
+            ++ "foo: \n" ++ show foo
+            ++ "\n n: \n" ++ show n
+            ++ "\n i': \n" ++ show i' ++ "\n"
+            ++ "dropped/taken foo: " ++ show (take n $ drop i' foo)
   take n . drop i' <$> internaliseExp desc e
 
 internaliseExp _ e@E.Lambda{} =
@@ -877,7 +892,7 @@ internaliseExp _ e@E.IndexSection{} =
   fail $ "internaliseExp: Unexpected index section at " ++ locStr (srclocOf e)
 
 boolOp :: Name -> E.Exp -> E.Exp -> E.Exp
-boolOp op l r = E.BinOp (qualName (VName op 0)) (Info $ vacuousShapeAnnotations ft)
+boolOp op l r = E.BinOp (qualName (VName op 292)) (Info $ vacuousShapeAnnotations ft)
                 (l, sType l) (r, sType r) (Info (E.Prim E.Bool)) noLoc
   where sType e = Info $ toStruct $ vacuousShapeAnnotations $ E.typeOf e
         arrow   = Arrow S.empty Nothing
@@ -885,22 +900,28 @@ boolOp op l r = E.BinOp (qualName (VName op 0)) (Info $ vacuousShapeAnnotations 
 
 generateCond :: E.Pattern -> E.Exp -> E.Exp
 generateCond p e = foldr (boolOp "&&") (E.Literal (E.BoolValue True) noLoc) conds
-  where conds = map (\(condTemplate, _) -> condTemplate e) $ generateCond' p
+  where conds = mapMaybe ((<*> pure e) . fst) $ generateCond' p
 
-        generateCond' :: E.Pattern -> [(E.Exp -> E.Exp, CompType)]
+        generateCond' :: E.Pattern -> [(Maybe (E.Exp -> E.Exp), CompType)]
         generateCond' (E.TuplePattern ps _) = concatMap instCond allTemplates
           where allTemplates = zip (map generateCond' ps) ([1..] :: [Integer])
-                projectTemplate i (condTemplate, t) =
-                  (\e' -> condTemplate $ Project (nameFromString (show i)) e' (Info t) noLoc, t)
+                field ([],_)         = error "empty pattern"
+                field ((_, t):_, i)  = (nameFromString $ show i, t)
+                t' = Record $ M.fromList $ map field allTemplates
+                projectTemplate _ (Nothing, _) = (Nothing, t')
+                projectTemplate i (Just condTemplate, t) =
+                  (Just (\e' -> condTemplate $ Project (nameFromString (show i)) e' (Info t) noLoc), t')
                 instCond (condTemplates, i) = map (projectTemplate i) condTemplates
         generateCond' (E.RecordPattern fs loc) =
           generateCond' $ E.TuplePattern (map snd $ sortFields $ M.fromList fs) loc
         generateCond' (E.PatternParens p' _) = generateCond' p'
-        generateCond' E.Id{} = mempty
-        generateCond' E.Wildcard{} = mempty
+        generateCond' (E.Id _ (Info t) _) =
+          [(Nothing, removeShapeAnnotations t)]
+        generateCond' (E.Wildcard (Info t) _)=
+          [(Nothing, removeShapeAnnotations t)]
         generateCond' (E.PatternAscription p' _ _) = generateCond' p'
         generateCond' (E.PatternLit ePat (Info t) _) =
-          [(boolOp "==" ePat, removeShapeAnnotations t)]
+          [(Just (boolOp "==" ePat), removeShapeAnnotations t)]
 
 generateCaseIf :: String -> E.Exp -> I.Body -> Case -> InternaliseM I.Exp
 generateCaseIf desc e bFail (CasePat p eCase loc) = do
@@ -1028,6 +1049,7 @@ internaliseScanOrReduce desc what f (lam, ne, arr, loc) = do
 
 internaliseExp1 :: String -> E.Exp -> InternaliseM I.SubExp
 internaliseExp1 desc e = do
+  traceM $ show e
   vs <- internaliseExp desc e
   case vs of [se] -> return se
              _ -> fail "Internalise.internaliseExp1: was passed not just a single subexpression"
@@ -1239,6 +1261,7 @@ isOverloadedFunction :: E.QualName VName -> [E.Exp] -> SrcLoc
                      -> Maybe (String -> InternaliseM [SubExp])
 isOverloadedFunction qname args loc = do
   guard $ baseTag (qualLeaf qname) <= maxIntrinsicTag
+  traceM $ show $ baseString $ qualLeaf qname
   handle args $ baseString $ qualLeaf qname
   where
     handle [x] "sign_i8"  = Just $ toSigned I.Int8 x
@@ -1279,9 +1302,10 @@ isOverloadedFunction qname args loc = do
           fmap pure $ letSubExp desc $ I.BasicOp $ I.ConvOp conv x'
 
     -- Short-circuiting operators are magical.
-    handle [x,y] "&&" = Just $ \desc ->
+    handle [x,y] "&&" = Just $ \desc -> do
+      traceM "got here!"
       internaliseExp desc $
-      E.If x y (E.Literal (E.BoolValue False) noLoc) (Info (E.Prim E.Bool)) noLoc
+        E.If x y (E.Literal (E.BoolValue False) noLoc) (Info (E.Prim E.Bool)) noLoc
     handle [x,y] "||" = Just $ \desc ->
         internaliseExp desc $
         E.If x (E.Literal (E.BoolValue True) noLoc) y (Info (E.Prim E.Bool)) noLoc
@@ -1292,6 +1316,8 @@ isOverloadedFunction qname args loc = do
       | Just cmp_f <- isEqlOp op = Just $ \desc -> do
           xe' <- internaliseExp "x" xe
           ye' <- internaliseExp "y" ye
+          traceM $ "derp: " ++ "xe: \n" ++ show xe ++ "\n" ++  "ye: \n" ++ show ye
+                   ++ "\n xe': \n"  ++ show xe' ++ "\n ye': \n" ++ show ye'
           rs <- zipWithM (doComparison desc) xe' ye'
           cmp_f desc =<< letSubExp "eq" =<< foldBinOp I.LogAnd (constant True) rs
         where isEqlOp "!=" = Just $ \desc eq ->
@@ -1303,6 +1329,8 @@ isOverloadedFunction qname args loc = do
               doComparison desc x y = do
                 x_t <- I.subExpType x
                 y_t <- I.subExpType y
+                traceM $ "x_t: " ++ show x_t
+                traceM $ "y_t: " ++ show y_t
                 case x_t of
                   I.Prim t -> letSubExp desc $ I.BasicOp $ I.CmpOp (I.CmpEq t) x y
                   _ -> do

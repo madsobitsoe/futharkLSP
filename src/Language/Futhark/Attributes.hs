@@ -208,6 +208,7 @@ diet (Array _ _ Unique)    = Consume
 diet (Array _ _ Nonunique) = Observe
 diet (Enum _)              = Observe
 
+-- foo
 -- | @t `maskAliases` d@ removes aliases (sets them to 'mempty') from
 -- the parts of @t@ that are denoted as 'Consumed' by the 'Diet' @d@.
 maskAliases :: Monoid as =>
@@ -650,6 +651,7 @@ patternOrderZero pat = case pat of
   Id _ (Info t) _         -> orderZero t
   Wildcard (Info t) _     -> orderZero t
   PatternAscription p _ _ -> patternOrderZero p
+  PatternLit _ (Info t) _ -> orderZero t
 
 -- | The set of identifiers bound in a pattern.
 patIdentSet :: (Functor f, Ord vn) => PatternBase f vn -> S.Set (IdentBase f vn)
@@ -679,6 +681,7 @@ patternStructType (Id _ (Info t) _) = t `setAliases` ()
 patternStructType (TuplePattern ps _) = tupleRecord $ map patternStructType ps
 patternStructType (RecordPattern fs _) = Record $ patternStructType <$> M.fromList fs
 patternStructType (Wildcard (Info t) _) = vacuousShapeAnnotations $ toStruct t
+patternStructType (PatternLit _ (Info t) _) = t `setAliases` ()
 
 -- | When viewed as a function parameter, does this pattern correspond
 -- to a named parameter of some type?
@@ -706,6 +709,8 @@ patternNoShapeAnnotations (RecordPattern ps loc) =
   RecordPattern (map (fmap patternNoShapeAnnotations) ps) loc
 patternNoShapeAnnotations (Wildcard (Info t) loc) =
   Wildcard (Info (vacuousShapeAnnotations t)) loc
+patternNoShapeAnnotations (PatternLit e (Info t) loc) =
+  PatternLit e (Info (vacuousShapeAnnotations t)) loc
 
 -- | Names of primitive types to types.  This is only valid if no
 -- shadowing is going on, but useful for tools.

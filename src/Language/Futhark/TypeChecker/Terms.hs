@@ -913,15 +913,7 @@ checkExp (Ascript e decl loc) = do
   e' <- checkExp e
   t <- toStruct <$> expType e'
   let decl_t = removeShapeAnnotations $ unInfo $ expandedType decl'
-  constraintsOld <- getConstraints
   unify loc decl_t t
-  constraintsNew <- getConstraints
-  --traceM ("Terms.hs:checkExp:903: \n"
-  --       ++ "decl_t: " ++ show decl_t ++ "\n"
-  --       ++ "t:" ++ show t ++ "\n"
-  --       ++ "constraintsOld: " ++ show constraintsOld ++ "\n"
-  --       ++ "constraintsNew: " ++ show constraintsNew ++ "\n"
-  --      )
 
   -- We also have to make sure that uniqueness matches.  This is done
   -- explicitly, because uniqueness is ignored by unification.
@@ -1032,7 +1024,7 @@ checkExp (LetPat tparams pat e body loc) = do
       body' <- checkExp body
       return $ LetPat tparams' pat' e' body' loc
 
-checkExp (LetFun name (tparams, params, maybe_retdecl, NoInfo, e) body loc) =
+checkExp (LetFun name (tparams, params, maybe_retdecl, NoInfo, e) body loc) = do
   sequentially (checkFunDef' (name, maybe_retdecl, tparams, params, e, loc)) $
     \(name', tparams', params', maybe_retdecl', rettype, e') closure -> do
 
@@ -1042,7 +1034,6 @@ checkExp (LetFun name (tparams, params, maybe_retdecl, NoInfo, e) body loc) =
                             , scopeNameMap = M.insert (Term, name) (qualName name') $
                                              scopeNameMap scope }
     body' <- local bindF $ checkExp body
-
     return $ LetFun name' (tparams', params', maybe_retdecl', Info rettype, e') body' loc
 
 checkExp (LetWith dest src idxes ve body pos) = do
@@ -1308,6 +1299,7 @@ checkExp (DoLoop tparams mergepat mergeexp form loopbody loc) =
             RecordPattern (map (fmap uniquePat) fs) ploc
           uniquePat (PatternAscription p t ploc) =
             PatternAscription p t ploc
+          uniquePat p@PatternLit{} = p
 
           -- Make the pattern unique where needed.
           pat' = uniquePat pat
@@ -1358,7 +1350,8 @@ checkExp (VConstr0 name NoInfo loc) = do
   mustHaveConstr loc name t
   return $ VConstr0 name (Info t) loc
 
-checkExp (Match e cs NoInfo loc) = do
+checkExp foo@(Match e cs NoInfo loc) = do
+  traceM $ show foo
   e' <- checkExp e
   mt <- expType e'
   (t', cs') <- mustHaveSameType loc mt cs
@@ -1502,14 +1495,7 @@ consumeArg loc at _       = return [observation (aliases at) loc]
 
 checkOneExp :: UncheckedExp -> TypeM Exp
 checkOneExp e = fmap fst . runTermTypeM $ do
-  --traceM $ "checkOneExp:Terms.hs:1474: \n"
-  --         ++ "e: " ++ show e ++ "\n"
-
   e' <- checkExp e
-  constraints <- getConstraints
-  --trace ("checkOneExp, Terms.hs:1470, constraints:\n"
-  --       ++ show constraints
-  --      ) (return ())
   fixOverloadedTypes mempty
   updateExpTypes e'
 
@@ -1682,6 +1668,10 @@ closeOverTypes substs tparams ts = do
                                    "Add a type annotation to disambiguate the type."]
           where fs' = intercalate ", " $ map field $ M.toList fs
                 field (l, t) = pretty l ++ ": " ++ pretty t
+        closeOver (_, HasConstrs cs loc) =
+          typeError loc $ unlines ["Type is ambiguous (must be an enum with constructors " ++ cs' ++ ").",
+                                   "Add a type annotation to disambiguate the type."]
+          where cs' = intercalate " | " $ map (\c -> '#':(pretty c)) cs
 
         constrained (NoConstraint _ loc) = ambiguous loc
         constrained (Overloaded _ loc) = ambiguous loc
@@ -1765,25 +1755,9 @@ onlySelfAliasing = local (\scope -> scope { scopeVtable = M.mapWithKey set $ sco
 -- | Unifies two types.
 unify :: SrcLoc -> TypeBase () () -> TypeBase () () -> TermTypeM ()
 unify loc orig_t1 orig_t2 = do
-  --traceM ("Terms.hs:unify:1739: \n"
-  --  ++ "orig_t1: " ++ show orig_t1 ++ "\n"
-  --  ++ "orig_t2: " ++ show orig_t2 ++ "\n"
-         --)
-  constraints <- getConstraints
-  --traceM ("Terms.hs:unify:1739: \n"
-  --         ++ "constraints: " ++ show constraints ++ "\n"
-         --)
   orig_t1' <- normaliseType orig_t1
   orig_t2' <- normaliseType orig_t2
-  constraintsBread <- getConstraints
-  --traceM $ "Terms.hs:unify:1739: \n"
-  --       ++ "constraintsBread: " ++ show constraintsBread ++ "\n"
-
   breadCrumb (MatchingTypes orig_t1' orig_t2') $ subunify orig_t1 orig_t2
-  --constraintsNew <- getConstraints
-  --traceM ("Terms.hs:unify:1739: \n"
-  --       ++ "constraintsNew: " ++ show constraintsNew ++ "\n"
-  --       )
   where
     subunify t1 t2 = do
       constraints <- getConstraints
@@ -1851,18 +1825,18 @@ unify loc orig_t1 orig_t2 = do
 linkVarToType :: SrcLoc -> VName -> TypeBase () () -> TermTypeM ()
 linkVarToType loc vn tp = do
   constraints <- getConstraints
-  --traceM $ "Terms.hs:linkVarToType:1825:  \n"
-  --         ++ "vn : " ++ show vn ++ "\n"
-  --         ++ "tp: " ++ show tp ++ "\n"
-  --         ++ "constraints: " ++ show constraints ++ "\n"
+  traceM $ "Terms.hs:linkVarToType:1825:  \n"
+           ++ "vn : " ++ show vn ++ "\n"
+           ++ "tp: " ++ show tp ++ "\n"
+           ++ "constraints: " ++ show constraints ++ "\n"
   if vn `S.member` typeVars tp
     then typeError loc $ "Occurs check: cannot instantiate " ++
          prettyName vn ++ " with " ++ pretty tp'
     else do modifyConstraints $ M.insert vn $ Constraint tp' loc
             modifyConstraints $ M.map $ applySubstInConstraint vn tp'
             let constr = M.lookup vn constraints
-           -- traceM $ "Terms.hs:linkVarToType:1835: \n"
-           --          ++ "constr: " ++ show constr ++ "\n"
+            traceM $ "Terms.hs:linkVarToType:1835: \n"
+                     ++ "constr: " ++ show constr ++ "\n"
             case M.lookup vn constraints of
               Just (NoConstraint (Just Unlifted) unlift_loc) ->
                 zeroOrderType loc ("used at " ++ locStr unlift_loc) tp'
@@ -1904,7 +1878,11 @@ linkVarToType loc vn tp = do
                        "Cannot unify `" ++ prettyName vn ++ "' with type `" ++
                        pretty tp ++ " due to use at " ++ locStr old_loc ++ ")."
                        --TODO : Improve error message
-                  _ -> typeError loc "Cannot unify"
+                  TypeVar _ _ (TypeName [] v) []
+                    | not $ isRigid v constraints ->
+                        modifyConstraints $ M.insert v $
+                        HasConstrs cs old_loc
+                  _ -> typeError loc $ "Cannot unify."
               _ -> return ()
   where tp' = removeUniqueness tp
 
