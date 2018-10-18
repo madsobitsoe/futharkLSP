@@ -257,6 +257,9 @@ peelArray n (Array (ArrayRecordElem ts) shape u)
         asType (RecordArrayElem (ArrayRecordElem ts')) = Record $ fmap asType ts'
         asType (RecordArrayElem (ArrayEnumElem cs _)) = Enum cs
         asType (RecordArrayArrayElem et e_shape _) = Array et e_shape u
+peelArray n (Array (ArrayEnumElem cs _) shape _)
+  | shapeRank shape == n =
+    Just $ Enum cs
 peelArray n (Array et shape u) = do
   shape' <- stripDims n shape
   return $ Array et shape' u

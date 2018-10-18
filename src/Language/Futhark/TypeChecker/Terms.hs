@@ -1,4 +1,5 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving, FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
 -- | Facilities for type-checking Futhark terms.  Checking a term
 -- requires a little more context to track uniqueness and such.
 --
@@ -14,6 +15,7 @@ module Language.Futhark.TypeChecker.Terms
 where
 
 import Debug.Trace
+import Text.Show.Prettyprint
 
 import Control.Monad.Except
 import Control.Monad.State
@@ -35,6 +37,9 @@ import Language.Futhark.TypeChecker.Types hiding (checkTypeDecl)
 import qualified Language.Futhark.TypeChecker.Types as Types
 import qualified Language.Futhark.TypeChecker.Monad as TypeM
 import Futhark.Util.Pretty (Pretty)
+
+debug :: Monad m => String -> [(String, String)] -> m ()
+debug s as = traceM $ s  ++ ":\n" ++ (concatMap (\(s, a) -> s ++ ": " ++ a ++ "\n") as)
 
 --- Uniqueness
 
@@ -1350,8 +1355,7 @@ checkExp (VConstr0 name NoInfo loc) = do
   mustHaveConstr loc name t
   return $ VConstr0 name (Info t) loc
 
-checkExp foo@(Match e cs NoInfo loc) = do
-  traceM $ show foo
+checkExp (Match e cs NoInfo loc) = do
   e' <- checkExp e
   mt <- expType e'
   (t', cs') <- mustHaveSameType loc mt cs
@@ -1363,18 +1367,17 @@ mustHaveSameType loc _ [] = typeError loc "Match expressions must have at least 
 mustHaveSameType loc mt (c:cs) = do
   s  <- newTypeVar loc "s"
   c' <- checkCase mt s c
-  ft <- expType $ caseExp c'
-  cs'<- mapM (checkCase mt ft) cs
-  return (ft, c':cs')
+  ct <- expType $ caseExp c'
+  cs'<- mapM (checkCase mt ct) cs
+  return (ct, c':cs')
   where caseExp (CasePat _ cExp _) = cExp
 
 checkCase :: CompType -> CompType -> CaseBase NoInfo Name -> TermTypeM (CaseBase Info VName)
-checkCase mt ft (CasePat p caseExp loc) =
+checkCase mt ct (CasePat p caseExp loc) =
   bindingPattern [] p (Ascribed $ vacuousShapeAnnotations mt) $ \_ p' -> do
-    unify loc (toStructural . patternType $ p') (toStructural mt)
     caseExp' <- checkExp caseExp
     caseType <- expType caseExp'
-    unify loc (toStructural ft) (toStructural caseType)
+    unify loc (toStructural ct) (toStructural caseType)
     return $ CasePat p' caseExp' loc
 
 checkIdent :: IdentBase NoInfo Name -> TermTypeM Ident
@@ -1770,11 +1773,6 @@ unify loc orig_t1 orig_t2 = do
             typeError loc $ "Couldn't match expected type `" ++
             pretty t1' ++ "' with actual type `" ++ pretty t2' ++ "'."
 
-      --traceM $ "Terms.hs:unify:1744:  \n"
-      --       ++ "t1 : " ++ show t1 ++ "\n"
-      --       ++ "t1': " ++ show t1' ++ "\n"
-      --       ++ "t2 : "
-      --       ++ "t2': " ++ show t2' ++ "\n"
       case (t1', t2') of
         _ | t1' == t2' -> return ()
 
@@ -1825,18 +1823,11 @@ unify loc orig_t1 orig_t2 = do
 linkVarToType :: SrcLoc -> VName -> TypeBase () () -> TermTypeM ()
 linkVarToType loc vn tp = do
   constraints <- getConstraints
-  traceM $ "Terms.hs:linkVarToType:1825:  \n"
-           ++ "vn : " ++ show vn ++ "\n"
-           ++ "tp: " ++ show tp ++ "\n"
-           ++ "constraints: " ++ show constraints ++ "\n"
   if vn `S.member` typeVars tp
     then typeError loc $ "Occurs check: cannot instantiate " ++
          prettyName vn ++ " with " ++ pretty tp'
     else do modifyConstraints $ M.insert vn $ Constraint tp' loc
             modifyConstraints $ M.map $ applySubstInConstraint vn tp'
-            let constr = M.lookup vn constraints
-            traceM $ "Terms.hs:linkVarToType:1835: \n"
-                     ++ "constr: " ++ show constr ++ "\n"
             case M.lookup vn constraints of
               Just (NoConstraint (Just Unlifted) unlift_loc) ->
                 zeroOrderType loc ("used at " ++ locStr unlift_loc) tp'
@@ -1877,11 +1868,13 @@ linkVarToType loc vn tp = do
                     | otherwise -> typeError loc $
                        "Cannot unify `" ++ prettyName vn ++ "' with type `" ++
                        pretty tp ++ " due to use at " ++ locStr old_loc ++ ")."
-                       --TODO : Improve error message
                   TypeVar _ _ (TypeName [] v) []
                     | not $ isRigid v constraints ->
-                        modifyConstraints $ M.insert v $
-                        HasConstrs cs old_loc
+                        let addConstrs (HasConstrs cs' loc') (HasConstrs cs'' _) =
+                              HasConstrs (cs' `union` cs'') loc'
+                            addConstrs c _ = c
+                        in modifyConstraints $ M.insertWith addConstrs v $
+                           HasConstrs cs old_loc
                   _ -> typeError loc $ "Cannot unify."
               _ -> return ()
   where tp' = removeUniqueness tp

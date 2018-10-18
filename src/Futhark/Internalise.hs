@@ -18,7 +18,6 @@ import Data.List
 import Data.Loc
 import Data.Char (chr)
 import Data.Maybe
-import Debug.Trace
 
 import Language.Futhark as E hiding (TypeArg)
 import Language.Futhark.Semantic (Imports)
@@ -48,7 +47,6 @@ internaliseProg always_safe prog = do
   prog_decs' <- Monomorphise.transformProg prog_decs
   prog_decs'' <- Defunctionalise.transformProg prog_decs'
   prog' <- fmap (fmap I.Prog) $ runInternaliseM always_safe $ internaliseValBinds prog_decs''
-  --traceM $ show prog'
   traverse I.renameProg prog'
 
 internaliseValBinds :: [E.ValBind] -> InternaliseM ()
@@ -197,10 +195,7 @@ internaliseIdent (E.Ident name (Info tp) loc) =
                        " at " ++ locStr loc ++ "."
 
 internaliseBody :: E.Exp -> InternaliseM Body
-internaliseBody e = do
-  foo <- insertStmsM $ resultBody <$> internaliseExp "res" e
-  --traceM $ show foo
-  return foo
+internaliseBody e = insertStmsM $ resultBody <$> internaliseExp "res" e
 
 internaliseBodyStms :: E.Exp -> ([SubExp] -> InternaliseM (Body, a))
                     -> InternaliseM (Body, a)
@@ -800,9 +795,11 @@ internaliseExp desc (E.Stream (E.RedLike o comm lam0) lam arr _) = do
 
 internaliseExp _ (VConstr0 c (Info t) loc) =
   case t of
-    Enum cs -> do
-      let Just i = elemIndex c $ sort cs
-      return [I.Constant $ I.IntValue $ intValue I.Int8 i]
+    Enum cs ->
+      case elemIndex c $ sort cs of
+        Just i -> return [I.Constant $ I.IntValue $ intValue I.Int8 i]
+        _      -> fail $ "internaliseExp: invalid constructor: #" ++ nameToString c ++
+                         "\nfor enum at " ++ locStr loc ++ ": " ++ pretty t
     _ -> fail $ "internaliseExp: nonsensical type for enum at "
                 ++ locStr loc ++ ": " ++ pretty t
 
@@ -845,9 +842,8 @@ internaliseExp desc (E.If ce te fe _ _) =
 
 -- Builtin operators are handled specially because they are
 -- overloaded.
-internaliseExp desc e@(E.BinOp op _ (xe,_) (ye,_) _ loc)
-  | Just internalise <- isOverloadedFunction op [xe, ye] loc = do
-      traceM $ "from E.BinOp: " ++ pretty e
+internaliseExp desc (E.BinOp op _ (xe,_) (ye,_) _ loc)
+  | Just internalise <- isOverloadedFunction op [xe, ye] loc =
       internalise desc
 
 -- User-defined operators are just the same as a function call.
@@ -857,20 +853,12 @@ internaliseExp desc (E.BinOp op (Info t) (xarg, Info xt) (yarg, Info yt) _ loc) 
            (Info $ foldFunType [E.fromStruct yt] t) loc)
           yarg (Info $ E.diet yt) (Info t) loc
 
-internaliseExp desc e'@(E.Project k e (Info rt) _) = do
+internaliseExp desc (E.Project k e (Info rt) _) = do
   n <- internalisedTypeSize $ rt `setAliases` ()
   i' <- fmap sum $ mapM internalisedTypeSize $
         case E.typeOf e `setAliases` () of
                Record fs -> map snd $ takeWhile ((/=k) . fst) $ sortFields fs
                t         -> [t]
-  foo <- internaliseExp desc e
-  traceM $  "whoop e':" ++"\n" ++ pretty e' ++ "\n"
-            ++ "unpretty e': " ++ show e' ++ "\n"
-            ++ "e: " ++ show e ++ "\n"
-            ++ "foo: \n" ++ show foo
-            ++ "\n n: \n" ++ show n
-            ++ "\n i': \n" ++ show i' ++ "\n"
-            ++ "dropped/taken foo: " ++ show (take n $ drop i' foo)
   take n . drop i' <$> internaliseExp desc e
 
 internaliseExp _ e@E.Lambda{} =
@@ -1049,7 +1037,6 @@ internaliseScanOrReduce desc what f (lam, ne, arr, loc) = do
 
 internaliseExp1 :: String -> E.Exp -> InternaliseM I.SubExp
 internaliseExp1 desc e = do
-  traceM $ show e
   vs <- internaliseExp desc e
   case vs of [se] -> return se
              _ -> fail "Internalise.internaliseExp1: was passed not just a single subexpression"
@@ -1261,7 +1248,6 @@ isOverloadedFunction :: E.QualName VName -> [E.Exp] -> SrcLoc
                      -> Maybe (String -> InternaliseM [SubExp])
 isOverloadedFunction qname args loc = do
   guard $ baseTag (qualLeaf qname) <= maxIntrinsicTag
-  traceM $ show $ baseString $ qualLeaf qname
   handle args $ baseString $ qualLeaf qname
   where
     handle [x] "sign_i8"  = Just $ toSigned I.Int8 x
@@ -1303,7 +1289,6 @@ isOverloadedFunction qname args loc = do
 
     -- Short-circuiting operators are magical.
     handle [x,y] "&&" = Just $ \desc -> do
-      traceM "got here!"
       internaliseExp desc $
         E.If x y (E.Literal (E.BoolValue False) noLoc) (Info (E.Prim E.Bool)) noLoc
     handle [x,y] "||" = Just $ \desc ->
@@ -1316,8 +1301,6 @@ isOverloadedFunction qname args loc = do
       | Just cmp_f <- isEqlOp op = Just $ \desc -> do
           xe' <- internaliseExp "x" xe
           ye' <- internaliseExp "y" ye
-          traceM $ "derp: " ++ "xe: \n" ++ show xe ++ "\n" ++  "ye: \n" ++ show ye
-                   ++ "\n xe': \n"  ++ show xe' ++ "\n ye': \n" ++ show ye'
           rs <- zipWithM (doComparison desc) xe' ye'
           cmp_f desc =<< letSubExp "eq" =<< foldBinOp I.LogAnd (constant True) rs
         where isEqlOp "!=" = Just $ \desc eq ->
@@ -1329,8 +1312,6 @@ isOverloadedFunction qname args loc = do
               doComparison desc x y = do
                 x_t <- I.subExpType x
                 y_t <- I.subExpType y
-                traceM $ "x_t: " ++ show x_t
-                traceM $ "y_t: " ++ show y_t
                 case x_t of
                   I.Prim t -> letSubExp desc $ I.BasicOp $ I.CmpOp (I.CmpEq t) x y
                   _ -> do
