@@ -1381,7 +1381,6 @@ checkCase mt ct (CasePat p caseExp loc) =
     unify loc (toStructural ct) (toStructural caseType)
     return $ CasePat p' caseExp' loc
 
-
 unpackPat :: Pattern -> [Maybe Pattern]
 unpackPat Wildcard{} = [Nothing]
 unpackPat (PatternParens p _) = unpackPat p--[Just p]
@@ -1391,81 +1390,61 @@ unpackPat (RecordPattern _ _) = undefined
 unpackPat (PatternAscription p _ _) = unpackPat p--[Just p]
 unpackPat p@PatternLit{} = [Just p]
 
-unpackPE :: Exp -> Pattern -> [Maybe (Exp, Pattern)]
-unpackPE e p
-  | isBaseLiteral e = (fmap . fmap) ((,)e) $ unpackPat p
-  | otherwise       =
-    case e of
-      TupLit es _ -> zipWith (\e' mp -> fmap ((,)e') mp) es $ unpackPat p
-      _           -> []
-
-isBaseLiteral :: Exp -> Bool
-isBaseLiteral  Literal{}       = True
-isBaseLiteral  IntLit{}        = True
-isBaseLiteral  FloatLit{}      = True
-isBaseLiteral  VConstr0{}      = True
-isBaseLiteral  (Ascript e _ _) = isBaseLiteral e
-isBaseLiteral (Parens e _)     = isBaseLiteral e
-isBaseLiteral _                = False
-
 wildPattern :: Pattern -> Int -> Pattern -> Pattern
 wildPattern (TuplePattern ps loc) pos = \p ->
   TuplePattern (take (pos - 1) ps' ++ [p] ++ drop pos ps') loc
   where ps' = map wildOut ps
-wildPattern p _ = const p
-
-wildOut :: Pattern -> Pattern
-wildOut p = Wildcard (Info (patternType' p)) (srclocOf p)
-  where patternType' (PatternAscription p' _ _) = vacuousShapeAnnotations . patternType $ p'
+        wildOut p = Wildcard (Info (patternType' p)) (srclocOf p)
+        patternType' (PatternAscription p' _ _) =
+          vacuousShapeAnnotations . patternType $ p'
         patternType' p' = vacuousShapeAnnotations . patternType $ p'
 
+wildPattern p _ = const p
+
 checkExhaustive :: (MonadTypeChecker m) => Exp -> m ()
-checkExhaustive (Match e cs _ loc) =
-  case unmatched id e ps of
+checkExhaustive (Match _ cs _ loc) =
+  case unmatched id ps of
     []  -> return ()
     ps' -> warn loc $ "Possible missing cases: \n"
-                               ++ unlines (map pretty ps')
+                      ++ unlines (map pretty ps')
   where ps = map getPattern cs
         getPattern (CasePat p _ _ ) = p
-checkExhaustive' _ = return ()
+checkExhaustive _ = return ()
 
 isExhaustive :: (MonadTypeChecker m) => Exp -> m ()
 isExhaustive e = void $ checkExhaustive e >> astMap tv e
-  where tv = ASTMapper { mapOnExp         = \e' -> checkExhaustive' e' >> return e'
-                        , mapOnName        = pure
-                        , mapOnQualName    = pure
-                        , mapOnType        = pure
-                        , mapOnCompType    = pure
-                        , mapOnStructType  = pure
-                        , mapOnPatternType = pure
-                        }
+  where tv = ASTMapper { mapOnExp =
+                           \e' -> checkExhaustive e' >> return e'
+                       , mapOnName        = pure
+                       , mapOnQualName    = pure
+                       , mapOnType        = pure
+                       , mapOnCompType    = pure
+                       , mapOnStructType  = pure
+                       , mapOnPatternType = pure
+                       }
 
-unmatched :: (Pattern -> Pattern) -> Exp -> [Pattern] -> [Pattern]
-unmatched hole (Parens e _) ps = unmatched (\p -> hole (PatternParens p noLoc)) e ps
-unmatched hole e (p:ps)
+unmatched :: (Pattern -> Pattern) -> [Pattern] -> [Pattern]
+unmatched hole (p:ps)
   | sameStructure labeledCols = do
     (i, cols) <- labeledCols
     let hole' p' = hole $ wildPattern p i p'
     case catMaybes cols of
       []       -> []
-      cs@(c:_)
-        | all (isPatternLit . snd) cs -> map hole' $ localUnmatched cs
-        | otherwise                    -> unmatched hole' (fst c) (map snd (c:cs))
+      cs
+        | all isPatternLit cs  -> map hole' $ localUnmatched cs
+        | otherwise            -> unmatched hole' cs
 
-  where labeledCols = zip [1..] $ transpose $ map (unpackPE e) (p:ps)
+  where labeledCols = zip [1..] $ transpose $ map unpackPat (p:ps)
         isPatternLit PatternLit{} = True
         isPatternLit _            = False
 
-        localUnmatched :: [(Exp, Pattern)] -> [Pattern]
+        localUnmatched :: [Pattern] -> [Pattern]
         localUnmatched [] = []
-        localUnmatched cs'@((e', p'):_) =
+        localUnmatched ps'@(p':_) =
           case vacuousShapeAnnotations $ patternType p'  of
             Enum cs'' ->
-              let matched = nub $ mapMaybe (\(_, p'') -> pExp p'' >>= constr) cs'
-                  reqMatches
-                    | isBaseLiteral e' = fromMaybe [] (sequence [constr e'])
-                    | otherwise = cs''
-              in map (buildEnum (Enum cs'')) $ reqMatches \\ matched
+              let matched = nub $ mapMaybe (\p'' -> pExp p'' >>= constr) ps'
+              in map (buildEnum (Enum cs'')) $ cs'' \\ matched
             _ -> []
         sameStructure [] = True
         sameStructure (x:xs) = all (\y -> length y == length x ) xs
@@ -1477,7 +1456,7 @@ unmatched hole e (p:ps)
         buildEnum t c =
           PatternLit (VConstr0 c (Info t) noLoc) (Info (vacuousShapeAnnotations t)) noLoc
 
-unmatched _ _ _ = []
+unmatched _ _ = []
 
 checkIdent :: IdentBase NoInfo Name -> TermTypeM Ident
 checkIdent (Ident name _ loc) = do
