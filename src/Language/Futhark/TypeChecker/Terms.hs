@@ -1394,10 +1394,7 @@ wildPattern :: Pattern -> Int -> Pattern -> Pattern
 wildPattern (TuplePattern ps loc) pos = \p ->
   TuplePattern (take (pos - 1) ps' ++ [p] ++ drop pos ps') loc
   where ps' = map wildOut ps
-        wildOut p = Wildcard (Info (patternType' p)) (srclocOf p)
-        patternType' (PatternAscription p' _ _) =
-          vacuousShapeAnnotations . patternType $ p'
-        patternType' p' = vacuousShapeAnnotations . patternType $ p'
+        wildOut p = Wildcard (Info (patternPatternType p)) (srclocOf p)
 
 wildPattern p _ = const p
 

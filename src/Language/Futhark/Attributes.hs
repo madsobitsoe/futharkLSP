@@ -29,6 +29,7 @@ module Language.Futhark.Attributes
   , patIdentSet
   , patternType
   , patternStructType
+  , patternPatternType
   , patternParam
   , patternNoShapeAnnotations
   , patternOrderZero
@@ -635,7 +636,6 @@ patternDimNames (Wildcard (Info tp) _) = typeDimNames tp
 patternDimNames (PatternAscription p (TypeDecl _ (Info t)) _) =
   patternDimNames p <> typeDimNames t
 patternDimNames (PatternLit _ (Info tp) _) = typeDimNames tp
-  -- TODO : Does the expression need to be included?
 
 -- | Extract all the shape names that occur in a given type.
 typeDimNames :: TypeBase (DimDecl VName) als -> Names
@@ -685,6 +685,16 @@ patternStructType (TuplePattern ps _) = tupleRecord $ map patternStructType ps
 patternStructType (RecordPattern fs _) = Record $ patternStructType <$> M.fromList fs
 patternStructType (Wildcard (Info t) _) = vacuousShapeAnnotations $ toStruct t
 patternStructType (PatternLit _ (Info t) _) = t `setAliases` ()
+
+-- | The type of a pattern, including shape annotations.
+patternPatternType :: PatternBase Info VName -> PatternType
+patternPatternType (Wildcard (Info t) _)      = t
+patternPatternType (PatternParens p _)        = patternPatternType p
+patternPatternType (Id _ (Info t) _)          = t
+patternPatternType (TuplePattern pats _)      = tupleRecord $ map patternPatternType pats
+patternPatternType (RecordPattern fs _)       = Record $ patternPatternType <$> M.fromList fs
+patternPatternType (PatternAscription p _ _)  = patternPatternType p
+patternPatternType (PatternLit _ (Info t) _)  = t
 
 -- | When viewed as a function parameter, does this pattern correspond
 -- to a named parameter of some type?
