@@ -1386,7 +1386,7 @@ unpackPat Wildcard{} = [Nothing]
 unpackPat (PatternParens p _) = unpackPat p--[Just p]
 unpackPat Id{} = [Nothing]
 unpackPat (TuplePattern ps _) = Just <$> ps
-unpackPat (RecordPattern _ _) = undefined
+unpackPat (RecordPattern fs _) = map (Just .snd) fs
 unpackPat (PatternAscription p _ _) = unpackPat p--[Just p]
 unpackPat p@PatternLit{} = [Just p]
 
@@ -1623,6 +1623,8 @@ checkFunDef' (fname, maybe_retdecl, tparams, params, body, loc) = noUnique $ do
     tparams'' <- closeOverTypes new_substs tparams' $
                  rettype : map patternStructType params''
 
+    -- Check if pattern matches are exhaustive and yield
+    -- warnings if not.
     isExhaustive body''
 
     -- We keep only those type variables that existed before the

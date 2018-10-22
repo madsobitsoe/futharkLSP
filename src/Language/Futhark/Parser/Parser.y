@@ -717,7 +717,7 @@ Cases : Case  %prec caseprec { [$1] }
       | Case Cases           { $1 : $2 }
 
 Case :: { CaseBase NoInfo Name }
-Case : case CPattern '->'Exp       { let loc = srcspan $1 $>
+Case : case CPattern '->' Exp       { let loc = srcspan $1 $>
                                           in CasePat $2 $> loc }
 
 CPattern :: { PatternBase NoInfo Name }
@@ -737,8 +737,24 @@ CInnerPattern : id                                { let L loc (ID name) = $1 in 
              | '(' ')'                            { TuplePattern [] (srcspan $1 $>) }
              | '(' CPattern ')'                   { PatternParens $2 (srcspan $1 $>) }
              | '(' CPattern ',' CPatterns1 ')'    { TuplePattern ($2:$4) (srcspan $1 $>) }
-             | '{' FieldPatterns '}'              { RecordPattern $2 (srcspan $1 $>) }
+             | '{' CFieldPatterns '}'             { RecordPattern $2 (srcspan $1 $>) }
              | CaseLiteral                        { PatternLit (fst $1) NoInfo (snd $1) }
+
+CFieldPattern :: { (Name, PatternBase NoInfo Name) }
+              : FieldId '=' CPattern
+              { (fst $1, $3) }
+              | FieldId ':' TypeExpDecl
+              { (fst $1, PatternAscription (Id (fst $1) NoInfo (snd $1)) $3 (srcspan (snd $1) $>)) }
+              | FieldId
+              { (fst $1, Id (fst $1) NoInfo (snd $1)) }
+
+CFieldPatterns :: { [(Name, PatternBase NoInfo Name)] }
+               : CFieldPatterns1 { $1 }
+               |                { [] }
+
+CFieldPatterns1 :: { [(Name, PatternBase NoInfo Name)] }
+                : CFieldPattern ',' CFieldPatterns1 { $1 : $3 }
+                | CFieldPattern                    { [$1] }
 
 CaseLiteral :: { (UncheckedExp, SrcLoc) }
 CaseLiteral : PrimLit        { (Literal (fst $1) (snd $1), snd $1) }

@@ -9,6 +9,8 @@
 --
 module Futhark.Internalise (internaliseProg) where
 
+import Debug.Trace
+
 import Control.Monad.State
 import Control.Monad.Reader
 import qualified Data.Map.Strict as M
@@ -793,7 +795,7 @@ internaliseExp desc (E.Stream (E.RedLike o comm lam0) lam arr _) = do
   w <- arraysSize 0 <$> mapM lookupType arrs
   letTupExp' desc $ I.Op $ I.Stream w form lam' arrs
 
-internaliseExp _ (VConstr0 c (Info t) loc) =
+internaliseExp _ (E.VConstr0 c (Info t) loc) =
   case t of
     Enum cs ->
       case elemIndex c $ sort cs of
@@ -803,7 +805,7 @@ internaliseExp _ (VConstr0 c (Info t) loc) =
     _ -> fail $ "internaliseExp: nonsensical type for enum at "
                 ++ locStr loc ++ ": " ++ pretty t
 
-internaliseExp desc (Match  e cs _ loc) =
+internaliseExp desc (E.Match  e cs _ loc) =
   case cs of
     (c@(CasePat _ eCase _):cs') -> do
       bFalse' <- bFalse
@@ -892,17 +894,17 @@ generateCond p e = foldr (boolOp "&&") (E.Literal (E.BoolValue True) noLoc) cond
   where conds = mapMaybe ((<*> pure e) . fst) $ generateCond' p
 
         generateCond' :: E.Pattern -> [(Maybe (E.Exp -> E.Exp), CompType)]
-        generateCond' (E.TuplePattern ps _) = concatMap instCond allTemplates
-          where allTemplates = zip (map generateCond' ps) ([1..] :: [Integer])
+        generateCond' (E.TuplePattern ps loc) = generateCond' (E.RecordPattern fs loc)
+          where fs = zipWith (\i p -> (nameFromString (show i), p)) [1..] ps
+        generateCond' (E.RecordPattern fs loc) = concatMap instCond allTemplates
+          where allTemplates = zip (map (generateCond' . snd) fs) (map fst fs)
                 field ([],_)         = error "empty pattern"
-                field ((_, t):_, i)  = (nameFromString $ show i, t)
+                field ((_, t):_, f)  = (f, t)
                 t' = Record $ M.fromList $ map field allTemplates
                 projectTemplate _ (Nothing, _) = (Nothing, t')
-                projectTemplate i (Just condTemplate, t) =
-                  (Just (\e' -> condTemplate $ Project (nameFromString (show i)) e' (Info t) noLoc), t')
-                instCond (condTemplates, i) = map (projectTemplate i) condTemplates
-        generateCond' (E.RecordPattern fs loc) =
-          generateCond' $ E.TuplePattern (map snd $ sortFields $ M.fromList fs) loc
+                projectTemplate f (Just condTemplate, t) =
+                  (Just (\e' -> condTemplate $ Project f e' (Info t) noLoc), t')
+                instCond (condTemplates, f) = map (projectTemplate f) condTemplates
         generateCond' (E.PatternParens p' _) = generateCond' p'
         generateCond' (E.Id _ (Info t) _) =
           [(Nothing, removeShapeAnnotations t)]
@@ -913,7 +915,7 @@ generateCond p e = foldr (boolOp "&&") (E.Literal (E.BoolValue True) noLoc) cond
           [(Just (boolOp "==" ePat), removeShapeAnnotations t)]
 
 generateCaseIf :: String -> E.Exp -> I.Body -> Case -> InternaliseM I.Exp
-generateCaseIf desc e bFail (CasePat p eCase loc) = do
+generateCaseIf desc e bFail c@(CasePat p eCase loc) = do
   ses <- internaliseExp desc e
   t <- I.staticShapes <$> mapM I.subExpType ses
   eCase' <- stmPattern [] p t $ \cm pat_names match -> do
