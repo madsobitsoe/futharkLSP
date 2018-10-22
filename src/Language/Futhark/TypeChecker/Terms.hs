@@ -1,5 +1,4 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving, FlexibleContexts #-}
-{-# LANGUAGE OverloadedStrings #-}
 -- | Facilities for type-checking Futhark terms.  Checking a term
 -- requires a little more context to track uniqueness and such.
 --
@@ -15,11 +14,11 @@ module Language.Futhark.TypeChecker.Terms
 where
 
 import Debug.Trace
-import Text.Show.Prettyprint
 
 import Control.Monad.Except
 import Control.Monad.State
 import Control.Monad.RWS
+import Control.Monad.Writer
 import qualified Control.Monad.Fail as Fail
 import Data.List
 import Data.Loc
@@ -38,8 +37,6 @@ import qualified Language.Futhark.TypeChecker.Types as Types
 import qualified Language.Futhark.TypeChecker.Monad as TypeM
 import Futhark.Util.Pretty (Pretty)
 
-debug :: Monad m => String -> [(String, String)] -> m ()
-debug s as = traceM $ s  ++ ":\n" ++ (concatMap (\(s, a) -> s ++ ": " ++ a ++ "\n") as)
 
 --- Uniqueness
 
@@ -1359,7 +1356,11 @@ checkExp (Match e cs NoInfo loc) = do
   e' <- checkExp e
   mt <- expType e'
   (t', cs') <- mustHaveSameType loc mt cs
-  return $ Match e' cs' (Info t') loc
+  let e'' = Match e' cs' (Info t') loc
+  seq (expType e'') (return ())
+  let pats = map getPat cs'
+  return e''
+  where getPat (CasePat p _ _) = p
 
 mustHaveSameType :: SrcLoc -> CompType -> [CaseBase NoInfo Name]
                     -> TermTypeM (CompType, [CaseBase Info VName])
@@ -1379,6 +1380,104 @@ checkCase mt ct (CasePat p caseExp loc) =
     caseType <- expType caseExp'
     unify loc (toStructural ct) (toStructural caseType)
     return $ CasePat p' caseExp' loc
+
+
+unpackPat :: Pattern -> [Maybe Pattern]
+unpackPat Wildcard{} = [Nothing]
+unpackPat (PatternParens p _) = unpackPat p--[Just p]
+unpackPat Id{} = [Nothing]
+unpackPat (TuplePattern ps _) = Just <$> ps
+unpackPat (RecordPattern _ _) = undefined
+unpackPat (PatternAscription p _ _) = unpackPat p--[Just p]
+unpackPat p@PatternLit{} = [Just p]
+
+unpackPE :: Exp -> Pattern -> [Maybe (Exp, Pattern)]
+unpackPE e p
+  | isBaseLiteral e = (fmap . fmap) ((,)e) $ unpackPat p
+  | otherwise       =
+    case e of
+      TupLit es _ -> zipWith (\e' mp -> fmap ((,)e') mp) es $ unpackPat p
+      _           -> []
+
+isBaseLiteral :: Exp -> Bool
+isBaseLiteral  Literal{}       = True
+isBaseLiteral  IntLit{}        = True
+isBaseLiteral  FloatLit{}      = True
+isBaseLiteral  VConstr0{}      = True
+isBaseLiteral  (Ascript e _ _) = isBaseLiteral e
+isBaseLiteral (Parens e _)     = isBaseLiteral e
+isBaseLiteral _                = False
+
+wildPattern :: Pattern -> Int -> Pattern -> Pattern
+wildPattern (TuplePattern ps loc) pos = \p ->
+  TuplePattern (take (pos - 1) ps' ++ [p] ++ drop pos ps') loc
+  where ps' = map wildOut ps
+wildPattern p _ = const p
+
+wildOut :: Pattern -> Pattern
+wildOut p = Wildcard (Info (patternType' p)) (srclocOf p)
+  where patternType' (PatternAscription p' _ _) = vacuousShapeAnnotations . patternType $ p'
+        patternType' p' = vacuousShapeAnnotations . patternType $ p'
+
+checkExhaustive :: (MonadTypeChecker m) => Exp -> m ()
+checkExhaustive (Match e cs _ loc) =
+  case unmatched id e ps of
+    []  -> return ()
+    ps' -> warn loc $ "Possible missing cases: \n"
+                               ++ unlines (map pretty ps')
+  where ps = map getPattern cs
+        getPattern (CasePat p _ _ ) = p
+checkExhaustive' _ = return ()
+
+isExhaustive :: (MonadTypeChecker m) => Exp -> m ()
+isExhaustive e = void $ checkExhaustive e >> astMap tv e
+  where tv = ASTMapper { mapOnExp         = \e' -> checkExhaustive' e' >> return e'
+                        , mapOnName        = pure
+                        , mapOnQualName    = pure
+                        , mapOnType        = pure
+                        , mapOnCompType    = pure
+                        , mapOnStructType  = pure
+                        , mapOnPatternType = pure
+                        }
+
+unmatched :: (Pattern -> Pattern) -> Exp -> [Pattern] -> [Pattern]
+unmatched hole (Parens e _) ps = unmatched (\p -> hole (PatternParens p noLoc)) e ps
+unmatched hole e (p:ps)
+  | sameStructure labeledCols = do
+    (i, cols) <- labeledCols
+    let hole' p' = hole $ wildPattern p i p'
+    case catMaybes cols of
+      []       -> []
+      cs@(c:_)
+        | all (isPatternLit . snd) cs -> map hole' $ localUnmatched cs
+        | otherwise                    -> unmatched hole' (fst c) (map snd (c:cs))
+
+  where labeledCols = zip [1..] $ transpose $ map (unpackPE e) (p:ps)
+        isPatternLit PatternLit{} = True
+        isPatternLit _            = False
+
+        localUnmatched :: [(Exp, Pattern)] -> [Pattern]
+        localUnmatched [] = []
+        localUnmatched cs'@((e', p'):_) =
+          case vacuousShapeAnnotations $ patternType p'  of
+            Enum cs'' ->
+              let matched = nub $ mapMaybe (\(_, p'') -> pExp p'' >>= constr) cs'
+                  reqMatches
+                    | isBaseLiteral e' = fromMaybe [] (sequence [constr e'])
+                    | otherwise = cs''
+              in map (buildEnum (Enum cs'')) $ reqMatches \\ matched
+            _ -> []
+        sameStructure [] = True
+        sameStructure (x:xs) = all (\y -> length y == length x ) xs
+        pExp (PatternLit e' _ _) = Just e'
+        pExp _ = Nothing
+        constr (VConstr0 c _ _) = Just c
+        constr (Ascript e' _ _)  = constr e'
+        constr _ = Nothing
+        buildEnum t c =
+          PatternLit (VConstr0 c (Info t) noLoc) (Info (vacuousShapeAnnotations t)) noLoc
+
+unmatched _ _ _ = []
 
 checkIdent :: IdentBase NoInfo Name -> TermTypeM Ident
 checkIdent (Ident name _ loc) = do
@@ -1547,6 +1646,8 @@ checkFunDef' (fname, maybe_retdecl, tparams, params, body, loc) = noUnique $ do
     let new_substs = now_substs `M.difference` then_substs
     tparams'' <- closeOverTypes new_substs tparams' $
                  rettype : map patternStructType params''
+
+    isExhaustive body''
 
     -- We keep only those type variables that existed before the
     -- function, or which are used in the substitutions for those that

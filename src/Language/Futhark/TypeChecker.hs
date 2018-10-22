@@ -14,6 +14,8 @@ module Language.Futhark.TypeChecker
   )
   where
 
+import Debug.Trace
+
 import Control.Monad.Except
 import Control.Monad.Writer
 import Data.List
@@ -867,7 +869,7 @@ newNamesForMTy orig_mty = do
             Just t' -> t'
             _ -> error "substituteInType: Cannot create array after substitution."
         substituteInType (Array (ArrayEnumElem cs ()) shape u) =
-          (Array (ArrayEnumElem cs ()) (substituteInShape shape) u)
+          Array (ArrayEnumElem cs ()) (substituteInShape shape) u
         substituteInType (Arrow als v t1 t2) =
           Arrow als v (substituteInType t1) (substituteInType t2)
 

@@ -96,6 +96,9 @@ unifyArrayElemTypes uf (ArrayRecordElem et1) (ArrayRecordElem et2)
   | sort (M.keys et1) == sort (M.keys et2) =
     ArrayRecordElem <$>
     traverse (uncurry $ unifyRecordArrayElemTypes uf) (M.intersectionWith (,) et1 et2)
+unifyArrayElemTypes uf (ArrayEnumElem cs1 als1) (ArrayEnumElem cs2 als2)
+  | cs1 == cs2 =
+     Just $ ArrayEnumElem cs1 (als1 <> als2)
 unifyArrayElemTypes _ _ _ =
   Nothing
 

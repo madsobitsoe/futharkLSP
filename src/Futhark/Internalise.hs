@@ -879,6 +879,7 @@ internaliseExp _ e@E.ProjectSection{} =
 internaliseExp _ e@E.IndexSection{} =
   fail $ "internaliseExp: Unexpected index section at " ++ locStr (srclocOf e)
 
+-- TODO: Get rid of the 292
 boolOp :: Name -> E.Exp -> E.Exp -> E.Exp
 boolOp op l r = E.BinOp (qualName (VName op 292)) (Info $ vacuousShapeAnnotations ft)
                 (l, sType l) (r, sType r) (Info (E.Prim E.Bool)) noLoc
