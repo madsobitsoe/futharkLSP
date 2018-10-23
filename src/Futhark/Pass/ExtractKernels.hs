@@ -218,6 +218,11 @@ runDistribM (DistribM m) = do
   return x
   where positionNameSource (x, src, msgs) = ((x, msgs), src)
 
+runDistribM' :: MonadFreshNames m => DistribM a -> m a
+runDistribM' (DistribM m) =
+  fmap fst $ modifyNameSource $ positionNameSource . runRWS m M.empty
+  where positionNameSource (x, src, msgs) = ((x, msgs), src)
+
 transformFunDef :: FunDef -> DistribM (Out.FunDef Out.Kernels)
 transformFunDef (FunDef entry name rettype params body) = do
   body' <- localScope (scopeOfFParams params) $
@@ -280,7 +285,7 @@ transformStm path (Let pat aux (DoLoop ctx val form body)) =
 
 transformStm path (Let pat (StmAux cs _) (Op (Screma w form arrs)))
   | Just lam <- isMapSOAC form =
-      distributeMap path pat $ MapLoop cs w lam arrs
+      distributeMap path $ MapLoop pat cs w lam arrs
 
 transformStm path (Let res_pat (StmAux cs _) (Op (Screma w form arrs)))
   | Just (scan_lam, nes) <- isScanSOAC form,
@@ -449,20 +454,17 @@ transformStm _ (Let pat (StmAux cs _) (Op (Scatter w lam ivs as))) = runBinder_ 
     addStms bnds
     letBind_ pat $ Op kernel
 
-transformStm _ (Let pat (StmAux cs _) (Op (GenReduce w ops bucket_fun imgs))) = runBinder_ $ do
+transformStm path (Let orig_pat (StmAux cs _) (Op (GenReduce w ops bucket_fun imgs))) = do
   bfun' <- Kernelise.transformLambda bucket_fun
-  ops' <- forM ops $ \(GenReduceOp dest_w dests nes op) ->
-    GenReduceOp dest_w dests nes <$> Kernelise.transformLambda op
-  stms <- blockedGenReduce pat w ops' bfun' imgs
-  certifying cs $ addStms stms
+  genReduceKernel path [] orig_pat [] [] cs w ops bfun' imgs
 
 transformStm _ bnd =
   runBinder_ $ FOT.transformStmRecursively bnd
 
-data MapLoop = MapLoop Certificates SubExp Lambda [VName]
+data MapLoop = MapLoop Pattern Certificates SubExp Lambda [VName]
 
-mapLoopExp :: MapLoop -> Exp
-mapLoopExp (MapLoop _ w lam arrs) = Op $ Screma w (mapSOAC lam) arrs
+mapLoopStm :: MapLoop -> Stm
+mapLoopStm (MapLoop pat cs w lam arrs) = Let pat (StmAux cs ()) $ Op $ Screma w (mapSOAC lam) arrs
 
 sufficientParallelism :: (Op (Lore m) ~ Kernel innerlore, MonadBinder m) =>
                          String -> SubExp -> KernelPath -> m (SubExp, VName)
@@ -470,8 +472,8 @@ sufficientParallelism desc what path = cmpSizeLe desc (Out.SizeThreshold path) w
 
 distributeMap :: (HasScope Out.Kernels m,
                   MonadFreshNames m, MonadLogger m) =>
-                 KernelPath -> Pattern -> MapLoop -> m KernelsStms
-distributeMap path pat (MapLoop cs w lam arrs) = do
+                 KernelPath -> MapLoop -> m KernelsStms
+distributeMap path (MapLoop pat cs w lam arrs) = do
   types <- askScope
   let loopnest = MapNesting pat cs w $ zip (lambdaParams lam) arrs
       env path' = KernelEnv { kernelNest =
@@ -483,7 +485,7 @@ distributeMap path pat (MapLoop cs w lam arrs) = do
                             }
       exploitInnerParallelism path' = do
         (acc', postkernels) <- runKernelM (env path') $
-          distribute =<< distributeMapBodyStms acc (stmsToList $ bodyStms $ lambdaBody lam)
+          distribute =<< distributeMapBodyStms acc (bodyStms $ lambdaBody lam)
 
         -- There may be a few final targets remaining - these correspond to
         -- arrays that are identity mapped, and must have statements
@@ -779,15 +781,15 @@ worthIntraGroup lam = interesting $ lambdaBody lam
 incrementalFlattening :: Bool
 incrementalFlattening = isJust $ lookup "FUTHARK_INCREMENTAL_FLATTENING" unixEnvironment
 
-distributeInnerMap :: Pattern -> MapLoop -> KernelAcc
+distributeInnerMap :: MapLoop -> KernelAcc
                    -> KernelM KernelAcc
-distributeInnerMap pat maploop@(MapLoop cs w lam arrs) acc
+distributeInnerMap maploop@(MapLoop pat cs w lam arrs) acc
   | unbalancedLambda lam, lambdaContainsParallelism lam =
-      addStmToKernel (Let pat (StmAux cs ()) $ mapLoopExp maploop) acc
+      addStmToKernel (mapLoopStm maploop) acc
   | not incrementalFlattening =
       distributeNormally
   | otherwise =
-      distributeSingleStm acc (Let pat (StmAux cs ()) $ mapLoopExp maploop) >>= \case
+      distributeSingleStm acc (mapLoopStm maploop) >>= \case
       Just (post_kernels, res, nest, acc')
         | Just (perm, _pat_unused) <- permutationAndMissing pat res -> do
             addKernels post_kernels
@@ -807,7 +809,7 @@ distributeInnerMap pat maploop@(MapLoop cs w lam arrs) acc
       distribute =<<
       leavingNesting maploop =<<
       mapNesting pat cs w lam arrs
-      (distribute =<< distributeMapBodyStms def_acc (stmsToList lam_bnds))
+      (distribute =<< distributeMapBodyStms def_acc lam_bnds)
 
     multiVersion perm nest acc' = do
       -- The kernel can be distributed by itself, so now we can
@@ -822,7 +824,7 @@ distributeInnerMap pat maploop@(MapLoop cs w lam arrs) acc
             fmap postKernelsStms $ collectKernels_ $ localPath path' $
             localScope extra_scope $ inNesting nest' $ void $
             distribute =<< leavingNesting maploop =<< distribute =<<
-            distributeMapBodyStms def_acc (stmsToList lam_bnds)
+            distributeMapBodyStms def_acc lam_bnds
 
       -- XXX: we do not construct a new KernelPath when
       -- sequentialising.  This is only OK as long as further
@@ -848,7 +850,7 @@ distributeInnerMap pat maploop@(MapLoop cs w lam arrs) acc
       return acc'
 
 leavingNesting :: MapLoop -> KernelAcc -> KernelM KernelAcc
-leavingNesting (MapLoop cs w lam arrs) acc =
+leavingNesting (MapLoop _ cs w lam arrs) acc =
   case popInnerTarget $ kernelTargets acc of
    Nothing ->
      fail "The kernel targets list is unexpectedly small"
@@ -865,27 +867,24 @@ leavingNesting (MapLoop cs w lam arrs) acc =
                stms <- runBinder_ $ Kernelise.mapIsh pat cs w used_params kbody used_arrs
                return $ addStmsToKernel stms acc' { kernelStms = mempty }
 
-distributeMapBodyStms :: KernelAcc -> [Stm] -> KernelM KernelAcc
+distributeMapBodyStms :: KernelAcc -> Stms SOACS -> KernelM KernelAcc
+distributeMapBodyStms orig_acc = onStms orig_acc . stmsToList
+  where
+    onStms acc [] = return acc
 
-distributeMapBodyStms acc [] =
-  return acc
+    onStms acc (Let pat (StmAux cs _) (Op (Stream w (Sequential accs) lam arrs)):stms) = do
+      types <- asksScope scopeForSOACs
+      stream_stms <-
+        snd <$> runBinderT (sequentialStreamWholeArray pat w accs lam arrs) types
+      stream_stms' <-
+        runReaderT (copyPropagateInStms simpleSOACS stream_stms) types
+      onStms acc $ stmsToList (fmap (certify cs) stream_stms') ++ stms
 
-distributeMapBodyStms acc
-  (Let pat (StmAux cs _) (Op (Stream w (Sequential accs) lam arrs)):bnds) = do
-    types <- asksScope scopeForSOACs
-    stream_bnds <-
-      snd <$> runBinderT (sequentialStreamWholeArray pat w accs lam arrs) types
-    stream_bnds' <-
-      runReaderT (copyPropagateInStms simpleSOACS stream_bnds) types
-    distributeMapBodyStms acc $ stmsToList (fmap (certify cs) stream_bnds') ++ bnds
-
-distributeMapBodyStms acc (bnd:bnds) =
-  -- It is important that bnd is in scope if 'maybeDistributeStm'
-  -- wants to distribute, even if this causes the slightly silly
-  -- situation that bnd is in scope of itself.
-  withStm bnd $
-  maybeDistributeStm bnd =<<
-  distributeMapBodyStms acc bnds
+    onStms acc (stm:stms) =
+      -- It is important that stm is in scope if 'maybeDistributeStm'
+      -- wants to distribute, even if this causes the slightly silly
+      -- situation that stm is in scope of itself.
+      withStm stm $ maybeDistributeStm stm =<< onStms acc stms
 
 maybeDistributeStm :: Stm -> KernelAcc -> KernelM KernelAcc
 
@@ -895,7 +894,7 @@ maybeDistributeStm bnd@(Let pat _ (Op (Screma w form arrs))) acc
   -- following the map.
   distributeIfPossible acc >>= \case
     Nothing -> addStmToKernel bnd acc
-    Just acc' -> distribute =<< distributeInnerMap pat (MapLoop (stmCerts bnd) w lam arrs) acc'
+    Just acc' -> distribute =<< distributeInnerMap (MapLoop pat (stmCerts bnd) w lam arrs) acc'
 
 maybeDistributeStm bnd@(Let pat _ (DoLoop [] val form@ForLoop{} body)) acc
   | null (patternContextElements pat), bodyContainsParallelism body =
@@ -953,7 +952,7 @@ maybeDistributeStm (Let pat (StmAux cs _) (Op (Screma w form arrs))) acc
     Just m <- irwim pat w comm lam $ zip nes arrs = do
       types <- asksScope scopeForSOACs
       (_, bnds) <- runBinderT (certifying cs m) types
-      distributeMapBodyStms acc $ stmsToList bnds
+      distributeMapBodyStms acc bnds
 
 -- Parallelise segmented scatters.
 maybeDistributeStm bnd@(Let pat (StmAux cs _) (Op (Scatter w lam ivs as))) acc =
@@ -965,6 +964,20 @@ maybeDistributeStm bnd@(Let pat (StmAux cs _) (Op (Scatter w lam ivs as))) acc =
           lam' <- Kernelise.transformLambda lam
           addKernels kernels
           addKernel =<< segmentedScatterKernel nest' perm pat cs w lam' ivs as
+          return acc'
+    _ ->
+      addStmToKernel bnd acc
+
+-- Parallelise segmented GenReduce.
+maybeDistributeStm bnd@(Let pat (StmAux cs _) (Op (GenReduce w ops lam as))) acc =
+  distributeSingleStm acc bnd >>= \case
+    Just (kernels, res, nest, acc')
+      | Just (perm, pat_unused) <- permutationAndMissing pat res ->
+        localScope (typeEnvFromKernelAcc acc') $ do
+          lam' <- Kernelise.transformLambda lam
+          nest' <- expandKernelNest pat_unused nest
+          addKernels kernels
+          addKernel =<< segmentedGenReduceKernel nest' perm cs w ops lam' as
           return acc'
     _ ->
       addStmToKernel bnd acc
@@ -1022,7 +1035,7 @@ maybeDistributeStm (Let pat (StmAux cs _) (Op (Screma w form arrs))) acc
   -- This with-loop is too complicated for us to immediately do
   -- anything, so split it up and try again.
   scope <- asksScope scopeForSOACs
-  distributeMapBodyStms acc . map (certify cs) . stmsToList . snd =<<
+  distributeMapBodyStms acc . fmap (certify cs) . snd =<<
     runBinderT (dissectScrema pat w form arrs) scope
 
 maybeDistributeStm (Let pat aux (BasicOp (Replicate (Shape (d:ds)) v))) acc
@@ -1250,6 +1263,140 @@ segmentedScatterKernel nest perm scatter_pat cs scatter_w lam ivs dests = do
           WriteReturn (init ws++[aw]) (kernelInputArray inp)
           [ (map Var (init gtids)++[i], v) | (i,v) <- is_vs ]
           where (gtids,ws) = unzip ispace
+
+segmentedGenReduceKernel :: KernelNest
+                         -> [Int]
+                         -> Certificates
+                         -> SubExp
+                         -> [GenReduceOp SOACS]
+                         -> InKernelLambda
+                         -> [VName]
+                         -> KernelM KernelsStms
+segmentedGenReduceKernel nest perm cs genred_w ops lam arrs = do
+  -- We replicate some of the checking done by 'isSegmentedOp', but
+  -- things are different because a GenReduce is not a reduction or
+  -- scan.
+  (nest_stms, _, ispace, inputs, _rets) <- flatKernel nest
+  let orig_pat = Pattern [] $ rearrangeShape perm $
+                 patternValueElements $ loopNestingPattern $ fst nest
+  path <- asks kernelPath
+  -- The input/output arrays _must_ correspond to some kernel input,
+  -- or else the original nested GenReduce would have been ill-typed.
+  -- Find them.
+  ops' <- forM ops $ \(GenReduceOp num_bins dests nes op) ->
+    GenReduceOp num_bins
+    <$> mapM (fmap kernelInputArray . findInput inputs) dests
+    <*> pure nes
+    <*> pure op
+  -- We should also remove those from the kernel nest, as otherwise
+  -- the generated code may be ill-typed (referencing a consumed
+  -- array).  They will not be used anywhere else (due to uniqueness
+  -- constraints), so this is safe.
+  let all_dests = concatMap genReduceDest ops'
+  (nest_stms<>) <$>
+    inScopeOf nest_stms
+    (genReduceKernel path (kernelNestLoops $ removeArraysFromNest all_dests nest)
+     orig_pat ispace inputs cs genred_w ops' lam arrs)
+  where findInput kernel_inps a =
+          maybe bad return $ find ((==a) . kernelInputName) kernel_inps
+        bad = fail "Ill-typed nested GenReduce encountered."
+
+genReduceKernel :: (HasScope Out.Kernels m, MonadFreshNames m) =>
+                   KernelPath -> [LoopNesting]
+                -> Pattern -> [(VName, SubExp)] -> [KernelInput]
+                -> Certificates -> SubExp -> [GenReduceOp SOACS]
+                -> InKernelLambda -> [VName]
+                -> m KernelsStms
+genReduceKernel path nests orig_pat ispace inputs cs genred_w ops lam arrs = do
+  ops' <- forM ops $ \(GenReduceOp num_bins dests nes op) ->
+    GenReduceOp num_bins dests nes <$> Kernelise.transformLambda op
+
+  let isDest = flip elem $ concatMap genReduceDest ops'
+      inputs' = filter (not . isDest . kernelInputArray) inputs
+
+  runBinder_ $ do
+    (histos, k_stms) <- blockedGenReduce genred_w ispace inputs' ops' lam arrs
+
+    addStms $ fmap (certify cs) k_stms
+
+    let histos' = chunks (map (length . genReduceDest) ops') histos
+        pes = chunks (map (length . genReduceDest) ops') $ patternElements orig_pat
+
+    mapM_ combineIntermediateResults (zip3 pes ops histos')
+
+  where depth = length nests
+
+        combineIntermediateResults (pes, GenReduceOp num_bins _ nes op, histos) = do
+          num_histos <- arraysSize depth <$> mapM lookupType histos
+
+          -- Avoid the segmented reduction if num_histos is 1.
+          num_histos_is_one <-
+            letSubExp "num_histos_is_one" $
+            BasicOp $ CmpOp (CmpEq int32) num_histos $ intConst Int32 1
+
+          body_with_reshape <- runBodyBinder $
+            fmap resultBody $ forM histos $ \histo -> do
+              histo_dims <- arrayDims <$> lookupType histo
+              -- Drop the num_histos dimension dimension.
+              let final_dims = take depth histo_dims ++ drop (depth+1) histo_dims
+              letSubExp "histo_flattened" $ BasicOp $ Reshape (map DimNew final_dims) histo
+
+          -- Move the num_histos dimension innermost wrt. segments and bins.
+          histos_tr <- forM histos $ \h -> do
+            h_t <- lookupType h
+            let histo_perm = [0..depth-1] ++ [depth+1,depth] ++ [depth+2..arrayRank h_t-1]
+            letExp (baseString h <> "_tr") $ BasicOp $ Rearrange histo_perm h
+          histos_tr_t <- mapM lookupType histos_tr
+
+          op_renamed <- renameLambda op
+          map_params <- forM (lambdaReturnType op) $ \t ->
+            newParam "bin" $ t `arrayOfRow` num_histos
+          (map_res, map_stms) <- runBinder $ do
+            form <- reduceSOAC Commutative op_renamed nes
+            letTupExp "bin_combined" $ Op $
+              Screma num_histos form $ map paramName map_params
+          inner_segred_pat <- fmap (Pattern []) <$> forM pes $ \pe ->
+            PatElem <$> newVName "inner_segred" <*>
+            pure (stripArray depth $ patElemType pe)
+          nests' <-
+            moreArrays (map paramName map_params) histos_tr_t histos_tr $
+            nests ++ [MapNesting inner_segred_pat cs num_bins $ zip (lambdaParams lam) arrs]
+          let collapse_body = reconstructMapNest nests' (map (rowType . patElemType) pes) $
+                              mkBody map_stms $ map Var map_res
+
+          scope <- askScope
+          segmented_reduce_stms <-
+            runDistribM' $ localScope scope $ transformStms path $
+            stmsToList $ bodyStms collapse_body
+
+          let body_with_segred = mkBody segmented_reduce_stms $
+                                 bodyResult collapse_body
+          letBindNames (map patElemName pes) $
+            If num_histos_is_one body_with_reshape body_with_segred $
+            IfAttr (staticShapes $ map patElemType pes) IfNormal
+
+reconstructMapNest :: [LoopNesting] -> [Type] -> BodyT SOACS -> BodyT SOACS
+reconstructMapNest [] _ body = body
+reconstructMapNest (MapNesting pat cs w ps_and_arrs : nests) ts body =
+  mkBody (oneStm $ Let pat (StmAux cs ()) $ Op $ Screma w (mapSOAC map_lam) arrs) $
+  map Var $ patternNames pat
+  where (ps, arrs) = unzip ps_and_arrs
+        map_lam = Lambda { lambdaReturnType = ts
+                         , lambdaParams = ps
+                         , lambdaBody = reconstructMapNest nests (map rowType ts) body
+                         }
+
+moreArrays :: MonadFreshNames m =>
+              [VName] -> [Type] -> [VName] -> [LoopNesting]
+           -> m [LoopNesting]
+moreArrays _ _ _ [] = return []
+moreArrays ps more_ts more_arrs (MapNesting pat cs w ps_and_arrs : nests) = do
+  ps' <- case nests of [] -> return $ zipWith Param ps row_ts
+                       _  -> zipWithM newParam (map baseString ps) row_ts
+  pat' <- renamePattern pat
+  let outer = MapNesting pat' cs w $ ps_and_arrs ++ zip ps' more_arrs
+  (outer:) <$> moreArrays ps row_ts (map paramName ps') nests
+  where row_ts = map rowType more_ts
 
 segmentedScanomapKernel :: KernelNest
                         -> [Int]

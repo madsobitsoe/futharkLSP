@@ -492,7 +492,7 @@ defineMemorySpace space = do
                     collect $ free_mem [C.cexp|block->mem|] [C.cexp|block->desc|] sid
     DefaultSpace -> return [[C.citem|free(block->mem);|]]
   ctx_ty <- contextType
-  let unrefdef = [C.cedecl|static void $id:(fatMemUnRef space) ($ty:ctx_ty *ctx, $ty:mty *block, const char *desc) {
+  let unrefdef = [C.cedecl|static int $id:(fatMemUnRef space) ($ty:ctx_ty *ctx, $ty:mty *block, const char *desc) {
   if (block->references != NULL) {
     *(block->references) -= 1;
     if (ctx->detail_memory) {
@@ -510,6 +510,7 @@ defineMemorySpace space = do
     }
     block->references = NULL;
   }
+  return 0;
 }|]
 
   -- When allocating a memory block we initialise the reference count to 1.
@@ -520,12 +521,12 @@ defineMemorySpace space = do
       Space sid ->
         join $ asks envAllocate <*> pure [C.cexp|block->mem|] <*>
         pure [C.cexp|size|] <*> pure [C.cexp|desc|] <*> pure sid
-  let allocdef = [C.cedecl|static void $id:(fatMemAlloc space) ($ty:ctx_ty *ctx, $ty:mty *block, typename int64_t size, const char *desc) {
+  let allocdef = [C.cedecl|static int $id:(fatMemAlloc space) ($ty:ctx_ty *ctx, $ty:mty *block, typename int64_t size, const char *desc) {
   if (size < 0) {
     panic(1, "Negative allocation of %lld bytes attempted for %s in %s.\n",
           (long long)size, desc, $string:spacedesc, ctx->$id:usagename);
   }
-  $id:(fatMemUnRef space)(ctx, block, desc);
+  int ret = $id:(fatMemUnRef space)(ctx, block, desc);
   $items:alloc
   block->references = (int*) malloc(sizeof(int));
   *(block->references) = 1;
@@ -546,20 +547,23 @@ defineMemorySpace space = do
   } else if (ctx->detail_memory) {
     fprintf(stderr, ".\n");
   }
+  return ret;
   }|]
 
   -- Memory setting - unreference the destination and increase the
   -- count of the source by one.
-  let setdef = [C.cedecl|static void $id:(fatMemSet space) ($ty:ctx_ty *ctx, $ty:mty *lhs, $ty:mty *rhs, const char *lhs_desc) {
-  $id:(fatMemUnRef space)(ctx, lhs, lhs_desc);
+  let setdef = [C.cedecl|static int $id:(fatMemSet space) ($ty:ctx_ty *ctx, $ty:mty *lhs, $ty:mty *rhs, const char *lhs_desc) {
+  int ret = $id:(fatMemUnRef space)(ctx, lhs, lhs_desc);
   (*(rhs->references))++;
   *lhs = *rhs;
+  return ret;
 }
 |]
 
+  let peakmsg = "Peak memory usage for " ++ spacedesc ++ ": %lld bytes.\n"
   return (structdef,
           [unrefdef, allocdef, setdef],
-          [C.citem|fprintf(stderr, $string:("Peak memory usage for " ++ spacedesc ++ ": %lld bytes.\n"),
+          [C.citem|fprintf(stderr, $string:peakmsg,
                            (long long) ctx->$id:peakname);|])
   where mty = fatMemType space
         (peakname, usagename, sname, spacedesc) = case space of
@@ -588,24 +592,33 @@ resetMem mem = do
 setMem :: (C.ToExp a, C.ToExp b) => a -> b -> Space -> CompilerM op s ()
 setMem dest src space = do
   refcount <- asks envFatMemory
+  let src_s = pretty $ C.toExp src noLoc
   if refcount
-    then stm [C.cstm|$id:(fatMemSet space)(ctx, &$exp:dest, &$exp:src,
-                                           $string:(pretty $ C.toExp src noLoc));|]
+    then stm [C.cstm|if ($id:(fatMemSet space)(ctx, &$exp:dest, &$exp:src,
+                                               $string:src_s) != 0) {
+                       return 1;
+                     }|]
     else stm [C.cstm|$exp:dest = $exp:src;|]
 
 unRefMem :: C.ToExp a => a -> Space -> CompilerM op s ()
 unRefMem mem space = do
   refcount <- asks envFatMemory
+  let mem_s = pretty $ C.toExp mem noLoc
   when refcount $
-    stm [C.cstm|$id:(fatMemUnRef space)(ctx, &$exp:mem, $string:(pretty $ C.toExp mem noLoc));|]
+    stm [C.cstm|if ($id:(fatMemUnRef space)(ctx, &$exp:mem, $string:mem_s) != 0) {
+               return 1;
+             }|]
 
 allocMem :: (C.ToExp a, C.ToExp b) =>
-            a -> b -> Space -> CompilerM op s ()
-allocMem name size space = do
+            a -> b -> Space -> C.Stm -> CompilerM op s ()
+allocMem name size space on_failure = do
   refcount <- asks envFatMemory
+  let name_s = pretty $ C.toExp name noLoc
   if refcount
-    then stm [C.cstm|$id:(fatMemAlloc space)(ctx, &$exp:name, $exp:size,
-                                             $string:(pretty $ C.toExp name noLoc));|]
+    then stm [C.cstm|if ($id:(fatMemAlloc space)(ctx, &$exp:name, $exp:size,
+                                                 $string:name_s)) {
+                       $stm:on_failure
+                     }|]
     else alloc name
   where alloc dest = case space of
           DefaultSpace ->
@@ -679,7 +692,8 @@ arrayLibraryFunctions space pt signed shape = do
   let rank = length shape
       pt' = signedPrimTypeToCType signed pt
       name = arrayName pt signed rank
-      array_type = [C.cty|struct $id:("futhark_" ++ name)|]
+      arr_name = "futhark_" ++ name
+      array_type = [C.cty|struct $id:arr_name|]
 
   new_array <- publicName $ "new_" ++ name
   new_raw_array <- publicName $ "new_raw_" ++ name
@@ -700,8 +714,10 @@ arrayLibraryFunctions space pt signed shape = do
   let prepare_new = do
         resetMem [C.cexp|arr->mem|]
         allocMem [C.cexp|arr->mem|] [C.cexp|$exp:arr_size * sizeof($ty:pt')|] space
+                 [C.cstm|return NULL;|]
         forM_ [0..rank-1] $ \i ->
-          stm [C.cstm|arr->shape[$int:i] = $id:("dim"++show i);|]
+          let dim_s = "dim"++show i
+          in stm [C.cstm|arr->shape[$int:i] = $id:dim_s;|]
 
   new_body <- collect $ do
     prepare_new
@@ -741,9 +757,10 @@ arrayLibraryFunctions space pt signed shape = do
 
   return [C.cunit|
           $ty:array_type* $id:new_array($ty:ctx_ty *ctx, $ty:pt' *data, $params:shape_params) {
+            $ty:array_type* bad = NULL;
             $ty:array_type *arr = malloc(sizeof($ty:array_type));
             if (arr == NULL) {
-              return NULL;
+              return bad;
             }
             $items:(criticalSection new_body)
             return arr;
@@ -751,9 +768,10 @@ arrayLibraryFunctions space pt signed shape = do
 
           $ty:array_type* $id:new_raw_array($ty:ctx_ty *ctx, $ty:memty data, int offset,
                                             $params:shape_params) {
+            $ty:array_type* bad = NULL;
             $ty:array_type *arr = malloc(sizeof($ty:array_type));
             if (arr == NULL) {
-              return NULL;
+              return bad;
             }
             $items:(criticalSection new_raw_body)
             return arr;
@@ -906,10 +924,10 @@ prepareEntryOutputs = zipWithM prepare [(0::Int)..]
           case vd of
             ArrayValue{} -> do
               stm [C.cstm|assert((*$id:pname = malloc(sizeof($ty:ty))) != NULL);|]
-              prepareValue [C.cexp|*$id:("out" ++ show pno)|] vd
+              prepareValue [C.cexp|*$id:pname|] vd
               return [C.cparam|$ty:ty **$id:pname|]
             ScalarValue{} -> do
-              prepareValue [C.cexp|*$id:("out" ++ show pno)|] vd
+              prepareValue [C.cexp|*$id:pname|] vd
               return [C.cparam|$ty:ty *$id:pname|]
 
         prepare pno (OpaqueValue desc vds) = do
@@ -921,7 +939,7 @@ prepareEntryOutputs = zipWithM prepare [(0::Int)..]
 
 
           forM_ (zip3 [0..] vd_ts vds) $ \(i,ct,vd) -> do
-            let field = [C.cexp|(*$id:("out" ++ show pno))->$id:(tupleField i)|]
+            let field = [C.cexp|(*$id:pname)->$id:(tupleField i)|]
             case vd of
               ScalarValue{} -> return ()
               _ -> stm [C.cstm|assert(($exp:field = malloc(sizeof($ty:ct))) != NULL);|]
@@ -1068,6 +1086,7 @@ readInput i (TransparentValue vd@(ArrayValue _ _ _ t ept dims)) = do
       rank = length dims
       name = arrayName t ept rank
       dims_exps = [ [C.cexp|$id:shape[$int:j]|] | j <- [0..rank-1] ]
+      dims_s = concat $ replicate rank "[]"
 
   new_array <- publicName $ "new_" ++ name
   free_array <- publicName $ "free_" ++ name
@@ -1083,7 +1102,7 @@ readInput i (TransparentValue vd@(ArrayValue _ _ _ t ept dims)) = do
          != 0) {
        panic(1, "Cannot read input #%d of type %s%s (errno: %s).\n",
                  $int:i,
-                 $string:(concat $ replicate rank "[]"),
+                 $string:dims_s,
                  $exp:(primTypeInfo t ept).type_name,
                  strerror(errno));
      }
@@ -1280,6 +1299,7 @@ compileProg ops extra header_extra spaces options prog@(Functions funs) = do
         runCompilerM prog ops src () compileProg'
       (entry_point_decls, cli_entry_point_decls, entry_point_inits) =
         unzip3 entry_points
+      option_parser = generateOptionParser "parse_options" $ benchmarkOptions++options
 
   let headerdefs = [C.cunit|
 $esc:("/*\n * Headers\n*/\n")
@@ -1337,7 +1357,7 @@ static int perform_warmup = 0;
 static int num_runs = 1;
 static const char *entry_point = "main";
 
-$func:(generateOptionParser "parse_options" (benchmarkOptions++options))
+$func:option_parser
 
 $edecls:cli_entry_point_decls
 
@@ -1401,6 +1421,8 @@ int main(int argc, char** argv) {
 }
                         |]
 
+  let early_decls = DL.toList $ compEarlyDecls endstate
+  let lib_decls = DL.toList $ compLibDecls endstate
   let libdefs = [C.cunit|
 $esc:("#ifdef _MSC_VER\n#define inline __inline\n#endif")
 $esc:("#include <string.h>")
@@ -1411,9 +1433,9 @@ $esc:("#include <assert.h>")
 
 $esc:lock_h
 
-$edecls:(DL.toList (compEarlyDecls endstate))
+$edecls:early_decls
 
-$edecls:(DL.toList (compLibDecls endstate))
+$edecls:lib_decls
 
 $edecls:(tupleDefinitions endstate)
 
@@ -1669,7 +1691,8 @@ compileCode Skip = return ()
 
 compileCode (Comment s code) = do
   items <- blockScope $ compileCode code
-  stm [C.cstm|$comment:("// " ++ s)
+  let comment = "// " ++ s
+  stm [C.cstm|$comment:comment
               { $items:items }
              |]
 
@@ -1694,9 +1717,9 @@ compileCode (Assert e (ErrorMsg parts) (loc, locs)) = do
   let onPart (ErrorString s) = return ("%s", [C.cexp|$string:s|])
       onPart (ErrorInt32 x) = ("%d",) <$> compileExp x
   (formatstrs, formatargs) <- unzip <$> mapM onPart parts
+  let formatstr = "Error at %s:\n" <> concat formatstrs <> "\n"
   stm [C.cstm|if (!$exp:e') {
-                   ctx->error = msgprintf($string:("Error at %s:\n" <> concat formatstrs <> "\n"),
-                                           $string:stacktrace, $args:formatargs);
+                   ctx->error = msgprintf($string:formatstr, $string:stacktrace, $args:formatargs);
                    $items:free_all_mem
                    return 1;
                  }|]
@@ -1704,7 +1727,7 @@ compileCode (Assert e (ErrorMsg parts) (loc, locs)) = do
 
 compileCode (Allocate name (Count e) space) = do
   size <- compileExp e
-  allocMem name size space
+  allocMem name size space [C.cstm|return 1;|]
 
 compileCode (Free name space) =
   unRefMem name space

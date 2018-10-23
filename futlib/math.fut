@@ -53,11 +53,11 @@ module type numeric = {
 
   val sgn: t -> t
 
-  -- | The largest representable number.
-  val largest: t
+  -- | The highest representable number.
+  val highest: t
 
-  -- | The smallest representable number.
-  val smallest: t
+  -- | The lowest representable number.
+  val lowest: t
 
   -- | Returns zero on empty input.
   val sum: []t -> t
@@ -65,9 +65,9 @@ module type numeric = {
   -- | Returns one on empty input.
   val product: []t -> t
 
-  -- | Returns `smallest` on empty input.
+  -- | Returns `lowest` on empty input.
   val maximum: []t -> t
-  -- | Returns `largest` on empty input.
+  -- | Returns `highest` on empty input.
   val minimum: []t -> t
 }
 
@@ -172,15 +172,15 @@ module type float = {
 module bool: from_prim with t = bool = {
   type t = bool
 
-  let i8  (x: i8)  = x != 0i8
-  let i16 (x: i16) = x != 0i16
-  let i32 (x: i32) = x != 0i32
-  let i64 (x: i64) = x != 0i64
+  let i8  = intrinsics.itob_i8_bool
+  let i16 = intrinsics.itob_i16_bool
+  let i32 = intrinsics.itob_i32_bool
+  let i64 = intrinsics.itob_i64_bool
 
-  let u8  (x: u8)  = x != 0u8
-  let u16 (x: u16) = x != 0u16
-  let u32 (x: u32) = x != 0u32
-  let u64 (x: u64) = x != 0u64
+  let u8  (x: u8)  = intrinsics.itob_i8_bool (intrinsics.sign_i8 x)
+  let u16 (x: u16) = intrinsics.itob_i16_bool (intrinsics.sign_i16 x)
+  let u32 (x: u32) = intrinsics.itob_i32_bool (intrinsics.sign_i32 x)
+  let u64 (x: u64) = intrinsics.itob_i64_bool (intrinsics.sign_i64 x)
 
   let f32 (x: f32) = x != 0f32
   let f64 (x: f64) = x != 0f64
@@ -222,7 +222,7 @@ module i8: (size with t = i8) = {
   let f32 (x: f32) = intrinsics.fptosi_f32_i8 x
   let f64 (x: f64) = intrinsics.fptosi_f64_i8 x
 
-  let bool (x: bool) = if x then 1i8 else 0i8
+  let bool = intrinsics.btoi_bool_i8
 
   let to_i32(x: i8) = intrinsics.sext_i8_i32 x
   let to_i64(x: i8) = intrinsics.sext_i8_i64 x
@@ -241,8 +241,8 @@ module i8: (size with t = i8) = {
   let max (x: t) (y: t) = intrinsics.smax8 x y
   let min (x: t) (y: t) = intrinsics.smin8 x y
 
-  let largest = 127i8
-  let smallest = largest + 1i8
+  let highest = 127i8
+  let lowest = highest + 1i8
 
   let num_bits = 8
   let get_bit (bit: i32) (x: t) = to_i32 ((x >> i32 bit) & i32 1)
@@ -254,8 +254,8 @@ module i8: (size with t = i8) = {
 
   let sum = reduce (+) (i32 0)
   let product = reduce (*) (i32 1)
-  let maximum = reduce max smallest
-  let minimum = reduce min largest
+  let maximum = reduce max lowest
+  let minimum = reduce min highest
 }
 
 module i16: (size with t = i16) = {
@@ -292,7 +292,7 @@ module i16: (size with t = i16) = {
   let f32 (x: f32) = intrinsics.fptosi_f32_i16 x
   let f64 (x: f64) = intrinsics.fptosi_f64_i16 x
 
-  let bool (x: bool) = if x then 1i16 else 0i16
+  let bool = intrinsics.btoi_bool_i16
 
   let to_i32(x: i16) = intrinsics.sext_i16_i32 x
   let to_i64(x: i16) = intrinsics.sext_i16_i64 x
@@ -311,8 +311,8 @@ module i16: (size with t = i16) = {
   let max (x: t) (y: t) = intrinsics.smax16 x y
   let min (x: t) (y: t) = intrinsics.smin16 x y
 
-  let largest = 32767i16
-  let smallest = largest + 1i16
+  let highest = 32767i16
+  let lowest = highest + 1i16
 
   let num_bits = 16
   let get_bit (bit: i32) (x: t) = to_i32 ((x >> i32 bit) & i32 1)
@@ -324,8 +324,8 @@ module i16: (size with t = i16) = {
 
   let sum = reduce (+) (i32 0)
   let product = reduce (*) (i32 1)
-  let maximum = reduce max smallest
-  let minimum = reduce min largest
+  let maximum = reduce max lowest
+  let minimum = reduce min highest
 }
 
 module i32: (size with t = i32) = {
@@ -365,7 +365,7 @@ module i32: (size with t = i32) = {
   let f32 (x: f32) = intrinsics.fptosi_f32_i32 x
   let f64 (x: f64) = intrinsics.fptosi_f64_i32 x
 
-  let bool (x: bool) = if x then 1i32 else 0i32
+  let bool = intrinsics.btoi_bool_i32
 
   let to_i32(x: i32) = intrinsics.sext_i32_i32 x
   let to_i64(x: i32) = intrinsics.sext_i32_i64 x
@@ -384,8 +384,8 @@ module i32: (size with t = i32) = {
   let max (x: t) (y: t) = intrinsics.smax32 x y
   let min (x: t) (y: t) = intrinsics.smin32 x y
 
-  let largest = 2147483647
-  let smallest = largest + 1
+  let highest = 2147483647
+  let lowest = highest + 1
 
   let num_bits = 32
   let get_bit (bit: i32) (x: t) = to_i32 ((x >> i32 bit) & i32 1)
@@ -397,8 +397,8 @@ module i32: (size with t = i32) = {
 
   let sum = reduce (+) (i32 0)
   let product = reduce (*) (i32 1)
-  let maximum = reduce max smallest
-  let minimum = reduce min largest
+  let maximum = reduce max lowest
+  let minimum = reduce min highest
 }
 
 module i64: (size with t = i64) = {
@@ -438,7 +438,7 @@ module i64: (size with t = i64) = {
   let f32 (x: f32) = intrinsics.fptosi_f32_i64 x
   let f64 (x: f64) = intrinsics.fptosi_f64_i64 x
 
-  let bool (x: bool) = if x then 1i64 else 0i64
+  let bool = intrinsics.btoi_bool_i64
 
   let to_i32(x: i64) = intrinsics.sext_i64_i32 x
   let to_i64(x: i64) = intrinsics.sext_i64_i64 x
@@ -457,8 +457,8 @@ module i64: (size with t = i64) = {
   let max (x: t) (y: t) = intrinsics.smax64 x y
   let min (x: t) (y: t) = intrinsics.smin64 x y
 
-  let largest = 9223372036854775807i64
-  let smallest = largest + 1i64
+  let highest = 9223372036854775807i64
+  let lowest = highest + 1i64
 
   let num_bits = 64
   let get_bit (bit: i32) (x: t) = to_i32 ((x >> i32 bit) & i32 1)
@@ -470,8 +470,8 @@ module i64: (size with t = i64) = {
 
   let sum = reduce (+) (i32 0)
   let product = reduce (*) (i32 1)
-  let maximum = reduce max smallest
-  let minimum = reduce min largest
+  let maximum = reduce max lowest
+  let minimum = reduce min highest
 }
 
 module u8: (size with t = u8) = {
@@ -511,7 +511,7 @@ module u8: (size with t = u8) = {
   let f32 (x: f32) = unsign (intrinsics.fptoui_f32_i8 x)
   let f64 (x: f64) = unsign (intrinsics.fptoui_f64_i8 x)
 
-  let bool (x: bool) = if x then 1u8 else 0u8
+  let bool x = unsign (intrinsics.btoi_bool_i8 x)
 
   let to_i32(x: u8) = intrinsics.zext_i8_i32 (sign x)
   let to_i64(x: u8) = intrinsics.zext_i8_i64 (sign x)
@@ -530,8 +530,8 @@ module u8: (size with t = u8) = {
   let max (x: t) (y: t) = unsign (intrinsics.umax8 (sign x) (sign y))
   let min (x: t) (y: t) = unsign (intrinsics.umin8 (sign x) (sign y))
 
-  let largest = 255u8
-  let smallest = 0u8
+  let highest = 255u8
+  let lowest = 0u8
 
   let num_bits = 8
   let get_bit (bit: i32) (x: t) = to_i32 ((x >> i32 bit) & i32 1)
@@ -543,8 +543,8 @@ module u8: (size with t = u8) = {
 
   let sum = reduce (+) (i32 0)
   let product = reduce (*) (i32 1)
-  let maximum = reduce max smallest
-  let minimum = reduce min largest
+  let maximum = reduce max lowest
+  let minimum = reduce min highest
 }
 
 module u16: (size with t = u16) = {
@@ -584,7 +584,7 @@ module u16: (size with t = u16) = {
   let f32 (x: f32) = unsign (intrinsics.fptoui_f32_i16 x)
   let f64 (x: f64) = unsign (intrinsics.fptoui_f64_i16 x)
 
-  let bool (x: bool) = if x then 1u16 else 0u16
+  let bool x = unsign (intrinsics.btoi_bool_i16 x)
 
   let to_i32(x: u16) = intrinsics.zext_i16_i32 (sign x)
   let to_i64(x: u16) = intrinsics.zext_i16_i64 (sign x)
@@ -603,8 +603,8 @@ module u16: (size with t = u16) = {
   let max (x: t) (y: t) = unsign (intrinsics.umax16 (sign x) (sign y))
   let min (x: t) (y: t) = unsign (intrinsics.umin16 (sign x) (sign y))
 
-  let largest = 65535u16
-  let smallest = 0u16
+  let highest = 65535u16
+  let lowest = 0u16
 
   let num_bits = 16
   let get_bit (bit: i32) (x: t) = to_i32 ((x >> i32 bit) & i32 1)
@@ -616,8 +616,8 @@ module u16: (size with t = u16) = {
 
   let sum = reduce (+) (i32 0)
   let product = reduce (*) (i32 1)
-  let maximum = reduce max smallest
-  let minimum = reduce min largest
+  let maximum = reduce max lowest
+  let minimum = reduce min highest
 }
 
 module u32: (size with t = u32) = {
@@ -657,7 +657,7 @@ module u32: (size with t = u32) = {
   let f32 (x: f32) = unsign (intrinsics.fptoui_f32_i32 x)
   let f64 (x: f64) = unsign (intrinsics.fptoui_f64_i32 x)
 
-  let bool (x: bool) = if x then 1u32 else 0u32
+  let bool x = unsign (intrinsics.btoi_bool_i32 x)
 
   let to_i32(x: u32) = intrinsics.zext_i32_i32 (sign x)
   let to_i64(x: u32) = intrinsics.zext_i32_i64 (sign x)
@@ -672,8 +672,8 @@ module u32: (size with t = u32) = {
   let sgn (x: u32) = unsign (intrinsics.usignum32 (sign x))
   let abs (x: u32) = x
 
-  let largest = 4294967295u32
-  let smallest = largest + 1u32
+  let highest = 4294967295u32
+  let lowest = highest + 1u32
 
   let negate (x: t) = -x
   let max (x: t) (y: t) = unsign (intrinsics.umax32 (sign x) (sign y))
@@ -689,8 +689,8 @@ module u32: (size with t = u32) = {
 
   let sum = reduce (+) (i32 0)
   let product = reduce (*) (i32 1)
-  let maximum = reduce max smallest
-  let minimum = reduce min largest
+  let maximum = reduce max lowest
+  let minimum = reduce min highest
 }
 
 module u64: (size with t = u64) = {
@@ -730,7 +730,7 @@ module u64: (size with t = u64) = {
   let f32 (x: f32) = unsign (intrinsics.fptoui_f32_i64 x)
   let f64 (x: f64) = unsign (intrinsics.fptoui_f64_i64 x)
 
-  let bool (x: bool) = if x then 1u64 else 0u64
+  let bool x = unsign (intrinsics.btoi_bool_i64 x)
 
   let to_i32(x: u64) = intrinsics.zext_i64_i32 (sign x)
   let to_i64(x: u64) = intrinsics.zext_i64_i64 (sign x)
@@ -749,8 +749,8 @@ module u64: (size with t = u64) = {
   let max (x: t) (y: t) = unsign (intrinsics.umax64 (sign x) (sign y))
   let min (x: t) (y: t) = unsign (intrinsics.umin64 (sign x) (sign y))
 
-  let largest = 18446744073709551615u64
-  let smallest = largest + 1u64
+  let highest = 18446744073709551615u64
+  let lowest = highest + 1u64
 
   let num_bits = 64
   let get_bit (bit: i32) (x: t) = to_i32 ((x >> i32 bit) & i32 1)
@@ -762,8 +762,8 @@ module u64: (size with t = u64) = {
 
   let sum = reduce (+) (i32 0)
   let product = reduce (*) (i32 1)
-  let maximum = reduce max smallest
-  let minimum = reduce min largest
+  let maximum = reduce max lowest
+  let minimum = reduce min highest
 }
 
 module f64: (float with t = f64 with int_t = u64) = {
@@ -862,16 +862,16 @@ module f64: (float with t = f64 with int_t = u64) = {
   let inf = 1f64 / 0f64
   let nan = 0f64 / 0f64
 
-  let largest = inf
-  let smallest = -inf
+  let highest = inf
+  let lowest = -inf
 
   let pi = 3.1415926535897932384626433832795028841971693993751058209749445923078164062f64
   let e = 2.718281828459045235360287471352662497757247093699959574966967627724076630353f64
 
   let sum = reduce (+) (i32 0)
   let product = reduce (*) (i32 1)
-  let maximum = reduce max smallest
-  let minimum = reduce min largest
+  let maximum = reduce max lowest
+  let minimum = reduce min highest
 }
 
 module f32: (float with t = f32 with int_t = u32) = {
@@ -971,14 +971,14 @@ module f32: (float with t = f32 with int_t = u32) = {
   let inf = 1f32 / 0f32
   let nan = 0f32 / 0f32
 
-  let largest = inf
-  let smallest = -inf
+  let highest = inf
+  let lowest = -inf
 
   let pi = f64 f64m.pi
   let e = f64 f64m.e
 
   let sum = reduce (+) (i32 0)
   let product = reduce (*) (i32 1)
-  let maximum = reduce max smallest
-  let minimum = reduce min largest
+  let maximum = reduce max lowest
+  let minimum = reduce min highest
 }

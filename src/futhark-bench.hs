@@ -5,6 +5,7 @@
 -- flag for machine-readable output.
 module Main (main) where
 
+import Control.Concurrent
 import Control.Monad
 import Control.Monad.Except
 import qualified Data.ByteString.Char8 as SBS
@@ -74,6 +75,23 @@ resultsToJSON = JSON.JSObject . JSON.toJSObject . map benchResultToJSObject
                  [("runtimes", JSON.showJSON $ map runMicroseconds runtimes),
                   ("stderr", JSON.showJSON progerr)])
 
+fork :: (a -> IO b) -> a -> IO (MVar b)
+fork f x = do cell <- newEmptyMVar
+              void $ forkIO $ do result <- f x
+                                 putMVar cell result
+              return cell
+
+pmapIO :: (a -> IO b) -> [a] -> IO [b]
+pmapIO f elems = go elems []
+  where
+    go [] res = return res
+    go xs res = do
+      numThreads <- getNumCapabilities
+      let (e,es) = splitAt numThreads xs
+      mvars  <- mapM (fork f) e
+      result <- mapM takeMVar mvars
+      go es (result ++ res)
+
 runBenchmarks :: BenchOptions -> [FilePath] -> IO ()
 runBenchmarks opts paths = do
   -- We force line buffering to ensure that we produce running output.
@@ -82,7 +100,7 @@ runBenchmarks opts paths = do
   hSetBuffering stdout LineBuffering
   benchmarks <- filter (not . ignored . fst) <$> testSpecsFromPaths paths
   (skipped_benchmarks, compiled_benchmarks) <-
-    partitionEithers <$> mapM (compileBenchmark opts) benchmarks
+    partitionEithers <$> pmapIO (compileBenchmark opts) benchmarks
 
   when (anyFailedToCompile skipped_benchmarks) exitFailure
 
@@ -158,7 +176,7 @@ reportResult results = do
   let runtimes = map (fromIntegral . runMicroseconds) results
       avg = sum runtimes / fromIntegral (length runtimes)
       rel_dev = stddevp runtimes / mean runtimes :: Double
-  putStrLn $ printf "%10.2f" avg ++ "us (avg. of " ++ show (length runtimes) ++
+  putStrLn $ printf "%10.2f" avg ++ "μs (avg. of " ++ show (length runtimes) ++
     " runs; RSD: " ++ printf "%.2f" rel_dev ++ ")"
 
 progNotFound :: String -> String
@@ -174,12 +192,12 @@ io = liftIO
 
 runBenchmarkCase :: BenchOptions -> FilePath -> T.Text -> Int -> TestRun
                  -> IO (Maybe DataResult)
-runBenchmarkCase _ _ _ _ (TestRun _ _ RunTimeFailure{} _) =
+runBenchmarkCase _ _ _ _ (TestRun _ _ RunTimeFailure{} _ _) =
   return Nothing -- Not our concern, we are not a testing tool.
-runBenchmarkCase opts _ _ _ (TestRun tags _ _ _)
+runBenchmarkCase opts _ _ _ (TestRun tags _ _ _ _)
   | any (`elem` tags) $ optExcludeCase opts =
       return Nothing
-runBenchmarkCase opts program entry pad_to (TestRun _ input_spec (Succeeds expected_spec) dataset_desc) =
+runBenchmarkCase opts program entry pad_to (TestRun _ input_spec (Succeeds expected_spec) _ dataset_desc) =
   -- We store the runtime in a temporary file.
   withSystemTempFile "futhark-bench" $ \tmpfile h -> do
   hClose h -- We will be writing and reading this ourselves.

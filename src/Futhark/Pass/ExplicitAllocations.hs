@@ -570,7 +570,7 @@ handleKernel (Kernel desc space kernel_ts kbody) = subAllocM handleKernelExp Tru
           let (x_params, y_params) = splitAt (length vs) $ lambdaParams op
               sliceDest dest = do
                 dest_t <- lookupType dest
-                sliceInfo dest $ fullSlice dest_t [DimFix bucket]
+                sliceInfo dest $ fullSlice dest_t $ map DimFix bucket
           x_params' <- zipWith Param (map paramName x_params) <$>
                        mapM sliceDest dests
           y_params' <- zipWith Param (map paramName y_params) <$>
@@ -744,34 +744,33 @@ allocInReduceLambda :: Lambda InInKernel
                     -> [(VName, IxFun)]
                     -> AllocM InInKernel OutInKernel (Lambda OutInKernel)
 allocInReduceLambda lam input_summaries = do
-  let (i, other_offset_param, actual_params) =
+  let (i, j_param, actual_params) =
         partitionChunkedKernelLambdaParameters $ lambdaParams lam
       (acc_params, arr_params) =
         splitAt (length input_summaries) actual_params
       this_index = LeafExp i int32
-      other_offset = LeafExp (paramName other_offset_param) int32
+      other_index = LeafExp (paramName j_param) int32
   acc_params' <-
-    allocInReduceParameters this_index 0 $
+    allocInReduceParameters this_index $
     zip acc_params input_summaries
   arr_params' <-
-    allocInReduceParameters this_index other_offset $
+    allocInReduceParameters other_index $
     zip arr_params input_summaries
 
   allocInLambda (Param i (MemPrim int32) :
-                 other_offset_param { paramAttr = MemPrim int32 } :
+                 j_param { paramAttr = MemPrim int32 } :
                  acc_params' ++ arr_params')
     (lambdaBody lam) (lambdaReturnType lam)
 
 allocInReduceParameters :: PrimExp VName
-                        -> PrimExp VName
                         -> [(LParam InInKernel, (VName, IxFun))]
                         -> AllocM InInKernel OutInKernel [LParam ExplicitMemory]
-allocInReduceParameters my_id offset = mapM allocInReduceParameter
+allocInReduceParameters my_id = mapM allocInReduceParameter
   where allocInReduceParameter (p, (mem, ixfun)) =
           case paramType p of
             (Array bt shape u) ->
               let ixfun' = IxFun.slice ixfun $
-                           fullSliceNum (IxFun.shape ixfun) [DimFix $ my_id + offset]
+                           fullSliceNum (IxFun.shape ixfun) [DimFix my_id]
               in return p { paramAttr = MemArray bt shape u $ ArrayIn mem ixfun' }
             Prim bt ->
               return p { paramAttr = MemPrim bt }

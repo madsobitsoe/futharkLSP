@@ -33,6 +33,7 @@ import Language.Futhark
 import Language.Futhark.Traversals
 import Language.Futhark.TypeChecker.Monad hiding (BoundV, checkQualNameWithEnv)
 import Language.Futhark.TypeChecker.Types hiding (checkTypeDecl)
+import Language.Futhark.TypeChecker.Unify
 import qualified Language.Futhark.TypeChecker.Types as Types
 import qualified Language.Futhark.TypeChecker.Monad as TypeM
 import Futhark.Util.Pretty (Pretty)
@@ -141,19 +142,6 @@ data ValBinding = BoundV [TypeParam] PatternType
                 | WasConsumed SrcLoc
                 deriving (Show)
 
--- A piece of information that describes what process the type checker
--- currently performing.  This is used to give better error messages.
-data BreadCrumb = MatchingTypes (TypeBase () ()) (TypeBase () ())
-                | MatchingFields Name
-
-instance Show BreadCrumb where
-  show (MatchingTypes t1 t2) =
-    "When matching type\n" ++ indent (pretty t1) ++
-    "\nwith\n" ++ indent (pretty t2)
-    where indent = intercalate "\n" . map ("  "++) . lines
-  show (MatchingFields field) =
-    "When matching types of record field `" ++ pretty field ++ "`."
-
 -- | Type checking happens with access to this environment.  The
 -- tables will be extended during type-checking as bindings come into
 -- scope.
@@ -177,61 +165,15 @@ envToTermScope env = TermScope vtable (envTypeTable env) (envNameMap env) mempty
   where vtable = M.map valBinding $ envVtable env
         valBinding (TypeM.BoundV tps v) = BoundV tps $ v `setAliases` mempty
 
--- | Mapping from fresh type variables, instantiated from the type
--- schemes of polymorphic functions, to (possibly) specific types as
--- determined on application and the location of that application, or
--- a partial constraint on their type.
-type Constraints = M.Map VName Constraint
+constraintTypeVars :: Constraints -> Names
+constraintTypeVars = mconcat . map f . M.elems
+  where f (Constraint t _) = typeVars t
+        f _ = mempty
 
-data Constraint = NoConstraint (Maybe Liftedness) SrcLoc
-                | ParamType Liftedness SrcLoc
-                | Constraint (TypeBase () ()) SrcLoc
-                | Overloaded [PrimType] SrcLoc
-                | HasFields (M.Map Name (TypeBase () ())) SrcLoc
-                | Equality SrcLoc
-                | HasConstrs [Name] SrcLoc
-                deriving Show
-
-instance Located Constraint where
-  locOf (NoConstraint _ loc) = locOf loc
-  locOf (ParamType _ loc) = locOf loc
-  locOf (Constraint _ loc) = locOf loc
-  locOf (Overloaded _ loc) = locOf loc
-  locOf (HasFields _ loc) = locOf loc
-  locOf (Equality loc) = locOf loc
-  locOf (HasConstrs _ loc) = locOf loc
-
--- | Is the given type variable actually the name of an abstract type
--- or type parameter, which we cannot substitute?
-isRigid :: VName -> Constraints -> Bool
-isRigid v constraints = case M.lookup v constraints of
-                             Nothing -> True
-                             Just ParamType{} -> True
-                             _ -> False
-
-lookupSubst :: VName -> Constraints -> Maybe (TypeBase () ())
-lookupSubst v constraints = do Constraint t _ <- M.lookup v constraints
-                               Just t
-
-constraintSubsts :: Constraints -> M.Map VName (TypeBase () ())
-constraintSubsts = M.mapMaybe constraintSubst
-  where constraintSubst (Constraint t _) = Just t
-        constraintSubst _ = Nothing
-
-applySubstInConstraint :: VName -> TypeBase () () -> Constraint -> Constraint
-applySubstInConstraint vn tp (Constraint t loc) =
-  Constraint (applySubst (`M.lookup` M.singleton vn tp) t) loc
-applySubstInConstraint vn tp (HasFields fs loc) =
-  HasFields (M.map (applySubst (`M.lookup` M.singleton vn tp)) fs) loc
-applySubstInConstraint _ _ (NoConstraint l loc) = NoConstraint l loc
-applySubstInConstraint _ _ (Overloaded ts loc) = Overloaded ts loc
-applySubstInConstraint _ _ (Equality loc) = Equality loc
-applySubstInConstraint _ _ (ParamType l loc) = ParamType l loc
-applySubstInConstraint _ _ (HasConstrs ns loc) = HasConstrs ns loc
-
-normaliseType :: Substitutable a => a -> TermTypeM a
-normaliseType t = do constraints <- getConstraints
-                     return $ applySubst (`lookupSubst` constraints) t
+overloadedTypeVars :: Constraints -> Names
+overloadedTypeVars = mconcat . map f . M.elems
+  where f (HasFields fs _) = mconcat $ map typeVars $ M.elems fs
+        f _ = mempty
 
 -- | Get the type of an expression, with all type variables
 -- substituted.  Never call 'typeOf' directly (except in a few
@@ -259,6 +201,21 @@ newtype TermTypeM a = TermTypeM (RWST
 instance Fail.MonadFail TermTypeM where
   fail = typeError noLoc . ("unknown failure (likely a bug): "++)
 
+instance MonadUnify TermTypeM where
+  getConstraints = gets fst
+  putConstraints x = modify $ \s -> (x, snd s)
+
+  newTypeVar loc desc = do
+    i <- incCounter
+    v <- newID $ nameFromString $ desc ++ show i
+    modifyConstraints $ M.insert v $ NoConstraint Nothing loc
+    return $ TypeVar mempty Nonunique (typeName v) []
+
+instance MonadBreadCrumbs TermTypeM where
+  breadCrumb bc = local $ \env ->
+    env { scopeBreadCrumbs = bc : scopeBreadCrumbs env }
+  getBreadCrumbs = asks scopeBreadCrumbs
+
 runTermTypeM :: TermTypeM a -> TypeM (a, Occurences)
 runTermTypeM (TermTypeM m) = do
   initial_scope <- (initialTermScope <>) <$> (envToTermScope <$> askEnv)
@@ -266,12 +223,6 @@ runTermTypeM (TermTypeM m) = do
 
 liftTypeM :: TypeM a -> TermTypeM a
 liftTypeM = TermTypeM . lift
-
-getConstraints :: TermTypeM Constraints
-getConstraints = gets fst
-
-modifyConstraints :: (Constraints -> Constraints) -> TermTypeM ()
-modifyConstraints f = modify $ \s -> (f $ fst s, snd s)
 
 incCounter :: TermTypeM Int
 incCounter = do (x, i) <- get
@@ -436,13 +387,6 @@ instantiateTypeParam loc tparam = do
   where l = case tparam of TypeParamType x _ _ -> x
                            _                   -> Lifted
 
-newTypeVar :: Monoid als => SrcLoc -> String -> TermTypeM (TypeBase dim als)
-newTypeVar loc desc = do
-  i <- incCounter
-  v <- newID $ nameFromString $ desc ++ show i
-  modifyConstraints $ M.insert v $ NoConstraint Nothing loc
-  return $ TypeVar mempty Nonunique (typeName v) []
-
 newArrayType :: SrcLoc -> String -> Int -> TermTypeM (TypeBase () (), TypeBase () ())
 newArrayType loc desc r = do
   v <- newID $ nameFromString desc
@@ -450,17 +394,6 @@ newArrayType loc desc r = do
   return (Array (ArrayPolyElem (typeName v) [] ())
                 (ShapeDecl $ replicate r ()) Nonunique,
           TypeVar () Nonunique (typeName v) [])
-
-breadCrumb :: BreadCrumb -> TermTypeM a -> TermTypeM a
-breadCrumb bc = local $ \env ->
-  env { scopeBreadCrumbs = bc : scopeBreadCrumbs env }
-
-typeError :: SrcLoc -> String -> TermTypeM a
-typeError loc s = do
-  bc <- asks scopeBreadCrumbs
-  let bc' | null bc = ""
-          | otherwise = "\n" ++ unlines (map show bc)
-  throwError $ TypeError loc $ s ++ bc'
 
 --- Errors
 
@@ -1085,6 +1018,15 @@ checkExp (Update src idxes ve loc) = do
   where isFix DimFix{} = True
         isFix _        = False
 
+checkExp (RecordUpdate src fields ve NoInfo loc) = do
+  src' <- checkExp src
+  ve' <- checkExp ve
+  a <- expType src'
+  r <- foldM (flip $ mustHaveField loc) a fields
+  unify loc (toStruct r) . toStruct =<< expType ve'
+  return $ RecordUpdate src' fields ve'
+    (Info $ vacuousShapeAnnotations $ fromStruct a) loc
+
 checkExp (Index e idxes NoInfo loc) = do
   (t, _) <- newArrayType (srclocOf e) "e" $ length idxes
   e' <- unifies t =<< checkExp e
@@ -1574,14 +1516,60 @@ consumeArg loc at _       = return [observation (aliases at) loc]
 checkOneExp :: UncheckedExp -> TypeM Exp
 checkOneExp e = fmap fst . runTermTypeM $ do
   e' <- checkExp e
-  fixOverloadedTypes mempty
+  fixOverloadedTypes
   updateExpTypes e'
 
+-- | Type-check a top-level (or module-level) function definition.
 checkFunDef :: (Name, Maybe UncheckedTypeExp,
                 [UncheckedTypeParam], [UncheckedPattern],
                 UncheckedExp, SrcLoc)
             -> TypeM (VName, [TypeParam], [Pattern], Maybe (TypeExp VName), StructType, Exp)
-checkFunDef = fmap fst . runTermTypeM . checkFunDef'
+checkFunDef f = fmap fst $ runTermTypeM $ do
+  (fname, tparams, params, maybe_retdecl, rettype, body) <- checkFunDef' f
+
+  -- Since this is a top-level function, we also resolve overloaded
+  -- types, using either defaults or complaining about ambiguities.
+  fixOverloadedTypes
+
+  -- Then replace all inferred types in the body and parameters.
+  body' <- updateExpTypes body
+  params' <- updateExpTypes params
+  maybe_retdecl' <- traverse updateExpTypes maybe_retdecl
+  rettype' <- normaliseType rettype
+
+  return (fname, tparams, params', maybe_retdecl', rettype', body')
+
+-- | This is "fixing" as in "setting them", not "correcting them".  We
+-- only make very conservative fixing.
+fixOverloadedTypes :: TermTypeM ()
+fixOverloadedTypes = getConstraints >>= mapM_ fixOverloaded . M.toList
+  where fixOverloaded (v, Overloaded ots loc)
+          | Signed Int32 `elem` ots = do
+              unify loc (TypeVar () Nonunique (typeName v) []) $ Prim $ Signed Int32
+              warn loc "Defaulting ambiguous type to `i32`."
+          | FloatType Float64 `elem` ots = do
+              unify loc (TypeVar () Nonunique (typeName v) []) $ Prim $ FloatType Float64
+              warn loc "Defaulting ambiguous type to `f64`."
+          | otherwise =
+              typeError loc $
+              unlines ["Type is ambiguous (could be one of " ++ intercalate ", " (map pretty ots) ++ ").",
+                       "Add a type annotation to disambiguate the type."]
+
+        fixOverloaded (_, NoConstraint _ loc) =
+          typeError loc $ unlines ["Type of expression is ambiguous.",
+                                    "Add a type annotation to disambiguate the type."]
+
+        fixOverloaded (_, Equality loc) =
+          typeError loc $ unlines ["Type is ambiguous (must be equality type).",
+                                   "Add a type annotation to disambiguate the type."]
+
+        fixOverloaded (_, HasFields fs loc) =
+          typeError loc $ unlines ["Type is ambiguous (must be record with fields {" ++ fs' ++ "}).",
+                                   "Add a type annotation to disambiguate the type."]
+          where fs' = intercalate ", " $ map field $ M.toList fs
+                field (l, t) = pretty l ++ ": " ++ pretty t
+
+        fixOverloaded _ = return ()
 
 checkFunDef' :: (Name, Maybe UncheckedTypeExp,
                  [UncheckedTypeParam], [UncheckedPattern],
@@ -1600,17 +1588,8 @@ checkFunDef' (fname, maybe_retdecl, tparams, params, body, loc) = noUnique $ do
 
     body' <- checkFunBody body ((\(_,t,_)->t) <$> maybe_retdecl') (maybe loc srclocOf maybe_retdecl)
 
-    -- We are now done inferring types.  First we find any remaining
-    -- overloaded type variables that were created in this function
-    -- and determine them using defaults.
-    fixOverloadedTypes $ S.fromList $ M.keys then_substs
-
-    -- Then replace all inferred types in the body and parameters.
-    body'' <- updateExpTypes body'
     params'' <- updateExpTypes params'
-    now_substs <- getConstraints
-
-    body_t <- expType body''
+    body_t <- expType body'
 
     (maybe_retdecl'', rettype) <- case maybe_retdecl' of
       Just (retdecl', retdecl_type, _) -> do
@@ -1619,7 +1598,26 @@ checkFunDef' (fname, maybe_retdecl, tparams, params, body, loc) = noUnique $ do
         return (Just retdecl', retdecl_type)
       Nothing -> return (Nothing, vacuousShapeAnnotations $ toStruct body_t)
 
-    let new_substs = now_substs `M.difference` then_substs
+    -- Candidates for let-generalisation are those type variables that
+    ---
+    -- (1) were not known before we checked this function, and
+    --
+    -- (2) are not used in the (new) definition of any type variables
+    -- known before we checked this function.
+    --
+    -- (3) are not referenced from an overloaded type (for example,
+    -- are the element types of an incompletely resolved record type).
+    -- This is a bit more restrictive than I'd like, and SML for
+    -- example does not have this restriction.
+    now_substs <- getConstraints
+    let then_type_variables = S.fromList $ M.keys then_substs
+        then_type_constraints = constraintTypeVars $
+                                M.filterWithKey (\k _ -> k `S.member` then_type_variables) now_substs
+        keep_type_variables = then_type_variables <>
+                              then_type_constraints <>
+                              overloadedTypeVars now_substs
+
+    let new_substs = M.filterWithKey (\k _ -> not (k `S.member` keep_type_variables)) now_substs
     tparams'' <- closeOverTypes new_substs tparams' $
                  rettype : map patternStructType params''
 
@@ -1627,18 +1625,13 @@ checkFunDef' (fname, maybe_retdecl, tparams, params, body, loc) = noUnique $ do
     -- warnings if not.
     isExhaustive body''
 
-    -- We keep only those type variables that existed before the
-    -- function, or which are used in the substitutions for those that
-    -- are.
-    let then_type_variables = S.fromList (M.keys then_substs)
-        then_type_substs = M.elems $ constraintSubsts $
-                           M.filterWithKey (\k _ -> k `S.member` then_type_variables) now_substs
-        keep_type_variables = then_type_variables <> foldMap typeVars then_type_substs
-    modifyConstraints $ M.filterWithKey $ \k _ -> k `S.member` keep_type_variables
+    -- We keep those type variables that were not closed over by
+    -- let-generalisation.
+    modifyConstraints $ M.filterWithKey $ \k _ -> k `notElem` map typeParamName tparams''
 
     bindSpaced [(Term, fname)] $ do
       fname' <- checkName Term fname loc
-      return (fname', tparams'', params'', maybe_retdecl'', rettype, body'')
+      return (fname', tparams'', params'', maybe_retdecl'', rettype, body')
 
   where -- | Check that unique return values do not alias a
         -- non-consumed parameter.
@@ -1696,28 +1689,12 @@ checkFunBody body maybe_rettype _loc = do
 
   return body'
 
--- | This is "fixing" as in "setting them", not "correcting them".  We
--- only make very conservative fixing.
-fixOverloadedTypes :: S.Set VName -> TermTypeM ()
-fixOverloadedTypes not_these = getConstraints >>= mapM_ fixOverloaded . M.toList
-  where fixOverloaded (v, Overloaded ots loc)
-          | v `S.member` not_these = return ()
-          | Signed Int32 `elem` ots =
-              unify loc (TypeVar () Nonunique (typeName v) []) $ Prim $ Signed Int32
-          | FloatType Float64 `elem` ots =
-              unify loc (TypeVar () Nonunique (typeName v) []) $ Prim $ FloatType Float64
-        fixOverloaded _ = return ()
-
 -- | Find at all type variables in the given type that are covered by
 -- the constraints, and produce type parameters that close over them.
 -- Produce an error if the given list of type parameters is non-empty,
 -- yet does not cover all type variables in the type.
 closeOverTypes :: Constraints -> [TypeParam] -> [StructType] -> TermTypeM [TypeParam]
-closeOverTypes substs tparams ts = do
-  -- Check that there are not unconstrained type variables left,
-  -- except for those closed over by the type variables.
-  mapM_ constrained $ M.elems $ M.filterWithKey (\k _ -> k `S.notMember` visible) substs
-
+closeOverTypes substs tparams ts =
   case tparams of
     [] -> fmap catMaybes $ mapM closeOver $ M.toList substs'
     _ -> do mapM_ checkClosedOver $ M.toList substs'
@@ -1726,7 +1703,8 @@ closeOverTypes substs tparams ts = do
         visible = mconcat (map typeVars ts)
 
         checkClosedOver (k, v)
-          | k `elem` map typeParamName tparams = return ()
+          | not (canBeClosedOver v) ||
+            k `elem` map typeParamName tparams = return ()
           | otherwise =
               typeError (srclocOf v) $
               unlines ["Type variable `" ++ prettyName k ++
@@ -1734,33 +1712,12 @@ closeOverTypes substs tparams ts = do
                         intercalate ", " (map pretty tparams) ++ ".",
                         "This is usually because a parameter needs a type annotation."]
 
+        canBeClosedOver NoConstraint{} = True
+        canBeClosedOver _ = False
+
         closeOver (k, NoConstraint (Just Unlifted) loc) = return $ Just $ TypeParamType Unlifted k loc
         closeOver (k, NoConstraint _ loc) = return $ Just $ TypeParamType Lifted k loc
-        closeOver (_, ParamType{}) = return Nothing
-        closeOver (_, Constraint{}) = return Nothing
-        closeOver (_, Overloaded ots loc) =
-          typeError loc $
-          unlines ["Type is ambiguous (could be one of " ++ intercalate ", " (map pretty ots) ++ ").",
-                   "Add a type annotation to disambiguate the type."]
-        closeOver (_, Equality loc) =
-          typeError loc $ unlines ["Type is ambiguous (must be equality type).",
-                                   "Add a type annotation to disambiguate the type."]
-        closeOver (_, HasFields fs loc) =
-          typeError loc $ unlines ["Type is ambiguous (must be record with fields {" ++ fs' ++ "}).",
-                                   "Add a type annotation to disambiguate the type."]
-          where fs' = intercalate ", " $ map field $ M.toList fs
-                field (l, t) = pretty l ++ ": " ++ pretty t
-        closeOver (_, HasConstrs cs loc) =
-          typeError loc $ unlines ["Type is ambiguous (must be an enum with constructors " ++ cs' ++ ").",
-                                   "Add a type annotation to disambiguate the type."]
-          where cs' = intercalate " | " $ map (\c -> '#':(pretty c)) cs
-
-        constrained (NoConstraint _ loc) = ambiguous loc
-        constrained (Overloaded _ loc) = ambiguous loc
-        constrained (Equality loc) = ambiguous loc
-        constrained _ = return ()
-        ambiguous loc = typeError loc $ unlines ["Type of expression is ambiguous.",
-                                                 "Add a type annotation to disambiguate the type."]
+        closeOver (_, _) = return Nothing
 
 --- Consumption
 
@@ -1831,264 +1788,6 @@ onlySelfAliasing = local (\scope -> scope { scopeVtable = M.mapWithKey set $ sco
         set _ EqualityF               = EqualityF
         set _ OpaqueF                 = OpaqueF
         set _ (WasConsumed loc)       = WasConsumed loc
-
---- Unification.
-
--- | Unifies two types.
-unify :: SrcLoc -> TypeBase () () -> TypeBase () () -> TermTypeM ()
-unify loc orig_t1 orig_t2 = do
-  orig_t1' <- normaliseType orig_t1
-  orig_t2' <- normaliseType orig_t2
-  breadCrumb (MatchingTypes orig_t1' orig_t2') $ subunify orig_t1 orig_t2
-  where
-    subunify t1 t2 = do
-      constraints <- getConstraints
-
-      let isRigid' v = isRigid v constraints
-          t1' = applySubst (`lookupSubst` constraints) t1
-          t2' = applySubst (`lookupSubst` constraints) t2
-
-          failure =
-            typeError loc $ "Couldn't match expected type `" ++
-            pretty t1' ++ "' with actual type `" ++ pretty t2' ++ "'."
-
-      case (t1', t2') of
-        _ | t1' == t2' -> return ()
-
-        (Record fs,
-         Record arg_fs)
-          | M.keys fs == M.keys arg_fs ->
-              forM_ (M.toList $ M.intersectionWith (,) fs arg_fs) $ \(k, (k_t1, k_t2)) ->
-              breadCrumb (MatchingFields k) $ subunify k_t1 k_t2
-
-        (TypeVar _ _ (TypeName _ tn) targs,
-         TypeVar _ _ (TypeName _ arg_tn) arg_targs)
-          | tn == arg_tn, length targs == length arg_targs ->
-              zipWithM_ unifyTypeArg targs arg_targs
-
-        (TypeVar _ _ (TypeName [] v1) [],
-         TypeVar _ _ (TypeName [] v2) []) ->
-          case (isRigid' v1, isRigid' v2) of
-            (True, True) -> failure
-            (True, False) -> linkVarToType loc v2 t1'
-            (False, True) -> linkVarToType loc v1 t2'
-            (False, False) -> linkVarToType loc v1 t2'
-
-        (TypeVar _ _ (TypeName [] v1) [], _)
-          | not $ isRigid' v1 ->
-              linkVarToType loc v1 t2'
-        (_, TypeVar _ _ (TypeName [] v2) [])
-          | not $ isRigid' v2 ->
-              linkVarToType loc v2 t1'
-
-        (Arrow _ _ a1 b1,
-         Arrow _ _ a2 b2) -> do
-          subunify a1 a2
-          subunify b1 b2
-
-        (Array{}, Array{})
-          | Just t1'' <- peelArray 1 t1',
-            Just t2'' <- peelArray 1 t2' ->
-              subunify t1'' t2''
-
-        (_, _) -> failure
-
-      where unifyTypeArg TypeArgDim{} TypeArgDim{} = return ()
-            unifyTypeArg (TypeArgType t _) (TypeArgType arg_t _) =
-              subunify t arg_t
-            unifyTypeArg _ _ = typeError loc
-              "Cannot unify a type argument with a dimension argument (or vice versa)."
-
-linkVarToType :: SrcLoc -> VName -> TypeBase () () -> TermTypeM ()
-linkVarToType loc vn tp = do
-  constraints <- getConstraints
-  if vn `S.member` typeVars tp
-    then typeError loc $ "Occurs check: cannot instantiate " ++
-         prettyName vn ++ " with " ++ pretty tp'
-    else do modifyConstraints $ M.insert vn $ Constraint tp' loc
-            modifyConstraints $ M.map $ applySubstInConstraint vn tp'
-            case M.lookup vn constraints of
-              Just (NoConstraint (Just Unlifted) unlift_loc) ->
-                zeroOrderType loc ("used at " ++ locStr unlift_loc) tp'
-              Just (Equality _) ->
-                equalityType loc tp'
-              Just (Overloaded ts old_loc)
-                | tp `notElem` map Prim ts ->
-                    case tp' of
-                      TypeVar _ _ (TypeName [] v) []
-                        | not $ isRigid v constraints -> linkVarToTypes loc v ts
-                      _ ->
-                        typeError loc $ "Cannot unify `" ++ prettyName vn ++ "' with type `" ++
-                        pretty tp ++ "' (must be one of " ++ intercalate ", " (map pretty ts) ++
-                        " due to use at " ++ locStr old_loc ++ ")."
-              Just (HasFields required_fields old_loc) ->
-                case tp of
-                  Record tp_fields
-                    | all (`M.member` tp_fields) $ M.keys required_fields ->
-                        mapM_ (uncurry $ unify loc) $ M.elems $
-                        M.intersectionWith (,) required_fields tp_fields
-                  TypeVar _ _ (TypeName [] v) []
-                    | not $ isRigid v constraints ->
-                        modifyConstraints $ M.insert v $
-                        HasFields required_fields old_loc
-                  _ ->
-                    let required_fields' =
-                          intercalate ", " $ map field $ M.toList required_fields
-                        field (l, t) = pretty l ++ ": " ++ pretty t
-                    in typeError loc $
-                       "Cannot unify `" ++ prettyName vn ++ "' with type `" ++
-                       pretty tp ++ "' (must be a record with fields {" ++
-                       required_fields' ++
-                       "} due to use at " ++ locStr old_loc ++ ")."
-              Just (HasConstrs cs old_loc) ->
-                case tp of
-                  Enum t_cs
-                    | intersect cs t_cs == cs -> return ()
-                    | otherwise -> typeError loc $
-                       "Cannot unify `" ++ prettyName vn ++ "' with type `" ++
-                       pretty tp ++ " due to use at " ++ locStr old_loc ++ ")."
-                  TypeVar _ _ (TypeName [] v) []
-                    | not $ isRigid v constraints ->
-                        let addConstrs (HasConstrs cs' loc') (HasConstrs cs'' _) =
-                              HasConstrs (cs' `union` cs'') loc'
-                            addConstrs c _ = c
-                        in modifyConstraints $ M.insertWith addConstrs v $
-                           HasConstrs cs old_loc
-                  _ -> typeError loc $ "Cannot unify."
-              _ -> return ()
-  where tp' = removeUniqueness tp
-
-removeUniqueness :: TypeBase dim as -> TypeBase dim as
-removeUniqueness (Record ets) =
-  Record $ fmap removeUniqueness ets
-removeUniqueness (Arrow als p t1 t2) =
-  Arrow als p (removeUniqueness t1) (removeUniqueness t2)
-removeUniqueness t = t `setUniqueness` Nonunique
-
-mustBeOneOf :: [PrimType] -> SrcLoc -> TypeBase () () -> TermTypeM ()
-mustBeOneOf [req_t] loc t = unify loc (Prim req_t) t
-mustBeOneOf ts loc t = do
-  constraints <- getConstraints
-  let t' = applySubst (`lookupSubst` constraints) t
-      isRigid' v = isRigid v constraints
-
-  case t' of
-    TypeVar _ _ (TypeName [] v) []
-      | not $ isRigid' v -> linkVarToTypes loc v ts
-
-    Prim pt | pt `elem` ts -> return ()
-
-    _ -> failure
-
-  where failure = typeError loc $ "Cannot unify type \"" ++ pretty t ++
-                  "\" with any of " ++ intercalate "," (map pretty ts) ++ "."
-
-linkVarToTypes :: SrcLoc -> VName -> [PrimType] -> TermTypeM ()
-linkVarToTypes loc vn ts = do
-  vn_constraint <- M.lookup vn <$> getConstraints
-  case vn_constraint of
-    Just (Overloaded vn_ts vn_loc) ->
-      case ts `intersect` vn_ts of
-        [] -> typeError loc $ "Type constrained to one of " ++
-              intercalate "," (map pretty ts) ++ " but also one of " ++
-              intercalate "," (map pretty vn_ts) ++ " at " ++ locStr vn_loc ++ "."
-        ts' -> modifyConstraints $ M.insert vn $ Overloaded ts' loc
-
-    _ -> modifyConstraints $ M.insert vn $ Overloaded ts loc
-
-equalityType :: (Pretty (ShapeDecl dim), Monoid as) =>
-                SrcLoc -> TypeBase dim as -> TermTypeM ()
-equalityType loc t = do
-  unless (orderZero t) $
-    typeError loc $
-    "Type \"" ++ pretty t ++ "\" does not support equality."
-  mapM_ mustBeEquality $ typeVars t
-  where mustBeEquality vn = do
-          constraints <- getConstraints
-          case M.lookup vn constraints of
-            Just (Constraint (TypeVar _ _ (TypeName [] vn') []) _) ->
-              mustBeEquality vn'
-            Just (Constraint vn_t _)
-              | not $ orderZero vn_t ->
-                  typeError loc $ "Type \"" ++ pretty t ++
-                  "\" does not support equality."
-              | otherwise -> return ()
-            Just (NoConstraint _ _) ->
-              modifyConstraints $ M.insert vn (Equality loc)
-            Just (Overloaded _ _) ->
-              return () -- All primtypes support equality.
-            _ ->
-              typeError loc $ "Type " ++ pretty (prettyName vn) ++
-              " does not support equality."
-
-zeroOrderType :: (Pretty (ShapeDecl dim), Monoid as) =>
-                 SrcLoc -> String -> TypeBase dim as -> TermTypeM ()
-zeroOrderType loc desc t = do
-  unless (orderZero t) $
-    typeError loc $ "Type " ++ desc ++
-    " must not be functional, but is " ++ pretty t ++ "."
-  mapM_ mustBeZeroOrder . S.toList . typeVars $ t
-  where mustBeZeroOrder vn = do
-          constraints <- getConstraints
-          case M.lookup vn constraints of
-            Just (Constraint vn_t old_loc)
-              | not $ orderZero t ->
-                typeError loc $ "Type " ++ desc ++
-                " must be non-function, but inferred to be " ++
-                pretty vn_t ++ " at " ++ locStr old_loc ++ "."
-            Just (NoConstraint _ _) ->
-              modifyConstraints $ M.insert vn (NoConstraint (Just Unlifted) loc)
-            Just (ParamType Lifted ploc) ->
-              typeError loc $ "Type " ++ desc ++
-              " must be non-function, but type parameter " ++ prettyName vn ++ " at " ++
-              locStr ploc ++ " may be a function."
-            _ -> return ()
-
-mustHaveConstr :: SrcLoc -> Name -> TypeBase dim as -> TermTypeM ()
-mustHaveConstr loc c t = do
-  constraints <- getConstraints
-  case t of
-    TypeVar _ _ (TypeName _ tn) []
-      | Just NoConstraint{} <- M.lookup tn constraints ->
-          modifyConstraints $ M.insert tn $ HasConstrs [c] loc
-      | Just (HasConstrs cs _) <- M.lookup tn constraints ->
-          if c `elem` cs
-          then return ()
-          else modifyConstraints $ M.insert tn $ HasConstrs (c:cs) loc
-    Enum cs
-      | c `elem` cs -> return ()
-      | otherwise   -> throwError $ TypeError loc $
-                       "Type " ++ pretty (toStructural t) ++
-                       " does not have a " ++ pretty c ++ " constructor."
-    _ -> do unify loc (toStructural t) $ Enum [c]
-            return ()
-
-mustHaveField :: Monoid as => SrcLoc -> Name -> TypeBase dim as -> TermTypeM (TypeBase dim as)
-mustHaveField loc l t = do
-  constraints <- getConstraints
-  l_type <- newTypeVar loc "t"
-  let l_type' = toStructural l_type
-  case t of
-    TypeVar _ _ (TypeName _ tn) []
-      | Just NoConstraint{} <- M.lookup tn constraints -> do
-          modifyConstraints $ M.insert tn $ HasFields (M.singleton l l_type') loc
-          return l_type
-      | Just (HasFields fields _) <- M.lookup tn constraints -> do
-          case M.lookup l fields of
-            Just t' -> unify loc (toStructural t) t'
-            Nothing -> modifyConstraints $ M.insert tn $
-                       HasFields (M.insert l l_type' fields) loc
-          return l_type
-    Record fields
-      | Just t' <- M.lookup l fields -> do
-          unify loc l_type' (toStructural t')
-          return t'
-      | otherwise ->
-          throwError $ TypeError loc $
-          "Attempt to access field '" ++ pretty l ++ "' of value of type " ++
-          pretty (toStructural t) ++ "."
-    _ -> do unify loc (toStructural t) $ Record $ M.singleton l l_type'
-            return l_type
 
 arrayOfM :: (Pretty (ShapeDecl dim), Monoid as) =>
             SrcLoc

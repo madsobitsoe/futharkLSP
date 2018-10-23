@@ -476,6 +476,7 @@ typeOf (LetFun _ _ body _) = typeOf body
 typeOf (LetWith _ _ _ _ body _) = typeOf body
 typeOf (Index _ _ (Info t) _) = t
 typeOf (Update e _ _ _) = typeOf e `setAliases` mempty
+typeOf (RecordUpdate _ _ _ (Info t) _) = removeShapeAnnotations t
 typeOf (Zip _ _ _ (Info t) _) = t
 typeOf (Unzip _ ts _) =
   tupleRecord $ map unInfo ts
@@ -678,7 +679,7 @@ patternType (PatternLit _ (Info t) _)  = removeShapeAnnotations t
 
 -- | The type matched by the pattern, including shape declarations if present.
 patternStructType :: PatternBase Info VName -> StructType
-patternStructType (PatternAscription _ td _) = unInfo $ expandedType td
+patternStructType (PatternAscription p _ _) = patternStructType p
 patternStructType (PatternParens p _) = patternStructType p
 patternStructType (Id _ (Info t) _) = t `setAliases` ()
 patternStructType (TuplePattern ps _) = tupleRecord $ map patternStructType ps
@@ -810,12 +811,12 @@ intrinsics = M.fromList $ zipWith namify [10..] $
               ("zip", IntrinsicPolyFun [tp_a, tp_b] [arr_a, arr_b] arr_a_b),
               ("unzip", IntrinsicPolyFun [tp_a, tp_b] [arr_a_b] t_arr_a_arr_b),
 
-              ("gen_reduce", IntrinsicPolyFun [tp_a, tp_b]
+              ("gen_reduce", IntrinsicPolyFun [tp_a]
                              [uarr_a,
                               t_a `arr` (t_a `arr` t_a),
                               t_a,
                               Array (ArrayPrimElem (Signed Int32) ()) (rank 1) Nonunique,
-                              arr_b]
+                              arr_a]
                              uarr_a),
 
               ("map", IntrinsicPolyFun [tp_a, tp_b] [t_a `arr` t_b, arr_a] uarr_b),

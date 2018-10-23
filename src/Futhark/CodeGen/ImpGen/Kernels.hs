@@ -770,11 +770,14 @@ compileKernelExp constants (ImpGen.Destination _ dests) (GroupReduce w lam input
 
   let local_tid = kernelLocalThreadId constants
       (_nes, arrs) = unzip input
-      (reduce_i, other_index_param, actual_reduce_params) =
+      (reduce_i, reduce_j_param, actual_reduce_params) =
         partitionChunkedKernelLambdaParameters $ lambdaParams lam
       (reduce_acc_params, reduce_arr_params) =
         splitAt (length input) actual_reduce_params
-      offset = paramName other_index_param
+      reduce_j = paramName reduce_j_param
+
+  offset <- newVName "offset"
+  ImpGen.emit $ Imp.DeclareScalar offset int32
 
   ImpGen.Destination _ reduce_acc_targets <-
     ImpGen.destinationFromParams reduce_acc_params
@@ -784,7 +787,11 @@ compileKernelExp constants (ImpGen.Destination _ dests) (GroupReduce w lam input
 
     ImpGen.emit $ Imp.SetScalar reduce_i $ Imp.var local_tid int32
 
-    ImpGen.emit $ Imp.SetScalar offset 0
+    let setOffset x =
+          Imp.SetScalar offset x <>
+          Imp.SetScalar reduce_j (Imp.var local_tid int32 + Imp.var offset int32)
+    ImpGen.emit $ setOffset 0
+
     set_init_params <- ImpGen.collect $
       zipWithM_ (readReduceArgument offset) reduce_acc_params arrs
     ImpGen.emit $
@@ -808,10 +815,7 @@ compileKernelExp constants (ImpGen.Destination _ dests) (GroupReduce w lam input
         in_wave_id = Imp.var local_tid int32 - wave_id * wave_size
         num_waves = (group_size + wave_size - 1) `quot` wave_size
         arg_in_bounds = Imp.CmpOpExp (CmpSlt Int32)
-                        (Imp.BinOpExp (Add Int32)
-                          (Imp.var local_tid int32)
-                          (Imp.var (paramName other_index_param) int32))
-                        w'
+                        (Imp.var reduce_j int32) w'
 
         doing_in_wave_reductions =
           Imp.CmpOpExp (CmpSlt Int32) (Imp.var offset int32) wave_size
@@ -819,11 +823,11 @@ compileKernelExp constants (ImpGen.Destination _ dests) (GroupReduce w lam input
           Imp.CmpOpExp (CmpEq int32)
           (Imp.BinOpExp (And Int32) in_wave_id (2 * Imp.var offset int32 - 1)) 0
         in_wave_reductions =
-          Imp.SetScalar offset 1 <>
+          setOffset 1 <>
           Imp.While doing_in_wave_reductions
             (Imp.If (Imp.BinOpExp LogAnd arg_in_bounds apply_in_in_wave_iteration)
              in_wave_reduce mempty <>
-             Imp.SetScalar offset (Imp.var offset int32 * 2))
+             setOffset (Imp.var offset int32 * 2))
 
         doing_cross_wave_reductions =
           Imp.CmpOpExp (CmpSlt Int32) (Imp.var skip_waves int32) num_waves
@@ -840,7 +844,7 @@ compileKernelExp constants (ImpGen.Destination _ dests) (GroupReduce w lam input
           Imp.SetScalar skip_waves 1 <>
           Imp.While doing_cross_wave_reductions
             (Imp.Op Imp.Barrier <>
-             Imp.SetScalar offset (Imp.var skip_waves int32 * wave_size) <>
+             setOffset (Imp.var skip_waves int32 * wave_size) <>
              Imp.If apply_in_cross_wave_iteration
              cross_wave_reduce mempty <>
              Imp.SetScalar skip_waves (Imp.var skip_waves int32 * 2))
@@ -866,6 +870,9 @@ compileKernelExp constants (ImpGen.Destination _ dests) (GroupReduce w lam input
 compileKernelExp constants _ (GroupScan w lam input) = do
   renamed_lam <- renameLambda lam
   w' <- ImpGen.compileSubExp w
+
+  when (any (not . primType . paramType) $ lambdaParams lam) $
+    compilerLimitationS "Cannot compile parallel scans with array element type."
 
   let local_tid = kernelLocalThreadId constants
       (_nes, arrs) = unzip input
@@ -1018,23 +1025,116 @@ compileKernelExp constants (ImpGen.Destination _ final_targets) (GroupStream w m
       where isSimpleThreadInSpace (Let _ _ Op{}) = Nothing
             isSimpleThreadInSpace bnd = Just bnd
 
-compileKernelExp _constants _ (GroupGenReduce w arrs op bucket values locks) = do
-  -- Code generation target:
-  --
-  -- while(!done) {
-  --   if( atomicExch((int *)&d_locks[idx], 1) == 0 ) {
-  --     d_his[idx] = OP::apply(d_his[idx], val);
-  --     __threadfence();
-  --     atomicExch((int *)&d_locks[idx], 0);
-  --     done = 1;
-  --   }
-  -- }
+compileKernelExp _ _ (GroupGenReduce w [a] op bucket [v] _)
+  | [Prim t] <- lambdaReturnType op,
+    primBitSize t == 32 = do
+  -- If we have only one array and one non-array value (this is a
+  -- one-to-one correspondance) then we need only one
+  -- update. If operator has an atomic implementation we use
+  -- that, otherwise it is still a binary operator which can
+  -- be implemented by atomic compare-and-swap if 32 bits.
 
-  -- Helpers
-  let mone = -1
-      zero = 0
-      one  = 1
+  -- Common variables.
+  old <- newVName "old"
+  old_bits <- newVName "old_bits"
+  ImpGen.emit $ Imp.DeclareScalar old t
+  ImpGen.emit $ Imp.DeclareScalar old_bits int32
+  bucket' <- mapM ImpGen.compileSubExp bucket
+  w' <- mapM ImpGen.compileSubExp w
 
+  (arr', _a_space, bucket_offset) <- ImpGen.fullyIndexArray a bucket'
+
+  case opHasAtomicSupport old arr' bucket_offset op of
+    Just f -> do
+      val' <- ImpGen.compileSubExp v
+
+      ImpGen.emit $
+        Imp.If (indexInBounds bucket' w')
+        (Imp.Op $ f val')
+        Imp.Skip
+
+    Nothing -> do
+      -- Code generation target:
+      --
+      -- old = d_his[idx];
+      -- do {
+      --   assumed = old;
+      --   tmp = OP::apply(val, assumed);
+      --   old = atomicCAS(&d_his[idx], assumed, tmp);
+      -- } while(assumed != old);
+      assumed <- newVName "assumed"
+      run_loop <- newVName "run_loop"
+      ImpGen.emit $ Imp.DeclareScalar assumed t
+      ImpGen.emit $ Imp.DeclareScalar run_loop int32
+
+      read_old <- ImpGen.collect $
+        ImpGen.copyDWIMDest (ImpGen.ScalarDestination old) [] (Var a) bucket'
+
+      ImpGen.emit $
+        Imp.If (indexInBounds bucket' w')
+        -- True branch: bucket in-bounds -> enter loop
+        (Imp.SetScalar run_loop 1 <> read_old)
+        -- False branch: bucket out-of-bounds -> skip loop
+        (Imp.SetScalar run_loop 0)
+
+        -- Preparing parameters
+      let (acc_p:arr_p:_) = lambdaParams op
+
+      -- Store result from operator in accumulators
+      dests <- ImpGen.destinationFromParams [acc_p]
+
+      -- Critical section
+      ImpGen.declaringLParams (lambdaParams op) $ do
+        bind_acc_param <- ImpGen.collect $
+          ImpGen.copyDWIMDest (ImpGen.ScalarDestination $ paramName acc_p) [] v []
+
+        let bind_arr_param =
+              Imp.SetScalar (paramName arr_p) $ Imp.var assumed t
+
+        op_body <- ImpGen.collect $
+          ImpGen.compileBody dests $ lambdaBody op
+
+        -- While-loop: Try to insert your value
+        let (toBits, fromBits) =
+              case t of FloatType Float32 -> (\x -> Imp.FunExp "to_bits32" [x] int32,
+                                              \x -> Imp.FunExp "from_bits32" [x] t)
+                        _                 -> (id, id)
+        ImpGen.emit $ Imp.While (Imp.var run_loop int32)
+          (Imp.SetScalar assumed (Imp.var old t) <>
+           bind_acc_param <> bind_arr_param <> op_body
+           <>
+           (Imp.Op $
+               Imp.Atomic $
+                 Imp.AtomicCmpXchg old_bits arr' bucket_offset
+                   (toBits (Imp.var assumed int32)) (toBits (Imp.var (paramName acc_p) int32)))
+           <>
+           Imp.SetScalar old (fromBits (Imp.var old_bits int32))
+           <>
+            Imp.If
+              (Imp.CmpOpExp
+                (CmpEq int32) (toBits $ Imp.var assumed t) (Imp.var old_bits int32))
+              -- True branch:
+              (Imp.SetScalar run_loop 0)
+              -- False branch:
+              Imp.Skip
+          )
+
+    where opHasAtomicSupport old arr' bucket' lam = do
+            let atomic f = Imp.Atomic . f old arr' bucket'
+                atomics = [ (Add Int32, Imp.AtomicAdd)
+                          , (SMax Int32, Imp.AtomicSMax)
+                          , (SMin Int32, Imp.AtomicSMin)
+                          , (UMax Int32, Imp.AtomicUMax)
+                          , (UMin Int32, Imp.AtomicUMin)
+                          , (And Int32, Imp.AtomicAnd)
+                          , (Or Int32, Imp.AtomicOr)
+                          , (Xor Int32, Imp.AtomicXor)
+                          ]
+            [BasicOp (BinOp bop _ _)] <-
+              Just $ map stmExp $ stmsToList $ bodyStms $ lambdaBody lam
+            atomic <$> lookup bop atomics
+
+compileKernelExp _ _ (GroupGenReduce w arrs op bucket values locks) = do
   old <- newVName "old"
   tmp <- newVName "tmp"
   loop_done <- newVName "loop_done"
@@ -1044,18 +1144,19 @@ compileKernelExp _constants _ (GroupGenReduce w arrs op bucket values locks) = d
     Imp.DeclareScalar loop_done int32
 
   -- Check if bucket is in-bounds
-  bucket' <- ImpGen.compileSubExp bucket
-  -- arr_sz <- ImpGen.compileSubExp =<< (arraySize 0) <$> lookupType a
-  arr_sz <- ImpGen.compileSubExp w
+  bucket' <- mapM ImpGen.compileSubExp bucket
+  w' <- mapM ImpGen.compileSubExp w
+
+  -- Correctly index into locks.
+  (locks', _locks_space, locks_offset) <-
+    ImpGen.fullyIndexArray locks bucket'
 
   ImpGen.emit $
-    Imp.If (Imp.BinOpExp LogAnd
-             (Imp.CmpOpExp (CmpSlt Int32) mone bucket')    -- -1 < bucket
-             (Imp.CmpOpExp (CmpSlt Int32)  bucket' arr_sz)) -- bucket < arr_sz
+    Imp.If (indexInBounds bucket' w')
     -- True branch: bucket in-bounds -> enter loop
-    (Imp.SetScalar loop_done zero)
+    (Imp.SetScalar loop_done 0)
     -- False branch: bucket out-of-bounds -> skip loop
-    (Imp.SetScalar loop_done one)
+    (Imp.SetScalar loop_done 1)
 
   -- Preparing parameters
   let (acc_params, arr_params) =
@@ -1064,20 +1165,17 @@ compileKernelExp _constants _ (GroupGenReduce w arrs op bucket values locks) = d
   -- Store result from operator in accumulators
   dests <- ImpGen.destinationFromParams acc_params
 
-  -- Locate locks array
-  locks_entry <- ImpGen.lookupArray locks
-  let locks'  = ImpGen.memLocationName $ ImpGen.entryArrayLocation locks_entry
-
   -- Critical section
   ImpGen.declaringLParams (lambdaParams op) $ do
     let try_acquire_lock =
-          Imp.Op $ Imp.Atomic $ Imp.AtomicXchg old locks' (Imp.elements bucket') one
+          Imp.Op $ Imp.Atomic $
+          Imp.AtomicXchg old locks' locks_offset 1
         lock_acquired =
-          Imp.CmpOpExp (CmpEq int32) (Imp.var old int32) zero
+          Imp.CmpOpExp (CmpEq int32) (Imp.var old int32) 0
         loop_cond =
-          Imp.CmpOpExp (CmpEq int32) (Imp.var loop_done int32) zero
+          Imp.CmpOpExp (CmpEq int32) (Imp.var loop_done int32) 0
         break_loop =
-          Imp.SetScalar loop_done one
+          Imp.SetScalar loop_done 1
 
     -- We copy the current value and the new value to the parameters
     -- unless they are array-typed.  If they are arrays, then the
@@ -1086,7 +1184,7 @@ compileKernelExp _constants _ (GroupGenReduce w arrs op bucket values locks) = d
     bind_acc_params <- ImpGen.collect $
       forM_ (zip acc_params arrs) $ \(acc_p, arr) ->
       when (primType (paramType acc_p)) $
-      ImpGen.copyDWIMDest (ImpGen.ScalarDestination $ paramName acc_p) [] (Var arr) [bucket']
+      ImpGen.copyDWIMDest (ImpGen.ScalarDestination $ paramName acc_p) [] (Var arr) bucket'
 
     bind_arr_params <- ImpGen.collect $
       forM_ (zip arr_params values) $ \(arr_p, val) ->
@@ -1097,10 +1195,10 @@ compileKernelExp _constants _ (GroupGenReduce w arrs op bucket values locks) = d
       ImpGen.compileBody dests $ lambdaBody op
 
     do_gen_reduce <- ImpGen.collect $
-      zipWithM_ (writeOpResult bucket') acc_params arrs
+      zipWithM_ (writeArray bucket') arrs $ map (Var . paramName) acc_params
 
     release_lock <- ImpGen.collect $
-      ImpGen.copyDWIM locks [bucket'] (intConst Int32 0) []
+      ImpGen.copyDWIM locks bucket' (intConst Int32 0) []
 
     -- While-loop: Try to insert your value
     ImpGen.emit $ Imp.While loop_cond
@@ -1113,12 +1211,22 @@ compileKernelExp _constants _ (GroupGenReduce w arrs op bucket values locks) = d
          <>
         Imp.Op Imp.MemFence
       )
-  where writeOpResult i param arr =
-          ImpGen.copyDWIM arr [i] (Var $ paramName param) []
+  where writeArray i arr val =
+          ImpGen.copyDWIM arr i val []
 
 compileKernelExp _ dest e =
   compilerBugS $ unlines ["Invalid target", "  " ++ show dest,
                           "for kernel expression", "  " ++ pretty e]
+
+-- Requires that the lists are of equal length, otherwise
+-- zip with truncate the longer list.
+indexInBounds :: [Imp.Exp] -> [Imp.Exp] -> Imp.Exp
+indexInBounds inds bounds =
+  foldl1 (Imp.BinOpExp LogAnd) $ zipWith checkBound inds bounds
+  where checkBound ind bound =
+          Imp.BinOpExp LogAnd
+           (Imp.CmpOpExp (CmpSle Int32) 0 ind)
+           (Imp.CmpOpExp (CmpSlt Int32) ind bound)
 
 allThreads :: KernelConstants -> InKernelGen () -> InKernelGen Imp.KernelCode
 allThreads constants = ImpGen.subImpM_ $ inKernelOperations constants'

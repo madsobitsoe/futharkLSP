@@ -105,15 +105,25 @@ instance Eq Value where
   ValueEnum x == ValueEnum y = x == y
   _ == _ = False
 
+prettyRecord :: Pretty a => M.Map Name a -> Doc
+prettyRecord m
+  | Just vs <- areTupleFields m =
+      parens $ commasep $ map ppr vs
+  | otherwise =
+      braces $ commasep $ map field $ M.toList m
+      where field (k, v) = ppr k <+> equals <+> ppr v
+
 instance Pretty Value where
-  ppr (ValuePrim v) = ppr v
-  ppr (ValueArray a) = brackets $ commasep $ map ppr $ elems a
-  ppr (ValueRecord m)
-    | Just vs <- areTupleFields m =
-        parens $ commasep $ map ppr vs
-    | otherwise =
-        braces $ commasep $ map field $ M.toList m
-        where field (k, v) = ppr k <+> equals <+> ppr v
+  ppr (ValuePrim v)  = ppr v
+  ppr (ValueArray a) =
+    let elements  = elems a -- [Value]
+        (x:_)     = elements
+        separator = case x of
+                      (ValueArray _) -> comma <> line
+                      _              -> comma <> space
+     in brackets $ cat $ punctuate separator (map ppr elements)
+
+  ppr (ValueRecord m) = prettyRecord m
   ppr ValueFun{} = text "#<fun>"
   ppr (ValueEnum n) = text "#" <> ppr n
 
@@ -122,21 +132,35 @@ instance Pretty Value where
 mkArray :: [Value] -> Maybe Value
 mkArray vs =
   case vs of [] -> Just $ toArray' vs
-             v:_ | all ((==len v) . len) vs -> Just $ toArray' vs
+             v:_ | all ((==valueShape v) . valueShape) vs -> Just $ toArray' vs
                  | otherwise -> Nothing
-    where len (ValueArray arr) = arrayLength arr
-          len _                = 0 :: Int
+
+-- | A shape is a tree to accomodate the case of records.
+data Shape = ShapeDim Int32 Shape
+           | ShapeLeaf
+           | ShapeRecord (M.Map Name Shape)
+           deriving (Eq, Show)
+
+instance Pretty Shape where
+  ppr ShapeLeaf = mempty
+  ppr (ShapeDim d s) = brackets (ppr d) <> ppr s
+  ppr (ShapeRecord m) = prettyRecord m
+
+emptyShape :: Shape -> Bool
+emptyShape ShapeLeaf = False
+emptyShape (ShapeDim d s) = d == 0 || emptyShape s
+emptyShape (ShapeRecord fs) = any emptyShape fs
+
+valueShape :: Value -> Shape
+valueShape (ValueArray arr) = ShapeDim (arrayLength arr) $
+                              case elems arr of
+                                []  -> ShapeLeaf
+                                v:_ -> valueShape v
+valueShape (ValueRecord fs) = ShapeRecord $ M.map valueShape fs
+valueShape _ = ShapeLeaf
 
 isEmptyArray :: Value -> Bool
-isEmptyArray (ValueArray arr) =
-  arrayLength arr == (0::Int32) || any isEmptyArray (elems arr)
-isEmptyArray _ = False
-
-valueShape :: Value -> [Int32]
-valueShape (ValueArray arr) = arrayLength arr : case elems arr of
-                                                  []  -> []
-                                                  v:_ -> valueShape v
-valueShape _ = []
+isEmptyArray = emptyShape . valueShape
 
 arrayLength :: Integral int => Array Int Value -> int
 arrayLength = fromIntegral . (+1) . snd . bounds
@@ -315,7 +339,7 @@ matchValueToType :: Env -> M.Map VName (Maybe T.BoundV, Value)
 
 -- Empty arrays always match.
 matchValueToType env m t@(Array _ (ShapeDecl ds@(d:_)) _) val@(ValueArray arr)
-  | any zeroDim ds, 0 `elem` valueShape val =
+  | any zeroDim ds, emptyShape (valueShape val) =
       Right $ m <> mconcat (map namedAreZero ds)
 
   | otherwise =
@@ -350,13 +374,16 @@ matchValueToType env m t@(Array _ (ShapeDecl ds@(d:_)) _) val@(ValueArray arr)
         wrong x = Left $ "Size annotation " <> x <>
                   " does not match observed size " <> pretty arr_n <> "."
 
-        zeroDim (NamedDim v) = Just 0 == look v
-        zeroDim AnyDim = False
+        zeroDim (NamedDim v) = isNothing (look v) || Just 0 == look v
+        zeroDim AnyDim = True
         zeroDim (ConstDim x) = x == 0
 
-        namedAreZero (NamedDim v) =
-          M.singleton (qualLeaf v) (Just $ T.BoundV [] $ Prim $ Signed Int32,
-                                    ValuePrim $ SignedValue $ Int32Value 0)
+        namedAreZero (NamedDim v)
+          | isNothing $ look v =
+              M.singleton (qualLeaf v) (Just $ T.BoundV [] $ Prim $ Signed Int32,
+                                        ValuePrim $ SignedValue $ Int32Value 0)
+          | otherwise =
+              mempty
         namedAreZero _ = mempty
 
 matchValueToType env m (Record fs) (ValueRecord arr) =
@@ -456,8 +483,8 @@ evalDimIndex env (DimSlice start end stride) =
 evalIndex :: SrcLoc -> Env -> [Indexing] -> Value -> EvalM Value
 evalIndex loc env is arr = do
   let oob = bad loc env $ "Index [" <> intercalate ", " (map pretty is) <>
-            "] out of bounds for array of shape [" <>
-            intercalate "][" (map pretty (valueShape arr)) <> "]."
+            "] out of bounds for array of shape " <>
+            pretty (valueShape arr) <> "."
   maybe oob return $ indexArray is arr
 
 evalTermVar :: Env -> QualName VName -> EvalM Value
@@ -491,7 +518,8 @@ evalType env t@(TypeVar () _ tn args) =
       (substs, types) <- mconcat <$> zipWithM matchPtoA ps args
       let onDim (NamedDim v) = fromMaybe (NamedDim v) $ M.lookup (qualLeaf v) substs
           onDim d = d
-      evalType (Env mempty types <> env) $ bimap onDim id t'
+      if null ps then return $ bimap onDim id t'
+      else evalType (Env mempty types <> env) $ bimap onDim id t'
     Nothing -> return t
   where matchPtoA (TypeParamDim p _) (TypeArgDim (NamedDim qv) _) =
           return (M.singleton p $ NamedDim qv, mempty)
@@ -632,6 +660,14 @@ eval env (Update src is v loc) =
   maybe oob return =<<
   updateArray <$> mapM (evalDimIndex env) is <*> eval env src <*> eval env v
   where oob = bad loc env "Bad update"
+
+eval env (RecordUpdate src all_fs v _ _) =
+  update <$> eval env src <*> pure all_fs <*> eval env v
+  where update _ [] v' = v'
+        update (ValueRecord src') (f:fs) v'
+          | Just f_v <- M.lookup f src' =
+              ValueRecord $ M.insert f (update f_v fs v') src'
+        update _ _ _ = error "eval RecordUpdate: invalid value."
 
 eval env (LetWith dest src is v body loc) = do
   dest' <- maybe oob return =<<

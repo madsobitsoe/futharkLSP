@@ -21,7 +21,6 @@ import Control.Exception
 import Control.Monad
 import Control.Monad.Reader
 import Control.Monad.Except
-import Data.Maybe
 import System.Exit (exitWith, ExitCode(..))
 import System.IO
 import qualified Data.Text as T
@@ -35,18 +34,17 @@ import qualified Futhark.Representation.SOACS as I
 import qualified Futhark.TypeCheck as I
 import Futhark.Compiler.Program
 import qualified Language.Futhark as E
-import Language.Futhark.Futlib.Builtin (builtinBasis)
 import Futhark.Util.Log
 
 data FutharkConfig = FutharkConfig
-                     { futharkVerbose :: Maybe (Maybe FilePath)
+                     { futharkVerbose :: (Verbosity, Maybe FilePath)
                      , futharkWarn :: Bool -- ^ Warn if True.
                      , futharkWerror :: Bool -- ^ If true, error on any warnings.
                      , futharkSafe :: Bool -- ^ If True, ignore @unsafe@.
                      }
 
 newFutharkConfig :: FutharkConfig
-newFutharkConfig = FutharkConfig { futharkVerbose = Nothing
+newFutharkConfig = FutharkConfig { futharkVerbose = (NotVerbose, Nothing)
                                  , futharkWarn = True
                                  , futharkWerror = False
                                  , futharkSafe = False
@@ -68,10 +66,9 @@ dumpError config err =
       report s info
   where report s info = do
           T.hPutStrLn stderr s
-          case futharkVerbose config of
-            Just outfile ->
-              maybe (T.hPutStr stderr) T.writeFile outfile $ info <> "\n"
-            _ -> return ()
+          when (fst (futharkVerbose config) > NotVerbose) $
+            maybe (T.hPutStr stderr) T.writeFile
+            (snd (futharkVerbose config)) $ info <> "\n"
 
 -- | Catch all IO exceptions and print a better error message if they
 -- happen.  Use this at the top-level of all Futhark compiler
@@ -96,9 +93,7 @@ runCompilerOnProgram :: FutharkConfig
                      -> FilePath
                      -> IO ()
 runCompilerOnProgram config pipeline action file = do
-  res <- runFutharkM compile $ case futharkVerbose config of
-                                 Just _ -> Verbose
-                                 Nothing -> NotVerbose
+  res <- runFutharkM compile $ fst $ futharkVerbose config
   case res of
     Left err -> liftIO $ do
       dumpError config err
@@ -107,9 +102,11 @@ runCompilerOnProgram config pipeline action file = do
       return ()
   where compile = do
           prog <- runPipelineOnProgram config pipeline file
-          when (isJust $ futharkVerbose config) $
-            liftIO $ hPutStrLn stderr $ "Running action " ++ actionName action
+          when ((>NotVerbose) . fst $ futharkVerbose config) $
+            logMsg $ "Running action " ++ actionName action
           actionProcedure action prog
+          when ((>NotVerbose) . fst $ futharkVerbose config) $
+            logMsg ("Done." :: String)
 
 runPipelineOnProgram :: FutharkConfig
                      -> Pipeline I.SOACS tolore
@@ -139,7 +136,7 @@ runPipelineOnProgram config pipeline file = do
       typeCheckInternalProgram int_prog
       runPasses pipeline pipeline_config int_prog
   where pipeline_config =
-          PipelineConfig { pipelineVerbose = isJust $ futharkVerbose config
+          PipelineConfig { pipelineVerbose = fst (futharkVerbose config) > NotVerbose
                          , pipelineValidate = True
                          }
 
@@ -158,4 +155,4 @@ readProgram = readLibrary . pure
 -- imports.
 readLibrary :: (MonadError CompilerError m, MonadIO m) =>
                [FilePath] -> m (Warnings, Imports, VNameSource)
-readLibrary = readLibraryWithBasis builtinBasis
+readLibrary = readLibraryWithBasis emptyBasis

@@ -5,7 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
-## [0.7.0]
+## [0.8.0]
+
+### Added
+
+  * The compiler itself is about 10% faster.
+
+  * A warning when ambiguously typed expressions are assigned a
+    default (`i32` or `f64`).
+
+### Removed
+
+### Changed
+
+### Fixed
+
+  * Polymorphic value bindings now work properly with module type
+    ascription.
+
+  * The type checker no longer requires types used inside local
+    functions to be unambiguous at the point where the local function
+    is defined.  They must still be unambiguous by the time the
+    top-level function ends.  This is similar to what other ML
+    languages do.
+
+  * `futhark-bench` now writes "μs" instead of "us".
+
+## [0.7.2]
+
+### Added
+
+  * `futhark-pkg` now supports GitLab.
+
+  * `futhark-test`s `--notty` option now has a `--no-terminal` alias.
+    `--notty` is deprecated, but still works.
+
+  * `futhark-test` now supports multiple entry points per test block.
+
+  * Functional record updates: `r with f <- x`.
+
+### Fixed
+
+  * Fix the `-C` option for `futhark-test`.
+
+  * Fixed incorrect type of `reduce_by_index`.
+
+  * Segmented `reduce_by_index` now uses much less memory.
+
+## [0.7.1]
 
 ### Added
 
@@ -24,8 +71,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   * A `break` function that is semantically `id`, but makes `futharki`
     stop and provide the opportunity to inspect variables in scope.
 
-  * A new SOAC, `gen_reduce`, for expressing generalised reductions
-    (sometimes called reduction-by-key or histograms).
+  * A new SOAC, `reduce_by_index`, for expressing generalised
+    reductions (sometimes called histograms).  Designed and
+    implemented by Sune Hellfritzsch.
 
 ### Removed
 
@@ -61,7 +109,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ### Changed
 
+  * The `largest`/`smallest` values for numeric modules have been
+    renamed `highest`/`lowest`.
+
 ### Fixed
+
+  * Many small things.
 
 ## [0.6.3]
 

@@ -66,7 +66,7 @@ blockedReductionStream :: (MonadFreshNames m, HasScope Kernels m) =>
                        -> [(VName, SubExp)] -> [SubExp] -> [VName]
                        -> m (Stms Kernels)
 blockedReductionStream pat w comm reduce_lam fold_lam ispace nes arrs = runBinder_ $ do
-  (max_step_one_num_groups, step_one_size) <- blockedKernelSize w
+  (max_step_one_num_groups, step_one_size) <- blockedKernelSize =<< asIntS Int64 w
 
   let one = constant (1 :: Int32)
       num_chunks = kernelWorkgroups step_one_size
@@ -82,11 +82,11 @@ blockedReductionStream pat w comm reduce_lam fold_lam ispace nes arrs = runBinde
   fold_lam' <- kerneliseLambda nes fold_lam
 
   my_index <- newVName "my_index"
-  other_offset <- newVName "other_offset"
+  other_index <- newVName "other_index"
   let my_index_param = Param my_index (Prim int32)
-      other_offset_param = Param other_offset (Prim int32)
+      other_index_param = Param other_index (Prim int32)
       reduce_lam' = reduce_lam { lambdaParams = my_index_param :
-                                                other_offset_param :
+                                                other_index_param :
                                                 lambdaParams reduce_lam
                                }
       params_to_arrs = zip (map paramName $ drop 1 $ lambdaParams fold_lam') arrs
@@ -161,8 +161,9 @@ chunkedReduceKernel w step_one_size comm reduce_lam' fold_lam' ispace nes arrs =
 
   red_rets <- forM final_red_pes $ \pe ->
     return $ ThreadsReturn OneResultPerGroup $ Var $ patElemName pe
+  elems_per_thread <- asIntS Int32 $ kernelElementsPerThread step_one_size
   map_rets <- forM chunk_map_pes $ \pe ->
-    return $ ConcatReturns ordering' w (kernelElementsPerThread step_one_size) Nothing $ patElemName pe
+    return $ ConcatReturns ordering' w elems_per_thread Nothing $ patElemName pe
   let rets = red_rets ++ map_rets
 
   return $ Kernel (KernelDebugHints "chunked_reduce" [("input size", w)]) space ts $
@@ -311,63 +312,126 @@ blockedReduction pat w comm reduce_lam map_lam ispace nes arrs = runBinder_ $ do
     ispace nes (arrs ++ map_out_arrs)
 
 blockedGenReduce :: (MonadFreshNames m, HasScope Kernels m) =>
-                    Pattern Kernels
-                 -> SubExp -> [GenReduceOp InKernel]
+                    SubExp
+                 -> [(VName,SubExp)] -- ^ Segment indexes and sizes.
+                 -> [KernelInput]
+                 -> [GenReduceOp InKernel]
                  -> Lambda InKernel -> [VName]
-                 -> m (Stms Kernels)
-blockedGenReduce pat arr_w ops lam arrs = runBinder_ $ do
-  (_, KernelSize num_groups group_size elems_per_thread _ num_threads) <-
-    blockedKernelSize arr_w
+                 -> m ([VName], Stms Kernels)
+blockedGenReduce arr_w segments inputs ops lam arrs = runBinder $ do
+  let (segment_is, segment_sizes) = unzip segments
+      depth = length segments
+  arr_w_64 <- letSubExp "arr_w_64" =<< eConvOp (SExt Int32 Int64) (toExp arr_w)
+  segment_sizes_64 <- mapM (letSubExp "segment_size_64" <=< eConvOp (SExt Int32 Int64) . toExp) segment_sizes
+  total_w <- letSubExp "genreduce_elems" =<< foldBinOp (Mul Int64) arr_w_64 segment_sizes_64
+  (_, KernelSize num_groups group_size elems_per_thread_64 _ num_threads) <-
+    blockedKernelSize total_w
 
   kspace <- newKernelSpace (num_groups, group_size, num_threads) $ FlatThreadSpace []
   let ltid = spaceLocalId kspace
+      gtid = spaceGlobalId kspace
+      nthreads = spaceNumThreads kspace
 
-  let dests = concatMap genReduceDest ops
-      nes = concatMap genReduceNeutral ops
-  dest_ts <- mapM lookupType dests
+  -- Determining the degree of cooperation (heuristic):
+  -- coop_lvl   := size of histogram (Cooperation level)
+  -- num_histos := (threads / coop_lvl) (Number of histograms)
+  -- threads    := min(physical_threads, segment_size)
+  num_histos <- forM ops $ \(GenReduceOp w _ _ _) ->
+    letSubExp "num_histos" =<< eDivRoundingUp Int32 (eSubExp nthreads)
+    (foldBinOp (Mul Int32) w segment_sizes)
 
-  lock_arrs <- forM (map genReduceWidth ops) $ \dest_w ->
-    letExp "locks_arr" $ BasicOp $ Replicate (Shape [dest_w]) (intConst Int32 0)
+  -- Initialize sub-histograms.
+  sub_histos <- forM (zip ops num_histos) $ \(GenReduceOp w dests nes _, num_histos') -> do
+    -- If num_histos' is 1, then we just reuse the original
+    -- destination.  The idea is to avoid a copy if we are writing a
+    -- small number of values into a very large prior histogram.  This
+    -- only works if neither the Reshape nor the If results in a copy.
+    let num_histos_is_one = BasicOp $ CmpOp (CmpEq int32) num_histos' $ intConst Int32 1
+
+        reuse_dest =
+          fmap resultBody $ forM dests $ \dest -> do
+            (segment_dims, hist_dims) <- splitAt depth . arrayDims <$> lookupType dest
+            letSubExp "sub_histo" $ BasicOp $
+              Reshape (map DimNew $ segment_dims ++ num_histos' : hist_dims) dest
+
+        make_subhistograms =
+          -- To incorporate the original values of the genreduce target, we
+          -- copy those values to the first subhistogram here.
+          fmap resultBody $ forM (zip nes dests) $ \(ne, dest) -> do
+            blank <- letExp "sub_histo_blank" $
+              BasicOp $ Replicate (Shape $ segment_sizes ++ [num_histos', w]) ne
+            let (zero, one) = (intConst Int32 0, intConst Int32 1)
+            slice <- fullSlice <$> lookupType blank <*>
+                     pure (map (flip (DimSlice zero) one) segment_sizes ++ [DimFix zero])
+            letSubExp "sub_histo" $ BasicOp $ Update blank slice $ Var dest
+
+    letTupExp "histo_dests" =<<
+      eIf (pure num_histos_is_one) reuse_dest make_subhistograms
+
+  let sub_histos' = concat sub_histos
+  dest_ts <- mapM lookupType sub_histos'
+
+  lock_arrs <- forM (zip ops num_histos) $ \(GenReduceOp w _ _ _, num_histos') ->
+    letExp "locks_arr" $ BasicOp $
+    Replicate (Shape $ segment_sizes ++ [num_histos', w]) (intConst Int32 0)
 
   (kres, kstms) <- runBinder $ localScope (scopeOfKernelSpace kspace) $ do
+    let toInt64 = eConvOp (SExt Int32 Int64)
     i <- newVName "i"
     -- The merge parameters are the histogram we are constructing.
-    merge_params <- zipWithM newParam (map baseString dests)
+    merge_params <- zipWithM newParam (map baseString sub_histos')
                                       (map (`toDecl` Unique) dest_ts)
-    let merge = zip merge_params $ map Var dests
-        form = ForLoop i Int32 elems_per_thread []
+    group_size_64 <- letSubExp "group_size_64" =<<
+                     toInt64 (toExp group_size)
+    let merge = zip merge_params $ map Var sub_histos'
+        form = ForLoop i Int64 elems_per_thread_64 []
 
     loop_body <- runBodyBinder $ localScope (scopeOfFParams (map fst merge) <>
                                              scopeOf form) $ do
       -- Compute the offset into the input and output.  To this a
       -- thread can add its local ID to figure out which element it is
-      -- responsible for.
+      -- responsible for.  The calculation is done with 64-bit
+      -- integers to avoid overflow, but the final segment indexes are
+      -- 32 bit.
       offset <- letSubExp "offset" =<<
-                eBinOp (Add Int32)
-                (eBinOp (Mul Int32)
-                 (eSubExp $ Var $ spaceGroupId kspace)
-                 (pure $ BasicOp $ BinOp (Mul Int32) elems_per_thread group_size))
-                (pure $ BasicOp $ BinOp (Mul Int32) (Var i) group_size)
+                eBinOp (Add Int64)
+                (eBinOp (Mul Int64)
+                 (toInt64 $ toExp $ spaceGroupId kspace)
+                 (eBinOp (Mul Int64) (toExp elems_per_thread_64) (toExp group_size_64)))
+                (eBinOp (Mul Int64) (toExp i) (toExp group_size_64))
+
+      -- Construct segment indices.
+      j <- letSubExp "j" =<< eBinOp (Add Int64) (toExp offset) (toInt64 $ toExp ltid)
+      l <- newVName "l"
+      let bindIndex v = letBindNames_ [v] <=< toExp
+      zipWithM_ bindIndex (segment_is++[l]) $
+        map (ConvOpExp (SExt Int64 Int32)) .
+        unflattenIndex (map (ConvOpExp (SExt Int32 Int64) .
+                             primExpFromSubExp int32) $ segment_sizes ++ [arr_w]) $
+        primExpFromSubExp int64 j
 
       -- We execute the bucket function once and update each histogram serially.
       -- We apply the bucket function if j=offset+ltid is less than
       -- num_elements.  This also involves writing to the mapout
       -- arrays.
-      j <- letSubExp "j" $ BasicOp $ BinOp (Add Int32) offset (Var ltid)
-      let in_bounds = pure $ BasicOp $ CmpOp (CmpSlt Int32) j arr_w
+      let in_bounds = pure $ BasicOp $ CmpOp (CmpSlt Int64) j total_w
 
           in_bounds_branch = do
+            -- Read segment inputs.
+            mapM_ (addStm <=< readKernelInput) inputs
+
             -- Read array input.
             arr_elems <- forM arrs $ \a -> do
               a_t <- lookupType a
-              let slice = fullSlice a_t [DimFix j]
+              let slice = fullSlice a_t [DimFix $ Var l]
               letSubExp (baseString a ++ "_elem") $ BasicOp $ Index a slice
 
             -- Apply bucket function.
             resultBody <$> eLambda lam (map eSubExp arr_elems)
 
           not_in_bounds_branch =
-            return $ resultBody $ replicate (length ops) (intConst Int32 (-1)) ++ nes
+            return $ resultBody $ replicate (length ops) (intConst Int32 (-1)) ++
+            concatMap genReduceNeutral ops
 
       lam_res <- letTupExp "bucket_fun_res" =<<
                   eIf in_bounds in_bounds_branch not_in_bounds_branch
@@ -376,10 +440,16 @@ blockedGenReduce pat arr_w ops lam arrs = runBinder_ $ do
           perOp :: [a] -> [[a]]
           perOp = chunks $ map (length . genReduceDest) ops
 
-      ops_res <- forM (zip5 ops (perOp merge_params) buckets (perOp vs) lock_arrs) $
-        \(GenReduceOp dest_w _ _ comb_op, dests', bucket, vs', lock_arr) ->
-        fmap (map Var) $ letTupExp "genreduce_res" $ Op $
-        GroupGenReduce dest_w (map paramName dests') comb_op bucket vs' lock_arr
+      ops_res <- forM (zip6 ops (perOp $ map paramName merge_params) buckets (perOp vs) lock_arrs num_histos) $
+        \(GenReduceOp dest_w _ _ comb_op, subhistos, bucket, vs', lock_arrs', num_histos') -> do
+          -- Compute subhistogram index for each thread.
+          subhisto_ind <- letSubExp "subhisto_ind" =<<
+                          eBinOp (SDiv Int32)
+                          (toExp gtid)
+                          (eDivRoundingUp Int32 (toExp nthreads) (eSubExp num_histos'))
+          fmap (map Var) $ letTupExp "genreduce_res" $ Op $
+            GroupGenReduce (segment_sizes ++ [num_histos', dest_w])
+            subhistos comb_op (map Var segment_is ++ [subhisto_ind, bucket]) vs' lock_arrs'
 
       return $ resultBody $ concat ops_res
 
@@ -387,14 +457,14 @@ blockedGenReduce pat arr_w ops lam arrs = runBinder_ $ do
     return $ map KernelInPlaceReturn result
 
   let kbody = KernelBody () kstms kres
-  letBind_ pat $ Op $ Kernel (KernelDebugHints "gen_reduce" []) kspace dest_ts kbody
+  letTupExp "histograms" $ Op $ Kernel (KernelDebugHints "gen_reduce" []) kspace dest_ts kbody
 
 blockedMap :: (MonadFreshNames m, HasScope Kernels m) =>
               Pattern Kernels -> SubExp
            -> StreamOrd -> Lambda InKernel -> [SubExp] -> [VName]
            -> m (Stm Kernels, Stms Kernels)
 blockedMap concat_pat w ordering lam nes arrs = runBinder $ do
-  (_, kernel_size) <- blockedKernelSize w
+  (_, kernel_size) <- blockedKernelSize =<< asIntS Int64 w
   let num_nonconcat = length (lambdaReturnType lam) - patternSize concat_pat
       num_groups = kernelWorkgroups kernel_size
       group_size = kernelWorkgroupSize kernel_size
@@ -419,8 +489,9 @@ blockedMap concat_pat w ordering lam nes arrs = runBinder $ do
 
   nonconcat_rets <- forM chunk_red_pes $ \pe ->
     return $ ThreadsReturn AllThreads $ Var $ patElemName pe
+  elems_per_thread <- asIntS Int32 $ kernelElementsPerThread kernel_size
   concat_rets <- forM chunk_map_pes $ \pe ->
-    return $ ConcatReturns ordering' w (kernelElementsPerThread kernel_size) Nothing $ patElemName pe
+    return $ ConcatReturns ordering' w elems_per_thread Nothing $ patElemName pe
 
   return $ Let pat (defAux ()) $ Op $ Kernel (KernelDebugHints "chunked_map" []) space ts $
     KernelBody () chunk_and_fold $ nonconcat_rets ++ concat_rets
@@ -439,8 +510,9 @@ blockedPerThread thread_gtid w kernel_size ordering lam num_nonconcat arrs = do
       red_ts = take num_nonconcat $ lambdaReturnType lam
       map_ts = map rowType $ drop num_nonconcat $ lambdaReturnType lam
 
+  per_thread <- asIntS Int32 $ kernelElementsPerThread kernel_size
   splitArrays (paramName chunk_size) (map paramName arr_params) ordering' w
-    (Var thread_gtid) (kernelElementsPerThread kernel_size) arrs
+    (Var thread_gtid) per_thread arrs
 
   chunk_red_pes <- forM red_ts $ \red_t -> do
     pe_name <- newVName "chunk_fold_red"
@@ -485,10 +557,15 @@ splitArrays chunk_size split_bound ordering w i elems_per_i arrs = do
           letBindNames_ [slice_name] $ BasicOp $ Index arr slice
 
 data KernelSize = KernelSize { kernelWorkgroups :: SubExp
+                               -- ^ Int32
                              , kernelWorkgroupSize :: SubExp
+                               -- ^ Int32
                              , kernelElementsPerThread :: SubExp
+                               -- ^ Int64
                              , kernelTotalElements :: SubExp
+                               -- ^ Int64
                              , kernelNumThreads :: SubExp
+                               -- ^ Int32
                              }
                 deriving (Eq, Ord, Show)
 
@@ -497,15 +574,15 @@ numberOfGroups w group_size max_num_groups = do
   -- If 'w' is small, we launch fewer groups than we normally would.
   -- We don't want any idle groups.
   w_div_group_size <- letSubExp "w_div_group_size" =<<
-    eDivRoundingUp Int32 (eSubExp w) (eSubExp group_size)
+    eDivRoundingUp Int64 (eSubExp w) (eSubExp group_size)
   -- We also don't want zero groups.
-  num_groups_maybe_zero <- letSubExp "num_groups_maybe_zero" $ BasicOp $ BinOp (SMin Int32)
+  num_groups_maybe_zero <- letSubExp "num_groups_maybe_zero" $ BasicOp $ BinOp (SMin Int64)
                            w_div_group_size max_num_groups
   num_groups <- letSubExp "num_groups" $
-                BasicOp $ BinOp (SMax Int32) (constant (1::Int32))
+                BasicOp $ BinOp (SMax Int64) (intConst Int64 1)
                 num_groups_maybe_zero
   num_threads <-
-    letSubExp "num_threads" $ BasicOp $ BinOp (Mul Int32) num_groups group_size
+    letSubExp "num_threads" $ BasicOp $ BinOp (Mul Int64) num_groups group_size
   return (num_groups, num_threads)
 
 blockedKernelSize :: (MonadBinder m, Lore m ~ Kernels) =>
@@ -514,14 +591,18 @@ blockedKernelSize w = do
   group_size <- getSize "group_size" SizeGroup
   max_num_groups <- getSize "max_num_groups" SizeNumGroups
 
-  (num_groups, num_threads) <- numberOfGroups w group_size max_num_groups
+  group_size' <- asIntS Int64 group_size
+  max_num_groups' <- asIntS Int64 max_num_groups
+  (num_groups, num_threads) <- numberOfGroups w group_size' max_num_groups'
+  num_groups' <- asIntS Int32 num_groups
+  num_threads' <- asIntS Int32 num_threads
 
   per_thread_elements <-
     letSubExp "per_thread_elements" =<<
-    eDivRoundingUp Int32 (eSubExp w) (eSubExp num_threads)
+    eDivRoundingUp Int64 (toExp =<< asIntS Int64 w) (toExp =<< asIntS Int64 num_threads)
 
   return (max_num_groups,
-          KernelSize num_groups group_size per_thread_elements w num_threads)
+          KernelSize num_groups' group_size per_thread_elements w num_threads')
 
 -- First stage scan kernel.
 scanKernel1 :: (MonadBinder m, Lore m ~ Kernels) =>
@@ -531,6 +612,8 @@ scanKernel1 :: (MonadBinder m, Lore m ~ Kernels) =>
             -> Lambda InKernel -> [VName]
             -> m (Kernel InKernel)
 scanKernel1 w scan_sizes (scan_lam, scan_nes) (_comm, red_lam, red_nes) foldlam arrs = do
+  num_elements <- asIntS Int32 $ kernelTotalElements scan_sizes
+
   let (scan_ts, red_ts, map_ts) =
         splitAt3 (length scan_nes) (length red_nes) $ lambdaReturnType foldlam
       (_, foldlam_acc_params, _) =
@@ -650,7 +733,6 @@ scanKernel1 w scan_sizes (scan_lam, scan_nes) (_comm, red_lam, red_nes) foldlam 
   where num_groups = kernelWorkgroups scan_sizes
         group_size = kernelWorkgroupSize scan_sizes
         num_threads = kernelNumThreads scan_sizes
-        num_elements = kernelTotalElements scan_sizes
         consumed_in_foldlam = consumedInBody $ lambdaBody $ Alias.analyseLambda foldlam
 
         mkOutArray desc t = do
@@ -782,7 +864,7 @@ blockedScan :: (MonadBinder m, Lore m ~ Kernels) =>
 blockedScan pat w (scan_lam, scan_nes) (comm, red_lam, red_nes) map_lam segment_size ispace inps arrs = do
   foldlam <- composeLambda scan_lam red_lam map_lam
 
-  (_, first_scan_size) <- blockedKernelSize w
+  (_, first_scan_size) <- blockedKernelSize =<< asIntS Int64 w
   my_index <- newVName "my_index"
   other_index <- newVName "other_index"
   let num_groups = kernelWorkgroups first_scan_size
@@ -965,7 +1047,7 @@ data KernelInput = KernelInput { kernelInputName :: VName
 kernelInputParam :: KernelInput -> Param Type
 kernelInputParam p = Param (kernelInputName p) (kernelInputType p)
 
-readKernelInput :: (HasScope Kernels m, Monad m) =>
+readKernelInput :: (HasScope scope m, Monad m) =>
                    KernelInput -> m (Stm InKernel)
 readKernelInput inp = do
   let pe = PatElem (kernelInputName inp) $ kernelInputType inp

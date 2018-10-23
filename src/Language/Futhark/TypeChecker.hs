@@ -33,6 +33,7 @@ import Language.Futhark.Semantic
 import Futhark.FreshNames hiding (newName)
 import Language.Futhark.TypeChecker.Monad
 import Language.Futhark.TypeChecker.Terms
+import Language.Futhark.TypeChecker.Unify (doUnification)
 import Language.Futhark.TypeChecker.Types
 
 --- The main checker
@@ -72,10 +73,11 @@ checkExp files src env e = do
 checkDec :: Imports
          -> VNameSource
          -> Env
+         -> ImportName
          -> UncheckedDec
          -> Either TypeError (Env, Dec, VNameSource)
-checkDec files src env d = do
-  ((env', d'), _, src') <- runTypeM env files' (mkInitialImport "") src $ do
+checkDec files src env name d = do
+  ((env', d'), _, src') <- runTypeM env files' name src $ do
     (_, env', d') <- checkOneDec d
     return (env' <> env, d')
   return (env', d', src')
@@ -163,16 +165,9 @@ checkSpecs (ValSpec name tparams vtype doc loc : specs) =
       checkTypeParams tparams $ \tparams' -> bindingTypeParams tparams' $ do
         (vtype', _) <- checkTypeDecl vtype
         return (tparams', vtype')
-    let rettype'' = getType $ unInfo $ expandedType rettype'
-    binding <- case rettype'' of
-                 Left (params, rt) ->
-                   return $ BoundV tparams' $ foldr (uncurry $ Arrow ()) rt params
-                 Right rt -> do
-                   unless (null tparams') $
-                     throwError $ TypeError loc "Non-functional bindings may not be polymorphic."
-                   return $ BoundV [] rt
 
-    let valenv =
+    let binding = BoundV tparams' $ unInfo $ expandedType rettype'
+        valenv =
           mempty { envVtable = M.singleton name' binding
                  , envNameMap = M.singleton (Term, name) $ qualName name'
                  }
@@ -642,38 +637,19 @@ matchMTys = matchMTys' mempty
              -> VName -> BoundV
              -> VName -> BoundV
              -> Either TypeError (VName, VName)
-    matchVal loc spec_name spec_f@(BoundV _ Arrow{}) name f@(BoundV _ Arrow{})
-      | matchFunBinding loc spec_f f =
-          return (spec_name, name)
-    matchVal _ spec_name (BoundV [] spec_t) name (BoundV [] t)
-      | toStructural t `subtypeOf` toStructural spec_t =
-          return (spec_name, name)
+    matchVal loc spec_name spec_t name t
+      | matchFunBinding loc spec_t t = return (spec_name, name)
     matchVal loc spec_name spec_v _ v =
       Left $ TypeError loc $ "Value `" ++ baseString spec_name ++ "` specified as type " ++
       ppValBind spec_v ++ " in signature, but has " ++ ppValBind v ++ " in structure."
 
     matchFunBinding :: SrcLoc -> BoundV -> BoundV -> Bool
     matchFunBinding loc (BoundV _ orig_spec_t) (BoundV tps orig_t) =
-      match mempty orig_spec_t orig_t
-      where tnames = map typeParamName tps
-
-            match substs_and_locs (Arrow _ _ spec_pt spec_rt) (Arrow _ _ pt rt) =
-              case instantiatePolymorphic tnames loc substs_and_locs pt' spec_pt' of
-                Right substs_and_locs'
-                  | spec_pt' `subtypeOf`
-                    toStructural (substituteTypes (mkSubsts substs_and_locs') pt) ->
-                      match substs_and_locs' spec_rt rt
-                _ -> False
-                where pt' = toStructural pt
-                      spec_pt' = toStructural spec_pt
-
-            -- The base case relies on the property that there can be
-            -- no new type variables in the return type.
-            match substs_and_locs spec_t t =
-              toStructural (substituteTypes (mkSubsts substs_and_locs) t)
-              `subtypeOf` toStructural spec_t
-
-            mkSubsts = M.map $ TypeSub . TypeAbbr Lifted [] . vacuousShapeAnnotations . fst
+      -- Would be nice if we could propagate the actual error here.
+      case doUnification loc tps
+           (toStructural orig_spec_t) (toStructural orig_t) of
+        Left _ -> False
+        Right t -> t `subtypeOf` toStructural orig_spec_t
 
     missingType loc name =
       Left $ TypeError loc $

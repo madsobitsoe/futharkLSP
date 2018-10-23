@@ -211,13 +211,27 @@ data KernelOp = GetGroupId VName Int
 
 -- Atomic operations return the value stored before the update.
 -- This value is stored in the first VName.
-data AtomicOp = AtomicAdd VName VName (Count Elements) Exp
-              | AtomicCmpXchg VName VName (Count Elements) Exp Exp
-              | AtomicXchg VName VName (Count Elements) Exp
+data AtomicOp = AtomicAdd VName VName (Count Bytes) Exp
+              | AtomicSMax VName VName (Count Bytes) Exp
+              | AtomicSMin VName VName (Count Bytes) Exp
+              | AtomicUMax VName VName (Count Bytes) Exp
+              | AtomicUMin VName VName (Count Bytes) Exp
+              | AtomicAnd VName VName (Count Bytes) Exp
+              | AtomicOr VName VName (Count Bytes) Exp
+              | AtomicXor VName VName (Count Bytes) Exp
+              | AtomicCmpXchg VName VName (Count Bytes) Exp Exp
+              | AtomicXchg VName VName (Count Bytes) Exp
               deriving (Show)
 
 instance FreeIn AtomicOp where
   freeIn (AtomicAdd _ arr i x) = freeIn arr <> freeIn i <> freeIn x
+  freeIn (AtomicSMax _ arr i x) = freeIn arr <> freeIn i <> freeIn x
+  freeIn (AtomicSMin _ arr i x) = freeIn arr <> freeIn i <> freeIn x
+  freeIn (AtomicUMax _ arr i x) = freeIn arr <> freeIn i <> freeIn x
+  freeIn (AtomicUMin _ arr i x) = freeIn arr <> freeIn i <> freeIn x
+  freeIn (AtomicAnd _ arr i x) = freeIn arr <> freeIn i <> freeIn x
+  freeIn (AtomicOr _ arr i x) = freeIn arr <> freeIn i <> freeIn x
+  freeIn (AtomicXor _ arr i x) = freeIn arr <> freeIn i <> freeIn x
   freeIn (AtomicCmpXchg _ arr i x y) = freeIn arr <> freeIn i <> freeIn x <> freeIn y
   freeIn (AtomicXchg _ arr i x) = freeIn arr <> freeIn i <> freeIn x
 
@@ -244,12 +258,36 @@ instance Pretty KernelOp where
     text "barrier()"
   ppr MemFence =
     text "mem_fence()"
-  ppr (Atomic (AtomicAdd _old _val _ind _x)) =
-    undefined
-  ppr (Atomic (AtomicCmpXchg _old _val _ind _x _y)) =
-    undefined
-  ppr (Atomic (AtomicXchg _old _val _ind _x)) =
-    undefined
+  ppr (Atomic (AtomicAdd old arr ind x)) =
+    ppr old <+> text "<-" <+> text "atomic_add" <>
+    parens (commasep [ppr arr <> brackets (ppr ind), ppr x])
+  ppr (Atomic (AtomicSMax old arr ind x)) =
+    ppr old <+> text "<-" <+> text "atomic_smax" <>
+    parens (commasep [ppr arr <> brackets (ppr ind), ppr x])
+  ppr (Atomic (AtomicSMin old arr ind x)) =
+    ppr old <+> text "<-" <+> text "atomic_smin" <>
+    parens (commasep [ppr arr <> brackets (ppr ind), ppr x])
+  ppr (Atomic (AtomicUMax old arr ind x)) =
+    ppr old <+> text "<-" <+> text "atomic_umax" <>
+    parens (commasep [ppr arr <> brackets (ppr ind), ppr x])
+  ppr (Atomic (AtomicUMin old arr ind x)) =
+    ppr old <+> text "<-" <+> text "atomic_umin" <>
+    parens (commasep [ppr arr <> brackets (ppr ind), ppr x])
+  ppr (Atomic (AtomicAnd old arr ind x)) =
+    ppr old <+> text "<-" <+> text "atomic_and" <>
+    parens (commasep [ppr arr <> brackets (ppr ind), ppr x])
+  ppr (Atomic (AtomicOr old arr ind x)) =
+    ppr old <+> text "<-" <+> text "atomic_or" <>
+    parens (commasep [ppr arr <> brackets (ppr ind), ppr x])
+  ppr (Atomic (AtomicXor old arr ind x)) =
+    ppr old <+> text "<-" <+> text "atomic_xor" <>
+    parens (commasep [ppr arr <> brackets (ppr ind), ppr x])
+  ppr (Atomic (AtomicCmpXchg old arr ind x y)) =
+    ppr old <+> text "<-" <+> text "atomic_cmp_xchg" <>
+    parens (commasep [ppr arr <> brackets (ppr ind), ppr x, ppr y])
+  ppr (Atomic (AtomicXchg old arr ind x)) =
+    ppr old <+> text "<-" <+> text "atomic_xchg" <>
+    parens (commasep [ppr arr <> brackets (ppr ind), ppr x])
 
 instance FreeIn KernelOp where
   freeIn (Atomic op) = freeIn op
