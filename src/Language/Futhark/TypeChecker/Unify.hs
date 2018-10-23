@@ -9,6 +9,7 @@ module Language.Futhark.TypeChecker.Unify
   , typeError
 
   , zeroOrderType
+  , mustHaveConstr
   , mustHaveField
   , mustBeOneOf
   , equalityType
@@ -305,7 +306,8 @@ zeroOrderType loc desc t = do
               locStr ploc ++ " may be a function."
             _ -> return ()
 
-mustHaveConstr :: SrcLoc -> Name -> TypeBase dim as -> TermTypeM ()
+mustHaveConstr :: (MonadUnify m, Monoid as) =>
+                  SrcLoc -> Name -> TypeBase dim as -> m ()
 mustHaveConstr loc c t = do
   constraints <- getConstraints
   case t of

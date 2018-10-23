@@ -1623,7 +1623,7 @@ checkFunDef' (fname, maybe_retdecl, tparams, params, body, loc) = noUnique $ do
 
     -- Check if pattern matches are exhaustive and yield
     -- warnings if not.
-    isExhaustive body''
+    isExhaustive body'
 
     -- We keep those type variables that were not closed over by
     -- let-generalisation.
