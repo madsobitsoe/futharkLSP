@@ -10,9 +10,9 @@ let f (x : foobar) : foobar =
     case #foo -> #bar
     case #bar -> #foo
 
-let main : i32 = if (#foo : foobar) == (#bar : foobar)
+let main : i32 = if (#foo : foobar) == #bar
                  then 1
-                 else if (#bar : foobar) == (#bar : foobar)
+                 else if (#bar : foobar) == #bar
                       then 2
                       else 3 
 
