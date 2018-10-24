@@ -774,7 +774,7 @@ eval env (Match e cs _ _) = do
   v <- eval env e
   cs' <- mapM (runMaybeT . evalCase v env) cs
   case catMaybes cs' of
-    []     -> fail "No match found."
+    []     -> fail "Pattern match failure."
     (v':_) -> return v'
 
 eval _ e = error $ "eval not yet: " ++ show e
