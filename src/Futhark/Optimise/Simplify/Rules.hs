@@ -34,8 +34,6 @@ import qualified Futhark.Analysis.UsageTable as UT
 import Futhark.Analysis.DataDependencies
 import Futhark.Optimise.Simplify.ClosedForm
 import Futhark.Optimise.Simplify.Rule
-import qualified Futhark.Analysis.AlgSimplify as AS
-import qualified Futhark.Analysis.ScalExp as SE
 import Futhark.Analysis.PrimExp.Convert
 import Futhark.Representation.AST
 import Futhark.Representation.AST.Attributes.Aliases
@@ -51,7 +49,6 @@ topDownRules = [ RuleDoLoop hoistLoopInvariantMergeVariables
                , RuleGeneric constantFoldPrimFun
                , RuleIf ruleIf
                , RuleIf hoistBranchInvariant
-               , RuleBasicOp simplifyScalExp
                , RuleBasicOp ruleBasicOp
                ]
 
@@ -251,6 +248,7 @@ simpleRules = [ simplifyBinOp
               , simplifyReshapeReshape
               , simplifyReshapeScratch
               , simplifyReshapeReplicate
+              , simplifyReshapeIota
               , improveReshape ]
 
 simplifyClosedFormLoop :: BinderOps lore => TopDownRuleDoLoop lore
@@ -955,25 +953,6 @@ hoistBranchInvariant _ pat _ (cond, tb, fb, IfAttr ret ifsort) = do
         reshapeResult se _ =
           return se
 
-simplifyScalExp :: BinderOps lore => TopDownRuleBasicOp lore
-simplifyScalExp vtable pat _ e = do
-  res <- SE.toScalExp (`ST.lookupScalExp` vtable) $ BasicOp e
-  case res of
-    -- If the sufficient condition is 'True', then it statically succeeds.
-    Just se
-      | SE.scalExpType se == Bool,
-        isNothing $ valOrVar se,
-        SE.scalExpSize se < size_bound,
-        Just se' <- valOrVar $ AS.simplify se ranges ->
-        letBind_ pat $ BasicOp $ SubExp se'
-    _ -> cannotSimplify
-  where ranges = ST.rangesRep vtable
-        size_bound = 10 -- don't touch scalexps bigger than this.
-
-        valOrVar (SE.Val v)  = Just $ Constant v
-        valOrVar (SE.Id v _) = Just $ Var v
-        valOrVar _           = Nothing
-
 simplifyIdentityReshape :: SimpleRule lore
 simplifyIdentityReshape _ seType (Reshape newshape v)
   | Just t <- seType $ Var v,
@@ -1003,6 +982,12 @@ simplifyReshapeReplicate defOf seType (Reshape newshape v)
       in Just (Replicate (Shape new) se, v_cs)
 simplifyReshapeReplicate _ _ _ = Nothing
 
+simplifyReshapeIota :: SimpleRule lore
+simplifyReshapeIota defOf _ (Reshape newshape v)
+  | Just (BasicOp (Iota _ offset stride it), v_cs) <- defOf v,
+    [n] <- newDims newshape =
+      Just (Iota n offset stride it, v_cs)
+simplifyReshapeIota _ _ _ = Nothing
 
 improveReshape :: SimpleRule lore
 improveReshape _ seType (Reshape newshape v)
