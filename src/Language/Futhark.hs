@@ -3,7 +3,6 @@ module Language.Futhark
   ( module Language.Futhark.Syntax
   , module Language.Futhark.Attributes
   , module Language.Futhark.Pretty
-  , module Text.Show.Prettyprint
 
   , Ident, DimIndex, Exp, Pattern
   , ModExp, ModParam, SigExp, ModBind, SigBind
@@ -13,8 +12,6 @@ module Language.Futhark
   , TypeParam, Case
   )
   where
-
-import Text.Show.Prettyprint
 
 import Language.Futhark.Syntax
 import Language.Futhark.Attributes
