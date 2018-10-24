@@ -382,11 +382,11 @@ defuncExp (Assert e1 e2 desc loc) = do
 defuncExp e@VConstr0{} = return (e, Dynamic $ typeOf e)
 
 defuncExp (Match e cs t loc) = do
-  (e', sv)  <- defuncExp e
-  csPairs <- mapM (defuncCase sv) cs
+  (e', sv) <- defuncExp e
+  csPairs  <- mapM (defuncCase sv) cs
   let cs' = map fst csPairs
       sv' = case csPairs of
-              []   -> error "Matches always have at least one case."
+              []   -> error "Matches must always have at least one case."
               c':_ -> snd c'
   return (Match e' cs' t loc, sv')
 

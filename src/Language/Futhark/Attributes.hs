@@ -209,7 +209,6 @@ diet (Array _ _ Unique)    = Consume
 diet (Array _ _ Nonunique) = Observe
 diet (Enum _)              = Observe
 
--- foo
 -- | @t `maskAliases` d@ removes aliases (sets them to 'mempty') from
 -- the parts of @t@ that are denoted as 'Consumed' by the 'Diet' @d@.
 maskAliases :: Monoid as =>
@@ -590,7 +589,6 @@ arrayElemReturnType (ArrayEnumElem cs ()) ds args =
   ArrayEnumElem cs als
   where als = mconcat $ map aliases $ zipWith maskAliases args ds
 
-
 recordArrayElemReturnType :: RecordArrayElemTypeBase dim ()
                          -> [Diet]
                          -> [CompType]
@@ -625,7 +623,7 @@ orderZero Array{}         = True
 orderZero (Record fs)     = all orderZero $ M.elems fs
 orderZero TypeVar{}       = True
 orderZero Arrow{}         = False
-orderZero (Enum _)        = True
+orderZero Enum{}          = True
 
 -- | Extract all the shape names that occur in a given pattern.
 patternDimNames :: PatternBase Info VName -> Names
@@ -669,13 +667,13 @@ patIdentSet PatternLit{}              = mempty
 
 -- | The type of values bound by the pattern.
 patternType :: PatternBase Info VName -> CompType
-patternType (Wildcard (Info t) _)      = removeShapeAnnotations t
-patternType (PatternParens p _)        = patternType p
-patternType (Id _ (Info t) _)          = removeShapeAnnotations t
-patternType (TuplePattern pats _)      = tupleRecord $ map patternType pats
-patternType (RecordPattern fs _)       = Record $ patternType <$> M.fromList fs
-patternType (PatternAscription p _ _)  = patternType p
-patternType (PatternLit _ (Info t) _)  = removeShapeAnnotations t
+patternType (Wildcard (Info t) _)     = removeShapeAnnotations t
+patternType (PatternParens p _)       = patternType p
+patternType (Id _ (Info t) _)         = removeShapeAnnotations t
+patternType (TuplePattern pats _)     = tupleRecord $ map patternType pats
+patternType (RecordPattern fs _)      = Record $ patternType <$> M.fromList fs
+patternType (PatternAscription p _ _) = patternType p
+patternType (PatternLit _ (Info t) _) = removeShapeAnnotations t
 
 -- | The type matched by the pattern, including shape declarations if present.
 patternStructType :: PatternBase Info VName -> StructType

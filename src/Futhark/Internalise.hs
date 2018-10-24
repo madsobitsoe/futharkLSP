@@ -1320,9 +1320,9 @@ isOverloadedFunction qname args loc = do
           fmap pure $ letSubExp desc $ I.BasicOp $ I.ConvOp conv x'
 
     -- Short-circuiting operators are magical.
-    handle [x,y] "&&" = Just $ \desc -> do
+    handle [x,y] "&&" = Just $ \desc ->
       internaliseExp desc $
-        E.If x y (E.Literal (E.BoolValue False) noLoc) (Info (E.Prim E.Bool)) noLoc
+      E.If x y (E.Literal (E.BoolValue False) noLoc) (Info (E.Prim E.Bool)) noLoc
     handle [x,y] "||" = Just $ \desc ->
         internaliseExp desc $
         E.If x (E.Literal (E.BoolValue True) noLoc) y (Info (E.Prim E.Bool)) noLoc
@@ -1763,8 +1763,8 @@ typeExpForError cm (E.TEApply t arg _) = do
   arg' <- case arg of TypeArgExpType argt -> typeExpForError cm argt
                       TypeArgExpDim d _   -> pure <$> dimDeclForError cm d
   return $ t' ++ [" "] ++ arg'
-typeExpForError _ (E.TEEnum cs _) =
-  return [ErrorString $ pretty cs]
+typeExpForError _ e@E.TEEnum{} =
+  return [ErrorString $ pretty e]
 
 dimDeclForError :: ConstParams -> E.DimDecl VName -> InternaliseM (ErrorMsgPart SubExp)
 dimDeclForError cm (NamedDim d) = do
