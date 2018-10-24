@@ -1080,5 +1080,5 @@ type UncheckedDec = DecBase NoInfo Name
 -- | A Futhark program with no type annotations.
 type UncheckedProg = ProgBase NoInfo Name
 
--- | A case (of a match expression) wit no type annotations.
+-- | A case (of a match expression) with no type annotations.
 type UncheckedCase = CaseBase NoInfo Name
