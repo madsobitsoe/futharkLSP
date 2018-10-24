@@ -916,9 +916,9 @@ generateCond opAnd opEq p e = foldr (boolOp opAnd) (E.Literal (E.BoolValue True)
 
         generateCond' :: E.Pattern -> [(Maybe (E.Exp -> E.Exp), CompType)]
         generateCond' (E.TuplePattern ps loc) = generateCond' (E.RecordPattern fs loc)
-          where fs = zipWith (\i p -> (nameFromString (show i), p)) [1..] ps
-        generateCond' (E.RecordPattern fs loc) = concatMap instCond holes
-          where holes = map (\(n, p) -> (generateCond' p, n)) fs
+          where fs = zipWith (\i p' -> (nameFromString (show i), p')) ([1..] :: [Integer]) ps
+        generateCond' (E.RecordPattern fs _) = concatMap instCond holes
+          where holes = map (\(n, p') -> (generateCond' p', n)) fs
                 field ([],_) = Nothing
                 field ((_, t):_, f) = Just (f, t)
                 t' = Record $ M.fromList $ mapMaybe field holes
@@ -936,7 +936,7 @@ generateCond opAnd opEq p e = foldr (boolOp opAnd) (E.Literal (E.BoolValue True)
           [(Just (boolOp opEq ePat), removeShapeAnnotations t)]
 
 generateCaseIf :: String -> E.Exp -> I.Body -> Case -> InternaliseM I.Exp
-generateCaseIf desc e bFail c@(CasePat p eCase loc) = do
+generateCaseIf desc e bFail (CasePat p eCase loc) = do
   ses <- internaliseExp desc e
   t <- I.staticShapes <$> mapM I.subExpType ses
   eCase' <- stmPattern [] p t $ \cm pat_names match -> do

@@ -207,8 +207,8 @@ linkVarToType loc vn tp = do
                   Enum t_cs
                     | intersect cs t_cs == cs -> return ()
                     | otherwise -> typeError loc $
-                       "Cannot unify `" ++ prettyName vn ++ "' with type `" ++
-                       pretty tp ++ " due to use at " ++ locStr old_loc ++ ")."
+                       "Cannot unify `" ++ prettyName vn ++ "' with type `"
+                       ++ pretty tp ++ "'"
                   TypeVar _ _ (TypeName [] v) []
                     | not $ isRigid v constraints ->
                         let addConstrs (HasConstrs cs' loc') (HasConstrs cs'' _) =
@@ -216,7 +216,7 @@ linkVarToType loc vn tp = do
                             addConstrs c _ = c
                         in modifyConstraints $ M.insertWith addConstrs v $
                            HasConstrs cs old_loc
-                  _ -> typeError loc $ "Cannot unify."
+                  _ -> typeError loc "Cannot unify."
               _ -> return ()
   where tp' = removeUniqueness tp
 
@@ -306,7 +306,7 @@ zeroOrderType loc desc t = do
               locStr ploc ++ " may be a function."
             _ -> return ()
 
-mustHaveConstr :: (MonadUnify m, Monoid as) =>
+mustHaveConstr :: MonadUnify m =>
                   SrcLoc -> Name -> TypeBase dim as -> m ()
 mustHaveConstr loc c t = do
   constraints <- getConstraints
