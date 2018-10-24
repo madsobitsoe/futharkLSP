@@ -9,8 +9,6 @@
 --
 module Futhark.Internalise (internaliseProg) where
 
-import Debug.Trace
-
 import Control.Monad.State
 import Control.Monad.Reader
 import qualified Data.Map.Strict as M
@@ -832,13 +830,13 @@ internaliseExp _ (E.VConstr0 c (Info t) loc) =
 internaliseExp desc (E.Match  e cs _ loc) =
   case cs of
     (c@(CasePat _ eCase _):cs') -> do
-      bFalse' <- bFalse
-      letTupExp' desc =<< generateCaseIf desc e bFalse' c
-      where bFalse = do
+      bFalse <- bFalseM
+      letTupExp' desc =<< generateCaseIf desc e bFalse c
+      where bFalseM = do
               patFail' <- internaliseBody patFail
               foldM (\bf c' -> eBody $ return $ generateCaseIf desc e bf c') patFail' cs'
             patFail = E.Assert (E.Literal (E.BoolValue False) noLoc)
-                        eCase (Info "pattern match failure") loc
+                        eCase (Info "Pattern match failure.") loc
     [] -> fail $ "internaliseExp: match with no cases at: " ++ locStr loc
 
 -- The "interesting" cases are over, now it's mostly boilerplate.
@@ -875,7 +873,7 @@ internaliseExp desc (E.BinOp op _ (xe,_) (ye,_) _ loc)
 -- User-defined operators are just the same as a function call.
 internaliseExp desc (E.BinOp op (Info t) (xarg, Info xt) (yarg, Info yt) _ loc) =
   internaliseExp desc $
-   E.Apply (E.Apply (E.Var op (Info t) loc) xarg (Info $ E.diet xt)
+  E.Apply (E.Apply (E.Var op (Info t) loc) xarg (Info $ E.diet xt)
            (Info $ foldFunType [E.fromStruct yt] t) loc)
           yarg (Info $ E.diet yt) (Info t) loc
 
@@ -905,30 +903,29 @@ internaliseExp _ e@E.ProjectSection{} =
 internaliseExp _ e@E.IndexSection{} =
   fail $ "internaliseExp: Unexpected index section at " ++ locStr (srclocOf e)
 
--- TODO: Get rid of the 292
-boolOp :: Name -> E.Exp -> E.Exp -> E.Exp
-boolOp op l r = E.BinOp (qualName (VName op 292)) (Info $ vacuousShapeAnnotations ft)
-                (l, sType l) (r, sType r) (Info (E.Prim E.Bool)) noLoc
+boolOp :: VName -> E.Exp -> E.Exp -> E.Exp
+boolOp op l r = E.BinOp (qualName op) (Info $ vacuousShapeAnnotations ft)
+                 (l, sType l) (r, sType r) (Info (E.Prim E.Bool)) noLoc
   where sType e = Info $ toStruct $ vacuousShapeAnnotations $ E.typeOf e
         arrow   = Arrow S.empty Nothing
         ft      = E.typeOf l `arrow` E.typeOf r `arrow` E.Prim E.Bool
 
-generateCond :: E.Pattern -> E.Exp -> E.Exp
-generateCond p e = foldr (boolOp "&&") (E.Literal (E.BoolValue True) noLoc) conds
+generateCond :: VName -> VName -> E.Pattern -> E.Exp -> E.Exp
+generateCond opAnd opEq p e = foldr (boolOp opAnd) (E.Literal (E.BoolValue True) noLoc) conds
   where conds = mapMaybe ((<*> pure e) . fst) $ generateCond' p
 
         generateCond' :: E.Pattern -> [(Maybe (E.Exp -> E.Exp), CompType)]
         generateCond' (E.TuplePattern ps loc) = generateCond' (E.RecordPattern fs loc)
           where fs = zipWith (\i p -> (nameFromString (show i), p)) [1..] ps
-        generateCond' (E.RecordPattern fs loc) = concatMap instCond allTemplates
-          where allTemplates = zip (map (generateCond' . snd) fs) (map fst fs)
-                field ([],_)         = error "empty pattern"
-                field ((_, t):_, f)  = (f, t)
-                t' = Record $ M.fromList $ map field allTemplates
-                projectTemplate _ (Nothing, _) = (Nothing, t')
-                projectTemplate f (Just condTemplate, t) =
-                  (Just (\e' -> condTemplate $ Project f e' (Info t) noLoc), t')
-                instCond (condTemplates, f) = map (projectTemplate f) condTemplates
+        generateCond' (E.RecordPattern fs loc) = concatMap instCond holes
+          where holes = map (\(n, p) -> (generateCond' p, n)) fs
+                field ([],_) = Nothing
+                field ((_, t):_, f) = Just (f, t)
+                t' = Record $ M.fromList $ mapMaybe field holes
+                projectHole _ (Nothing, _) = (Nothing, t')
+                projectHole f (Just condHole, t) =
+                  (Just (\e' -> condHole $ Project f e' (Info t) noLoc), t')
+                instCond (condHoles, f) = map (projectHole f) condHoles
         generateCond' (E.PatternParens p' _) = generateCond' p'
         generateCond' (E.Id _ (Info t) _) =
           [(Nothing, removeShapeAnnotations t)]
@@ -936,7 +933,7 @@ generateCond p e = foldr (boolOp "&&") (E.Literal (E.BoolValue True) noLoc) cond
           [(Nothing, removeShapeAnnotations t)]
         generateCond' (E.PatternAscription p' _ _) = generateCond' p'
         generateCond' (E.PatternLit ePat (Info t) _) =
-          [(Just (boolOp "==" ePat), removeShapeAnnotations t)]
+          [(Just (boolOp opEq ePat), removeShapeAnnotations t)]
 
 generateCaseIf :: String -> E.Exp -> I.Body -> Case -> InternaliseM I.Exp
 generateCaseIf desc e bFail c@(CasePat p eCase loc) = do
@@ -948,8 +945,14 @@ generateCaseIf desc e bFail c@(CasePat p eCase loc) = do
       forM_ (zip pat_names ses') $ \(v,se) ->
         letBindNames_ [v] $ I.BasicOp $ I.SubExp se
       internaliseBody eCase
-  let cond = BasicOp . SubExp <$> internaliseExp1 "cond" (generateCond p e)
+  opAnd <- vnM "&&"
+  opEq  <- vnM "=="
+  let cond = BasicOp . SubExp <$> internaliseExp1 "cond" (generateCond opAnd opEq p e)
   eIf cond (return eCase') (return bFail)
+  where vnM op =
+          case find (\k -> baseName k == op) $ M.keys intrinsics of
+            Just vn -> return vn
+            Nothing -> newID op
 
 internaliseSlice :: SrcLoc
                  -> [SubExp]
