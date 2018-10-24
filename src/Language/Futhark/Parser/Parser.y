@@ -97,7 +97,6 @@ import Language.Futhark.Parser.Lexer
       '^'             { L $$ HAT }
       '|'             { L $$ PIPE  }
 
-
       '+...'          { L _ (SYMBOL Plus _ _) }
       '-...'          { L _ (SYMBOL Minus _ _) }
       '*...'          { L _ (SYMBOL Times _ _) }
@@ -158,7 +157,7 @@ import Language.Futhark.Parser.Lexer
       doc             { L _  (DOC _) }
 
 %left bottom
-%left ifprec letprec unsafe caseprec typeprec
+%left ifprec letprec unsafe caseprec typeprec enumprec
 %left ',' case
 %left ':'
 %right '...' '..<' '..>' '..'
@@ -415,7 +414,6 @@ TypeExp :: { UncheckedTypeExp }
            { TEArrow Nothing $1 $3 (srcspan $1 $>) }
          | TypeExpTerm %prec typeprec { $1 }
 
-
 TypeExpTerm :: { UncheckedTypeExp }
          : '*' TypeExpTerm
            { TEUnique $2 (srcspan $1 $>) }
@@ -454,12 +452,13 @@ TypeExpAtom :: { UncheckedTypeExp }
              | Enum                           { TEEnum (fst $1)  (snd $1)}
 
 Enum :: { ([Name], SrcLoc) }
-Enum  : VConstr0 %prec bottom { ([fst $1], snd $1) }
+      : VConstr0 %prec enumprec { ([fst $1], snd $1) }
       | VConstr0 '|' Enum
-        { let names = fst $1 : fst $3; loc = srcspan (snd $1) (snd $3) in (names, loc) }
+        { let names = fst $1 : fst $3; loc = srcspan (snd $1) (snd $3)
+          in (names, loc) }
 
 VConstr0 :: { (Name, SrcLoc) }
-             : '#' id  { let L _ (ID c) = $2 in  (c, srclocOf $1) }
+          : '#' id  { let L _ (ID c) = $2 in  (c, srclocOf $1) }
 
 TypeArg :: { TypeArgExp Name }
          : '[' DimDecl ']' { TypeArgExpDim (fst $2) (srcspan $1 $>) }
@@ -715,60 +714,59 @@ LetBody :: { UncheckedExp }
     | LetExp %prec letprec { $1 }
 
 MatchExp :: { UncheckedExp }
-MatchExp : match Exp Cases  { let loc = srcspan $1 $>
-                              in Match $2 $> NoInfo loc  }
+          : match Exp Cases  { let loc = srcspan $1 $>
+                               in Match $2 $> NoInfo loc  }
 
 Cases :: { [CaseBase NoInfo Name] }
-Cases : Case  %prec caseprec { [$1] }
-      | Case Cases           { $1 : $2 }
+       : Case  %prec caseprec { [$1] }
+       | Case Cases           { $1 : $2 }
 
 Case :: { CaseBase NoInfo Name }
-Case : case CPattern '->' Exp       { let loc = srcspan $1 $>
-                                          in CasePat $2 $> loc }
+      : case CPattern '->' Exp       { let loc = srcspan $1 $>
+                                       in CasePat $2 $> loc }
 
 CPattern :: { PatternBase NoInfo Name }
-CPattern : CInnerPattern ':' TypeExpDecl { PatternAscription $1 $3 (srcspan $1 $>) }
-         | CInnerPattern                 { $1 }
-
+          : CInnerPattern ':' TypeExpDecl { PatternAscription $1 $3 (srcspan $1 $>) }
+          | CInnerPattern                 { $1 }
 
 CPatterns1 :: { [PatternBase NoInfo Name] }
            : CPattern               { [$1] }
            | CPattern ',' CPatterns1 { $1 : $3 }
 
 CInnerPattern :: { PatternBase NoInfo Name }
-CInnerPattern : id                                { let L loc (ID name) = $1 in Id name NoInfo loc }
-             | '(' BindingBinOp ')'               { Id $2 NoInfo (srcspan $1 $>) }
-             | '(' BindingUnOp ')'                { Id $2 NoInfo (srcspan $1 $>) }
-             | '_'                                { Wildcard NoInfo $1 }
-             | '(' ')'                            { TuplePattern [] (srcspan $1 $>) }
-             | '(' CPattern ')'                   { PatternParens $2 (srcspan $1 $>) }
-             | '(' CPattern ',' CPatterns1 ')'    { TuplePattern ($2:$4) (srcspan $1 $>) }
-             | '{' CFieldPatterns '}'             { RecordPattern $2 (srcspan $1 $>) }
-             | CaseLiteral                        { PatternLit (fst $1) NoInfo (snd $1) }
+               : id                                 { let L loc (ID name) = $1 in Id name NoInfo loc }
+               | '(' BindingBinOp ')'               { Id $2 NoInfo (srcspan $1 $>) }
+               | '(' BindingUnOp ')'                { Id $2 NoInfo (srcspan $1 $>) }
+               | '_'                                { Wildcard NoInfo $1 }
+               | '(' ')'                            { TuplePattern [] (srcspan $1 $>) }
+               | '(' CPattern ')'                   { PatternParens $2 (srcspan $1 $>) }
+               | '(' CPattern ',' CPatterns1 ')'    { TuplePattern ($2:$4) (srcspan $1 $>) }
+               | '{' CFieldPatterns '}'             { RecordPattern $2 (srcspan $1 $>) }
+               | CaseLiteral                        { PatternLit (fst $1) NoInfo (snd $1) }
 
 CFieldPattern :: { (Name, PatternBase NoInfo Name) }
-              : FieldId '=' CPattern
-              { (fst $1, $3) }
-              | FieldId ':' TypeExpDecl
-              { (fst $1, PatternAscription (Id (fst $1) NoInfo (snd $1)) $3 (srcspan (snd $1) $>)) }
-              | FieldId
-              { (fst $1, Id (fst $1) NoInfo (snd $1)) }
+               : FieldId '=' CPattern
+               { (fst $1, $3) }
+               | FieldId ':' TypeExpDecl
+               { (fst $1, PatternAscription (Id (fst $1) NoInfo (snd $1)) $3 (srcspan (snd $1) $>)) }
+               | FieldId
+               { (fst $1, Id (fst $1) NoInfo (snd $1)) }
 
 CFieldPatterns :: { [(Name, PatternBase NoInfo Name)] }
-               : CFieldPatterns1 { $1 }
-               |                { [] }
+                : CFieldPatterns1 { $1 }
+                |                { [] }
 
 CFieldPatterns1 :: { [(Name, PatternBase NoInfo Name)] }
-                : CFieldPattern ',' CFieldPatterns1 { $1 : $3 }
-                | CFieldPattern                    { [$1] }
+                 : CFieldPattern ',' CFieldPatterns1 { $1 : $3 }
+                 | CFieldPattern                    { [$1] }
 
 CaseLiteral :: { (UncheckedExp, SrcLoc) }
-CaseLiteral : PrimLit        { (Literal (fst $1) (snd $1), snd $1) }
-            | intlit         { let L loc (INTLIT x) = $1 in (IntLit x NoInfo loc, loc) }
-            | floatlit       { let L loc (FLOATLIT x) = $1 in (FloatLit x NoInfo loc, loc) }
-            | stringlit      { let L loc (STRINGLIT s) = $1 in
-                        (ArrayLit (map (flip Literal loc . SignedValue . Int32Value . fromIntegral . ord) s) NoInfo loc, loc) }
-       | VConstr0       { (VConstr0 (fst $1) NoInfo (snd $1), snd $1) }
+             : PrimLit        { (Literal (fst $1) (snd $1), snd $1) }
+             | intlit         { let L loc (INTLIT x) = $1 in (IntLit x NoInfo loc, loc) }
+             | floatlit       { let L loc (FLOATLIT x) = $1 in (FloatLit x NoInfo loc, loc) }
+             | stringlit      { let L loc (STRINGLIT s) = $1 in
+                              (ArrayLit (map (flip Literal loc . SignedValue . Int32Value . fromIntegral . ord) s) NoInfo loc, loc) }
+             | VConstr0       { (VConstr0 (fst $1) NoInfo (snd $1), snd $1) }
 
 LoopForm :: { LoopFormBase NoInfo Name }
 LoopForm : for VarId '<' Exp
@@ -818,7 +816,6 @@ FieldId :: { (Name, SrcLoc) }
 Pattern :: { PatternBase NoInfo Name }
 Pattern : InnerPattern ':' TypeExpDecl { PatternAscription $1 $3 (srcspan $1 $>) }
         | InnerPattern                 { $1 }
-
 
 Patterns1 :: { [PatternBase NoInfo Name] }
            : Pattern               { [$1] }
