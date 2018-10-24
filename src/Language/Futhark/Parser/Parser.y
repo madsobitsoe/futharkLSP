@@ -158,7 +158,7 @@ import Language.Futhark.Parser.Lexer
       doc             { L _  (DOC _) }
 
 %left bottom
-%left ifprec letprec unsafe caseprec
+%left ifprec letprec unsafe caseprec typeprec
 %left ',' case
 %left ':'
 %right '...' '..<' '..>' '..'
@@ -413,7 +413,7 @@ TypeExp :: { UncheckedTypeExp }
            { let L _ (ID v) = $2 in TEArrow (Just v) $4 $7 (srcspan $1 $>) }
          | TypeExpTerm '->' TypeExp
            { TEArrow Nothing $1 $3 (srcspan $1 $>) }
-         | TypeExpTerm { $1 }
+         | TypeExpTerm %prec typeprec { $1 }
 
 
 TypeExpTerm :: { UncheckedTypeExp }
