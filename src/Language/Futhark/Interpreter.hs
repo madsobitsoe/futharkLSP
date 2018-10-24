@@ -91,13 +91,6 @@ data Value = ValuePrim !PrimValue
            | ValueFun (Value -> EvalM Value)
            | ValueEnum Name
 
-instance Show Value where
-  show (ValuePrim v)    = "ValuePrim " ++ show v
-  show (ValueArray a)   = "ValueArray" ++ show a
-  show (ValueRecord m)  = "ValueRecord" ++ show m
-  show (ValueFun _)     = "ValueFun <fun>"
-  show (ValueEnum name) = "ValueEnum" ++ show name
-
 instance Eq Value where
   ValuePrim x == ValuePrim y = x == y
   ValueArray x == ValueArray y = x == y
@@ -210,14 +203,9 @@ lookupType = lookupInEnv envType
 -- | A TermValue with a 'Nothing' type annotation is an intrinsic.
 data TermBinding = TermValue (Maybe T.BoundV) Value
                  | TermModule Module
-                 deriving (Show) --TODO : Delete
 
 data Module = Module Env
             | ModuleFun (Module -> EvalM Module)
-
---TODO: Delete
-instance Show Module where
-  show _ = ""
 
 data Env = Env { envTerm :: M.Map VName TermBinding
                , envType :: M.Map VName T.TypeBinding
@@ -303,31 +291,42 @@ apply2 loc env f x y = stacking loc env $ do f' <- apply noLoc mempty f x
 
 matchPattern :: Env -> Pattern -> Value
              -> EvalM (M.Map VName (Maybe T.BoundV, Value))
-matchPattern env = matchPattern' env mempty
+matchPattern env p v = do
+  m <- runMaybeT $ patternMatch env mempty p v
+  case m of
+    Nothing    -> error $ "matchPattern: missing case for " ++ pretty p ++ " and " ++ pretty v
+    Just binds -> return binds
 
-matchPattern' :: Env -> M.Map VName (Maybe T.BoundV, Value)
-              -> Pattern -> Value
-              -> EvalM (M.Map VName (Maybe T.BoundV, Value))
-matchPattern' _ m (Id v (Info t) _) val =
-  pure $ M.insert v (Just $ T.BoundV [] $ toStruct t, val) m
-matchPattern' env m (PatternParens p _) val =
-  matchPattern' env m p val
-matchPattern' env m (TuplePattern ps _) (ValueRecord vs) =
-  foldM (\m' (p,v) -> matchPattern' env m' p v) m $
-  zip ps (map snd $ sortFields vs)
-matchPattern' env m (RecordPattern ps _) (ValueRecord vs) =
-  foldM (\m' (p,v) -> matchPattern' env m' p v) m $
-  zip (map snd $ sortFields $ M.fromList ps) (map snd $ sortFields vs)
-matchPattern' _ m Wildcard{} _ = pure m
-matchPattern' env m (PatternAscription pat td loc) v = do
-  t <- evalType env $ unInfo $ expandedType td
+patternMatch :: Env -> M.Map VName (Maybe T.BoundV, Value)
+             -> Pattern -> Value
+             -> MaybeT EvalM (M.Map VName (Maybe T.BoundV, Value))
+patternMatch _ m (Id v (Info t) _) val =
+  lift $ pure $ M.insert v (Just $ T.BoundV [] $ toStruct t, val) m
+patternMatch _ m Wildcard{} _ =
+  lift $ pure m
+patternMatch env m (TuplePattern ps _) (ValueRecord vs)
+  | length ps == length vs' =
+    foldM (\m' (p,v) -> patternMatch env m' p v) m $
+    zip ps (map snd $ sortFields vs)
+    where vs' = sortFields vs
+patternMatch env m (RecordPattern ps _) (ValueRecord vs) 
+  | length ps == length vs' =
+    foldM (\m' (p,v) -> patternMatch env m' p v) m $
+    zip (map snd $ sortFields $ M.fromList ps) (map snd $ sortFields vs)
+    where vs' = sortFields vs
+patternMatch env m (PatternParens p _) v = patternMatch env m p v
+patternMatch env m (PatternAscription p td loc) v = do
+  t <- lift $ evalType env $ unInfo $ expandedType td
   case matchValueToType env m t v of
-    Left err -> bad loc env err
-    Right m' -> matchPattern' env m' pat v
-matchPattern' _ m PatternLit{} _ = pure m
+    Left err -> lift $ bad loc env err
+    Right m' -> patternMatch env m' p v
+patternMatch env m (PatternLit e _ _) v = do
+  v' <- lift $ eval env e
+  if v == v'
+    then pure m
+    else mzero
 
-matchPattern' _ _ pat v =
-  error $ "matchPattern': missing case for " ++ pretty pat ++ " and " ++ pretty v
+patternMatch _ _ _ _ = mzero
 
 -- | For matching size annotations (the actual type will have been
 -- verified by the type checker).  It is assumed that previously
@@ -782,42 +781,8 @@ eval _ e = error $ "eval not yet: " ++ show e
 evalCase :: Value -> Env -> CaseBase Info VName
             -> MaybeT EvalM Value
 evalCase v env (CasePat p cExp _) = do
-  pEnv <- valEnv <$> patternMatch env p v
+  pEnv <- valEnv <$> patternMatch env mempty p v
   lift $ eval pEnv cExp
-
--- TODO: Merge this with matchPattern
-patternMatch :: Env -> Pattern -> Value
-             -> MaybeT EvalM (M.Map VName (Maybe T.BoundV, Value))
-patternMatch env = patternMatch' env mempty
-
-patternMatch' :: Env -> M.Map VName (Maybe T.BoundV, Value)
-             -> Pattern -> Value
-             -> MaybeT EvalM (M.Map VName (Maybe T.BoundV, Value))
-patternMatch' env m p@Id{} v = lift $ matchPattern' env m p v
-patternMatch' env m p@Wildcard{} v = lift $ matchPattern' env m p v
-patternMatch' env m (TuplePattern ps _) (ValueRecord vs)
-  | length ps == length vs' =
-    foldM (\m' (p',v) -> patternMatch' env m' p' v) m $
-    zip ps (map snd $ sortFields vs)
-    where vs' = sortFields vs
-patternMatch' env m (RecordPattern ps _) (ValueRecord vs)
-  | length ps == length vs' =
-    foldM (\m' (p,v) -> patternMatch' env m' p v) m $
-    zip (map snd $ sortFields $ M.fromList ps) (map snd $ sortFields vs)
-    where vs' = sortFields vs
-patternMatch' env m (PatternParens p _) v = patternMatch' env m p v
-patternMatch' env m (PatternAscription p td _) v = do
-  t <- lift $ evalType env $ unInfo $ expandedType td
-  case matchValueToType env m t v of
-    Left _   -> mzero  -- TODO : fix this
-    Right m' -> patternMatch' env m' p v
-patternMatch' env m p@(PatternLit e _ _) v = do
-  v' <- lift $ eval env e
-  if v == v'
-    then lift $ matchPattern' env m p v
-    else mzero
-
-patternMatch' _ _ _ _ = mzero
 
 substituteInModule :: M.Map VName VName -> Module -> Module
 substituteInModule substs = onModule
