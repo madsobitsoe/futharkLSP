@@ -87,7 +87,7 @@ unifyArrayElemTypes uf (ArrayRecordElem et1) (ArrayRecordElem et2)
   | sort (M.keys et1) == sort (M.keys et2) =
     ArrayRecordElem <$>
     traverse (uncurry $ unifyRecordArrayElemTypes uf) (M.intersectionWith (,) et1 et2)
-unifyArrayElemTypes uf (ArrayEnumElem cs1 als1) (ArrayEnumElem cs2 als2)
+unifyArrayElemTypes _ (ArrayEnumElem cs1 als1) (ArrayEnumElem cs2 als2)
   | cs1 == cs2 =
      Just $ ArrayEnumElem cs1 (als1 <> als2)
 unifyArrayElemTypes _ _ _ =
@@ -235,7 +235,7 @@ checkTypeExp ote@TEApply{} = do
 
 checkTypeExp t@(TEEnum names loc) = do
   unless (sort names == sort (nub names)) $
-    throwError $ TypeError loc $ "Duplicate value constructors in " ++ pretty t
+    throwError $ TypeError loc $ "Duplicate constructors in " ++ pretty t
   return (TEEnum names loc, Enum names,  Unlifted)
 
 checkNamedDim :: MonadTypeChecker m =>

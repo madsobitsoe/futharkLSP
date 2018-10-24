@@ -14,8 +14,6 @@ module Language.Futhark.TypeChecker
   )
   where
 
-import Debug.Trace
-
 import Control.Monad.Except
 import Control.Monad.Writer
 import Data.List

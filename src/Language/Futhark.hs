@@ -11,19 +11,14 @@ module Language.Futhark
   , TypeBind, TypeDecl
   , StructTypeArg, ArrayElemType
   , TypeParam, Case
-  , debug
   )
   where
 
-import Debug.Trace
 import Text.Show.Prettyprint
 
 import Language.Futhark.Syntax
 import Language.Futhark.Attributes
 import Language.Futhark.Pretty
-
-debug :: Monad m => String -> [(String, String)] -> m ()
-debug s as = traceM $ s  ++ ":\n" ++ (concatMap (\(s, a) -> s ++ ": " ++ a ++ "\n") as)
 
 -- | An identifier with type- and aliasing information.
 type Ident = IdentBase Info VName

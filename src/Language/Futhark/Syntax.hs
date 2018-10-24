@@ -337,11 +337,11 @@ instance Bifoldable ArrayElemTypeBase where
 -- '==', aliases are ignored, but dimensions much match.  Function
 -- parameter names are ignored.
 data TypeBase dim as = Prim PrimType
+                     | Enum [Name]
                      | Array (ArrayElemTypeBase dim as) (ShapeDecl dim) Uniqueness
                      | Record (M.Map Name (TypeBase dim as))
                      | TypeVar as Uniqueness TypeName [TypeArg dim as]
                      | Arrow as (Maybe VName) (TypeBase dim as) (TypeBase dim as)
-                     | Enum [Name]
                      -- ^ The aliasing corresponds to the lexical
                      -- closure of the function.
                      deriving (Show)
@@ -719,8 +719,12 @@ data ExpBase f vn =
             -- ^ Fail if the first expression does not return true,
             -- and return the value of the second expression if it
             -- does.
+
             | VConstr0 Name (f CompType) SrcLoc
+            -- ^ An enum element, e.g., @#foo@.
+
             | Match (ExpBase f vn) [CaseBase f vn] (f CompType) SrcLoc
+            -- ^ A match expression.
 
 deriving instance Showable f vn => Show (ExpBase f vn)
 

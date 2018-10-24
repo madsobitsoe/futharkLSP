@@ -13,12 +13,9 @@ module Language.Futhark.TypeChecker.Terms
   )
 where
 
-import Debug.Trace
-
 import Control.Monad.Except
 import Control.Monad.State
 import Control.Monad.RWS
-import Control.Monad.Writer
 import qualified Control.Monad.Fail as Fail
 import Data.List
 import Data.Loc
@@ -37,7 +34,6 @@ import Language.Futhark.TypeChecker.Unify
 import qualified Language.Futhark.TypeChecker.Types as Types
 import qualified Language.Futhark.TypeChecker.Monad as TypeM
 import Futhark.Util.Pretty (Pretty)
-
 
 --- Uniqueness
 
@@ -852,7 +848,6 @@ checkExp (Ascript e decl loc) = do
 
   -- We also have to make sure that uniqueness matches.  This is done
   -- explicitly, because uniqueness is ignored by unification.
-  --error $ show t ++ "\n" ++ show constraints
   t' <- normaliseType t
   decl_t' <- normaliseType decl_t
   unless (t' `subtypeOf` decl_t') $
@@ -959,7 +954,7 @@ checkExp (LetPat tparams pat e body loc) = do
       body' <- checkExp body
       return $ LetPat tparams' pat' e' body' loc
 
-checkExp (LetFun name (tparams, params, maybe_retdecl, NoInfo, e) body loc) = do
+checkExp (LetFun name (tparams, params, maybe_retdecl, NoInfo, e) body loc) =
   sequentially (checkFunDef' (name, maybe_retdecl, tparams, params, e, loc)) $
     \(name', tparams', params', maybe_retdecl', rettype, e') closure -> do
 
@@ -969,6 +964,7 @@ checkExp (LetFun name (tparams, params, maybe_retdecl, NoInfo, e) body loc) = do
                             , scopeNameMap = M.insert (Term, name) (qualName name') $
                                              scopeNameMap scope }
     body' <- local bindF $ checkExp body
+
     return $ LetFun name' (tparams', params', maybe_retdecl', Info rettype, e') body' loc
 
 checkExp (LetWith dest src idxes ve body pos) = do
@@ -1298,24 +1294,21 @@ checkExp (Match e cs NoInfo loc) = do
   e' <- checkExp e
   mt <- expType e'
   (t', cs') <- mustHaveSameType loc mt cs
-  let e'' = Match e' cs' (Info t') loc
-  seq (expType e'') (return ())
-  let pats = map getPat cs'
-  return e''
-  where getPat (CasePat p _ _) = p
+  return $ Match e' cs' (Info t') loc
 
 mustHaveSameType :: SrcLoc -> CompType -> [CaseBase NoInfo Name]
-                    -> TermTypeM (CompType, [CaseBase Info VName])
+                  -> TermTypeM (CompType, [CaseBase Info VName])
 mustHaveSameType loc _ [] = typeError loc "Match expressions must have at least one case."
 mustHaveSameType loc mt (c:cs) = do
-  s  <- newTypeVar loc "s"
-  c' <- checkCase mt s c
-  ct <- expType $ caseExp c'
-  cs'<- mapM (checkCase mt ct) cs
+  s   <- newTypeVar loc "s"
+  c'  <- checkCase mt s c
+  ct  <- expType $ caseExp c'
+  cs' <- mapM (checkCase mt ct) cs
   return (ct, c':cs')
-  where caseExp (CasePat _ cExp _) = cExp
+  where caseExp (CasePat _ e _) = e
 
-checkCase :: CompType -> CompType -> CaseBase NoInfo Name -> TermTypeM (CaseBase Info VName)
+checkCase :: CompType -> CompType -> CaseBase NoInfo Name
+          -> TermTypeM (CaseBase Info VName)
 checkCase mt ct (CasePat p caseExp loc) =
   bindingPattern [] p (Ascribed $ vacuousShapeAnnotations mt) $ \_ p' -> do
     caseExp' <- checkExp caseExp
@@ -1323,13 +1316,14 @@ checkCase mt ct (CasePat p caseExp loc) =
     unify loc (toStructural ct) (toStructural caseType)
     return $ CasePat p' caseExp' loc
 
+--TODO: Think about the recursive calls here
 unpackPat :: Pattern -> [Maybe Pattern]
 unpackPat Wildcard{} = [Nothing]
-unpackPat (PatternParens p _) = unpackPat p--[Just p]
+unpackPat (PatternParens p _) = unpackPat p
 unpackPat Id{} = [Nothing]
 unpackPat (TuplePattern ps _) = Just <$> ps
 unpackPat (RecordPattern fs _) = map (Just .snd) fs
-unpackPat (PatternAscription p _ _) = unpackPat p--[Just p]
+unpackPat (PatternAscription p _ _) = unpackPat p
 unpackPat p@PatternLit{} = [Just p]
 
 wildPattern :: Pattern -> Int -> Pattern -> Pattern
@@ -1340,20 +1334,20 @@ wildPattern (TuplePattern ps loc) pos = \p ->
 
 wildPattern p _ = const p
 
-checkExhaustive :: (MonadTypeChecker m) => Exp -> m ()
-checkExhaustive (Match _ cs _ loc) =
+checkUnmatched :: (MonadTypeChecker m) => Exp -> m ()
+checkUnmatched (Match _ cs _ loc) =
   case unmatched id ps of
     []  -> return ()
-    ps' -> warn loc $ "Possible missing cases: \n"
+    ps' -> warn loc $ "Possible unmatched cases: \n"
                       ++ unlines (map pretty ps')
   where ps = map getPattern cs
         getPattern (CasePat p _ _ ) = p
-checkExhaustive _ = return ()
+checkUnmatched _ = return ()
 
-isExhaustive :: (MonadTypeChecker m) => Exp -> m ()
-isExhaustive e = void $ checkExhaustive e >> astMap tv e
+warnUnmatched :: (MonadTypeChecker m) => Exp -> m ()
+warnUnmatched e = void $ checkUnmatched e >> astMap tv e
   where tv = ASTMapper { mapOnExp =
-                           \e' -> checkExhaustive e' >> return e'
+                           \e' -> checkUnmatched e' >> return e'
                        , mapOnName        = pure
                        , mapOnQualName    = pure
                        , mapOnType        = pure
@@ -1382,7 +1376,7 @@ unmatched hole (p:ps)
         localUnmatched ps'@(p':_) =
           case vacuousShapeAnnotations $ patternType p'  of
             Enum cs'' ->
-              let matched = nub $ mapMaybe (\p'' -> pExp p'' >>= constr) ps'
+              let matched = nub $ mapMaybe (pExp >=> constr) ps'
               in map (buildEnum (Enum cs'')) $ cs'' \\ matched
             _ -> []
         sameStructure [] = True
@@ -1623,7 +1617,7 @@ checkFunDef' (fname, maybe_retdecl, tparams, params, body, loc) = noUnique $ do
 
     -- Check if pattern matches are exhaustive and yield
     -- warnings if not.
-    isExhaustive body'
+    warnUnmatched body'
 
     -- We keep those type variables that were not closed over by
     -- let-generalisation.
