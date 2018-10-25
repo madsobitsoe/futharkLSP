@@ -525,6 +525,7 @@ typeSubsts t1@Array{} t2@Array{}
   | Just t1' <- peelArray (arrayRank t1) t1,
     Just t2' <- peelArray (arrayRank t1) t2 =
       typeSubsts t1' t2'
+typeSubsts Enum{} Enum{} = mempty
 typeSubsts t1 t2 = error $ unlines ["typeSubsts: mismatched types:", pretty t1, pretty t2]
 
 -- | Perform a given substitution on the types in a pattern.
