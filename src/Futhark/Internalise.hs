@@ -2,6 +2,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -fmax-pmcheck-iterations=2500000#-}
 -- |
 --
 -- This module implements a transformation from source to core
