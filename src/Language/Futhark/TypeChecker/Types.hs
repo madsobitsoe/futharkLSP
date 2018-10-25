@@ -236,6 +236,8 @@ checkTypeExp ote@TEApply{} = do
 checkTypeExp t@(TEEnum names loc) = do
   unless (sort names == sort (nub names)) $
     throwError $ TypeError loc $ "Duplicate constructors in " ++ pretty t
+  unless (length names <= 256) $
+    throwError $ TypeError loc "Enums must have 256 or fewer constructors."
   return (TEEnum names loc, Enum names,  Unlifted)
 
 checkNamedDim :: MonadTypeChecker m =>
