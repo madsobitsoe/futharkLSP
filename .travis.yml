@@ -1,6 +1,9 @@
 language: minimal
 sudo: false
 dist: trusty
+os:
+  - windows
+  - linux
 git:
   submodules: false
 cache:
