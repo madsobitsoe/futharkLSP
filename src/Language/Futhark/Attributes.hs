@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE DeriveFunctor #-}
 -- | This module provides various simple ways to query and manipulate
 -- fundamental Futhark terms, such as types and values.  The intent is to
 -- keep "Futhark.Language.Syntax" simple, and put whatever embellishments
@@ -96,6 +97,8 @@ module Language.Futhark.Attributes
   , UncheckedDec
   , UncheckedProg
   , UncheckedCase
+
+  , Unmatched(..)
   )
   where
 
@@ -1082,3 +1085,12 @@ type UncheckedProg = ProgBase NoInfo Name
 
 -- | A case (of a match expression) with no type annotations.
 type UncheckedCase = CaseBase NoInfo Name
+
+-- | An unmatched pattern. Used in in the generation of
+-- unmatched pattern warnings by the type checker.
+data Unmatched p = UnmatchedNum p [ExpBase Info VName]
+                 | UnmatchedBool p
+                 | UnmatchedEnum p
+                 | Unmatched p
+                 deriving (Functor, Show)
+

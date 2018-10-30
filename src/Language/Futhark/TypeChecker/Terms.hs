@@ -1291,6 +1291,7 @@ checkExp (VConstr0 name NoInfo loc) = do
   return $ VConstr0 name (Info t) loc
 
 checkExp (Match e cs NoInfo loc) = do
+
   e' <- checkExp e
   mt <- expType e'
   (t', cs') <- mustHaveSameType loc mt cs
@@ -1316,23 +1317,28 @@ checkCase mt ct (CasePat p caseExp loc) =
     unify loc (toStructural ct) (toStructural caseType)
     return $ CasePat p' caseExp' loc
 
---TODO: Think about the recursive calls here
 unpackPat :: Pattern -> [Maybe Pattern]
 unpackPat Wildcard{} = [Nothing]
 unpackPat (PatternParens p _) = unpackPat p
 unpackPat Id{} = [Nothing]
 unpackPat (TuplePattern ps _) = Just <$> ps
-unpackPat (RecordPattern fs _) = map (Just .snd) fs
+unpackPat (RecordPattern fs _) = (Just . snd) <$> sortFields (M.fromList fs)
 unpackPat (PatternAscription p _ _) = unpackPat p
 unpackPat p@PatternLit{} = [Just p]
 
-wildPattern :: Pattern -> Int -> Pattern -> Pattern
-wildPattern (TuplePattern ps loc) pos = \p ->
-  TuplePattern (take (pos - 1) ps' ++ [p] ++ drop pos ps') loc
-  where ps' = map wildOut ps
+wildPattern :: Pattern -> Int -> Unmatched Pattern -> Unmatched Pattern
+wildPattern (TuplePattern ps loc) pos um = f <$> um
+  where f p = TuplePattern (take (pos - 1) ps' ++ [p] ++ drop pos ps') loc
+        ps' = map wildOut ps
         wildOut p = Wildcard (Info (patternPatternType p)) (srclocOf p)
-
-wildPattern p _ = const p
+wildPattern (RecordPattern fs loc) pos um = wildRecord <$> um
+    where wildRecord p =
+            RecordPattern (take (pos - 1) fs' ++ [(fst (fs!!(pos - 1)), p)] ++ drop pos fs') loc
+          fs' = map wildOut fs
+          wildOut (f,p) = (f, Wildcard (Info (patternPatternType p)) (srclocOf p))
+wildPattern (PatternAscription p _ _) pos um = wildPattern p pos um
+wildPattern (PatternParens p _) pos um = wildPattern p pos um
+wildPattern _ _ um = um
 
 checkUnmatched :: (MonadTypeChecker m) => Exp -> m ()
 checkUnmatched (Match _ cs _ loc) =
@@ -1356,38 +1362,69 @@ warnUnmatched e = void $ checkUnmatched e >> astMap tv e
                        , mapOnPatternType = pure
                        }
 
-unmatched :: (Pattern -> Pattern) -> [Pattern] -> [Pattern]
+unmatched :: (Unmatched Pattern -> Unmatched Pattern) -> [Pattern] -> [Unmatched Pattern]
 unmatched hole (p:ps)
   | sameStructure labeledCols = do
     (i, cols) <- labeledCols
     let hole' p' = hole $ wildPattern p i p'
-    case catMaybes cols of
-      []       -> []
-      cs
+    case sequence cols of
+      Nothing      -> []
+      Just cs
         | all isPatternLit cs  -> map hole' $ localUnmatched cs
         | otherwise            -> unmatched hole' cs
 
   where labeledCols = zip [1..] $ transpose $ map unpackPat (p:ps)
-        isPatternLit PatternLit{} = True
-        isPatternLit _            = False
 
-        localUnmatched :: [Pattern] -> [Pattern]
+        localUnmatched :: [Pattern] -> [Unmatched Pattern]
         localUnmatched [] = []
         localUnmatched ps'@(p':_) =
           case vacuousShapeAnnotations $ patternType p'  of
             Enum cs'' ->
               let matched = nub $ mapMaybe (pExp >=> constr) ps'
-              in map (buildEnum (Enum cs'')) $ cs'' \\ matched
+              in map (UnmatchedEnum . buildEnum (Enum cs'')) $ cs'' \\ matched
+            Prim t
+              | not (any idOrWild ps') ->
+                case t of
+                  Bool ->
+                    let matched = nub $ mapMaybe (pExp >=> bool) $ filter isPatternLit ps'
+                    in map (UnmatchedBool . buildBool (Prim t)) $ [True, False] \\ matched
+                  _ ->
+                    let matched = mapMaybe pExp $ filter isPatternLit ps'
+                    in [UnmatchedNum (buildId (Info (Prim t)) "p") matched]
             _ -> []
+
         sameStructure [] = True
         sameStructure (x:xs) = all (\y -> length y == length x ) xs
+
         pExp (PatternLit e' _ _) = Just e'
         pExp _ = Nothing
+
         constr (VConstr0 c _ _) = Just c
         constr (Ascript e' _ _)  = constr e'
         constr _ = Nothing
+
+        isPatternLit PatternLit{} = True
+        isPatternLit (PatternAscription p' _ _) = isPatternLit p'
+        isPatternLit (PatternParens p' _)  = isPatternLit p'
+        isPatternLit _            = False
+
+        idOrWild Id{} = True
+        idOrWild Wildcard{} = True
+        idOrWild (PatternAscription p' _ _) = idOrWild p'
+        idOrWild (PatternParens p' _) = idOrWild p'
+        idOrWild _ = False
+
+        bool (Literal (BoolValue b) _ ) = Just b
+        bool _ = Nothing
+
         buildEnum t c =
           PatternLit (VConstr0 c (Info t) noLoc) (Info (vacuousShapeAnnotations t)) noLoc
+        buildBool t b =
+          PatternLit (Literal (BoolValue b) noLoc) (Info (vacuousShapeAnnotations t)) noLoc
+        buildId t n =
+          -- The VName tag here will never be used since the value
+          -- exists exclusively for printing warnings.
+          Id (VName (nameFromString n) (-1)) t noLoc
 
 unmatched _ _ = []
 
@@ -1617,7 +1654,8 @@ checkFunDef' (fname, maybe_retdecl, tparams, params, body, loc) = noUnique $ do
 
     -- Check if pattern matches are exhaustive and yield
     -- warnings if not.
-    warnUnmatched body'
+    body'' <- updateExpTypes body'
+    warnUnmatched body''
 
     -- We keep those type variables that were not closed over by
     -- let-generalisation.

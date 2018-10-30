@@ -353,6 +353,23 @@ instance (Eq vn, IsName vn, Annot f) => Pretty (PatternBase f vn) where
                                     Nothing -> text "_"
   ppr (PatternLit e _ _)        = ppr e
 
+instance Pretty (Unmatched (PatternBase Info VName)) where
+  ppr um = case um of
+      (UnmatchedNum p nums) -> ppr' p <+> text "where p is not one of" <+> ppr nums
+      (UnmatchedBool p)     -> ppr' p
+      (UnmatchedEnum p)     -> ppr' p
+      (Unmatched p)         -> ppr' p
+    where
+      ppr' (PatternAscription p t _) = ppr p <> text ":" <+> ppr t
+      ppr' (PatternParens p _)       = parens $ ppr' p
+      ppr' (Id v _ _)                = pprName v
+      ppr' (TuplePattern pats _)     = parens $ commasep $ map ppr' pats
+      ppr' (RecordPattern fs _)      = braces $ commasep $ map ppField fs
+        where ppField (name, t)      = text (nameToString name) <> equals <> ppr' t
+      ppr' Wildcard{}                = text "_"
+      ppr' (PatternLit e _ _)        = ppr e
+
+
 ppAscription :: (Eq vn, IsName vn, Annot f) => Maybe (TypeDeclBase f vn) -> Doc
 ppAscription Nothing  = mempty
 ppAscription (Just t) = text ":" <> ppr t
