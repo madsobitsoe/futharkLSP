@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ### Added
 
+  * Support type parameters for operator specs defined with `val`.
+
+### Removed
+
+### Changed
+
+### Fixed
+
+  * Fixed nasty defunctionalisation bug (#661).
+
+## [0.7.3]
+
+### Added
+
   * Significant performance changes: there is now a constant extra
     compilation overhead (less than 200ms on most machines).  However,
     the rest of the compiler is 30-40% faster (or more in some cases).
@@ -16,13 +30,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   * A warning when ambiguously typed expressions are assigned a
     default (`i32` or `f64`).
 
-  * In-place updates and records are now written with `=` instead of
-    `<-`.  The latter is deprecated and will be removed in the next
-    major version (#650).
-
-### Removed
-
-### Changed
+  * In-place updates and record updates are now written with `=`
+    instead of `<-`.  The latter is deprecated and will be removed in
+    the next major version (#650).
 
 ### Fixed
 
@@ -36,6 +46,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
     languages do.
 
   * `futhark-bench` now writes "μs" instead of "us".
+
+  * Type inference for infix operators now works properly.
 
 ## [0.7.2]
 

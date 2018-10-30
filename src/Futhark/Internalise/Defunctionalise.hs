@@ -469,9 +469,12 @@ defuncLet dims ps@(pat:pats) body (Info rettype)
       return ([], e, sv)
 defuncLet _ [] body (Info rettype) = do
   (body', sv) <- defuncExp body
-  case sv of
-    Dynamic _ -> return ([], body', Dynamic $ fromStruct $ removeShapeAnnotations rettype)
-    _         -> return ([], body', sv)
+  return ([], body', imposeType sv rettype )
+  where imposeType Dynamic{} t =
+          Dynamic $ fromStruct $ removeShapeAnnotations t
+        imposeType (RecordSV fs1) (Record fs2) =
+          RecordSV $ M.toList $ M.intersectionWith imposeType (M.fromList fs1) fs2
+        imposeType sv _ = sv
 
 -- | Defunctionalize an application expression at a given depth of application.
 -- Calls to dynamic (first-order) functions are preserved at much as possible,
@@ -494,7 +497,7 @@ defuncApply depth e@(Apply e1 e2 d t@(Info ret) loc) = do
 
       -- Inline certain trivial lifted functions immediately.  This is
       -- purely an optimisation to avoid having the rest of the
-      -- compiler spend a lot if time processing them (they will end
+      -- compiler spend a lot of time processing them (they will end
       -- up being inlined later anyway).  We also try to simplify away
       -- some let-bindings, to make the generated code look slightly
       -- more comprehensible.
