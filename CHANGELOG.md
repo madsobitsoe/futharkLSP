@@ -9,15 +9,23 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ### Added
 
-  * Support type parameters for operator specs defined with `val`.
-
 ### Removed
 
 ### Changed
 
 ### Fixed
 
+## [0.7.4]
+
+### Added
+
+  * Support type parameters for operator specs defined with `val`.
+
+### Fixed
+
   * Fixed nasty defunctionalisation bug (#661).
+
+  * 'cabal`/`stack` `sdist` works now.
 
 ## [0.7.3]
 
