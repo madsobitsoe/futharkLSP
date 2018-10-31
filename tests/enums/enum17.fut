@@ -14,9 +14,3 @@ let g (x : #foo | #bar) : i32 =
     case #bar -> 2
 
 let main = map g (map f [#foo, #bar])
- 
-  
-  
-
-
-

@@ -3,4 +3,3 @@
 -- error:
 
 type foo = #foo | bar
-

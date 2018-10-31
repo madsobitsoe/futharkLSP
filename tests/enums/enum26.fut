@@ -17,4 +17,3 @@ let main : i32 = match (enum_module.f (#foo : enum_module.foobar))
                   case 1 -> 3
                   case 2 -> 4
                   case _ -> 5
-

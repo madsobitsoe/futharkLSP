@@ -10,4 +10,3 @@ let main : i32 = match (1, #mars : planet, 5)
                   case (1, #venus, 5)   -> 2
                   case (1, #earth, 5)   -> 3
                   case (1, #earth, 6)   -> 4
-        

@@ -9,6 +9,3 @@ let x = match (#mercury : planet)
           case #venus   -> 1
           case #earth   -> true
           case #mars    -> false
-      
-                          
-        

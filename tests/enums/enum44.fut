@@ -9,6 +9,3 @@ let x = match 2
           case #venus   -> 1
           case #earth   -> true
           case #mars    -> false
-      
-                          
-        

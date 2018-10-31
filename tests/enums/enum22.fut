@@ -12,4 +12,3 @@ let f (x : planet) : i32 =
        case #earth   -> 3
 
 let main : i32 = f #mars
-        

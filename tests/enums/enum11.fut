@@ -15,4 +15,3 @@ let main : i32 = if (#foo : foobar) == #bar
                  else if (#bar : foobar) == #bar
                       then 2
                       else 3 
-
