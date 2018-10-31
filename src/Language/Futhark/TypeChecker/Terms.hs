@@ -1291,7 +1291,6 @@ checkExp (VConstr0 name NoInfo loc) = do
   return $ VConstr0 name (Info t) loc
 
 checkExp (Match e cs NoInfo loc) = do
-
   e' <- checkExp e
   mt <- expType e'
   (t', cs') <- mustHaveSameType loc mt cs
@@ -1406,7 +1405,7 @@ unmatched hole (p:ps)
         isPatternLit PatternLit{} = True
         isPatternLit (PatternAscription p' _ _) = isPatternLit p'
         isPatternLit (PatternParens p' _)  = isPatternLit p'
-        isPatternLit _            = False
+        isPatternLit _ = False
 
         idOrWild Id{} = True
         idOrWild Wildcard{} = True
@@ -1509,7 +1508,6 @@ consumeArg loc (Arrow _ _ t1 _) (FuncDiet d _)
   where contravariantArg (Array _ _ Unique) Observe =
           False
         contravariantArg (TypeVar _ Unique _ _) Observe =
-
           False
         contravariantArg (Record ets) (RecordDiet ds) =
           and (M.intersectionWith contravariantArg ets ds)

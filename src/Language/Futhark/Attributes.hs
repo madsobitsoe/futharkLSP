@@ -142,7 +142,6 @@ nestedDims t =
             TypeVar _ _ _ targs -> concatMap typeArgDims targs
             Arrow _ v t1 t2     -> filter (notV v) $ nestedDims t1 <> nestedDims t2
             Enum{}              -> []
-
   where arrayNestedDims ArrayPrimElem{} =
           mempty
         arrayNestedDims (ArrayPolyElem _ targs _) =
