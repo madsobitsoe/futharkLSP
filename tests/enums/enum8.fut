@@ -1,4 +1,4 @@
--- Test invalid constructor format
+-- Invalid constructor format.
 -- ==
 -- error:
 

@@ -1,4 +1,4 @@
--- Enums as a type parameter
+-- Enums as a type parameter.
 -- ==
 -- input { } 
 -- output { 2 } 

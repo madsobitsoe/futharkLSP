@@ -1,4 +1,4 @@
--- Test basic enum types and matches.
+-- Basic enum types and matches.
 -- ==
 -- input { } 
 -- output { 5 }

@@ -1,4 +1,4 @@
--- Test arrays of enums.
+-- Arrays of enums.
 -- ==
 -- input { }
 -- output { [1, 2, 3, 4] }

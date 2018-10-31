@@ -1,4 +1,4 @@
--- Test composition of functions on enums.
+-- Composition of functions on enums.
 -- ==
 -- input { }
 -- output { 3 }

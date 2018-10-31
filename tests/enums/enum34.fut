@@ -1,4 +1,4 @@
--- Missing pattern warning 4; intended behaviour is to not print the warning with
+-- Missing pattern warning 4; intended behaviour is to print the warning without
 -- superfluous parentheses.
 -- ==
 -- warning: unmatched

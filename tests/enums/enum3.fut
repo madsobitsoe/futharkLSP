@@ -1,4 +1,4 @@
--- Test matches on nested tuples 3.
+-- Matches on nested tuples 3.
 -- ==
 -- input { } 
 -- output { 3 }

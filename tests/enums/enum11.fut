@@ -1,4 +1,4 @@
--- Test enum equality.
+-- Enum equality.
 -- ==
 -- input { }
 -- output { 2 }

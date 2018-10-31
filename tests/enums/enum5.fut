@@ -1,4 +1,4 @@
--- Test enums as function arguments
+-- Enums as function arguments.
 -- ==
 -- input { } 
 -- output { 2 }
