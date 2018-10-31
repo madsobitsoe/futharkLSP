@@ -904,15 +904,19 @@ internaliseExp _ e@E.ProjectSection{} =
 internaliseExp _ e@E.IndexSection{} =
   fail $ "internaliseExp: Unexpected index section at " ++ locStr (srclocOf e)
 
-boolOp :: VName -> E.Exp -> E.Exp -> E.Exp
-boolOp op l r = E.BinOp (qualName op) (Info $ vacuousShapeAnnotations ft)
-                 (l, sType l) (r, sType r) (Info (E.Prim E.Bool)) noLoc
+andExp :: E.Exp -> E.Exp -> E.Exp
+andExp l r = E.If l r (E.Literal (E.BoolValue False) noLoc) (Info (E.Prim E.Bool)) noLoc
+
+eqExp :: E.Exp -> E.Exp -> E.Exp
+eqExp l r = E.BinOp eq (Info $ vacuousShapeAnnotations ft)
+            (l, sType l) (r, sType r) (Info (E.Prim E.Bool)) noLoc
   where sType e = Info $ toStruct $ vacuousShapeAnnotations $ E.typeOf e
         arrow   = Arrow S.empty Nothing
         ft      = E.typeOf l `arrow` E.typeOf r `arrow` E.Prim E.Bool
+        eq      = qualName $ VName "==" (-1)
 
-generateCond :: VName -> VName -> E.Pattern -> E.Exp -> E.Exp
-generateCond opAnd opEq p e = foldr (boolOp opAnd) (E.Literal (E.BoolValue True) noLoc) conds
+generateCond :: E.Pattern -> E.Exp -> E.Exp
+generateCond p e = foldr andExp (E.Literal (E.BoolValue True) noLoc) conds
   where conds = mapMaybe ((<*> pure e) . fst) $ generateCond' p
 
         generateCond' :: E.Pattern -> [(Maybe (E.Exp -> E.Exp), CompType)]
@@ -934,7 +938,7 @@ generateCond opAnd opEq p e = foldr (boolOp opAnd) (E.Literal (E.BoolValue True)
           [(Nothing, removeShapeAnnotations t)]
         generateCond' (E.PatternAscription p' _ _) = generateCond' p'
         generateCond' (E.PatternLit ePat (Info t) _) =
-          [(Just (boolOp opEq ePat), removeShapeAnnotations t)]
+          [(Just (eqExp ePat), removeShapeAnnotations t)]
 
 generateCaseIf :: String -> E.Exp -> I.Body -> Case -> InternaliseM I.Exp
 generateCaseIf desc e bFail (CasePat p eCase loc) = do
@@ -946,14 +950,8 @@ generateCaseIf desc e bFail (CasePat p eCase loc) = do
       forM_ (zip pat_names ses') $ \(v,se) ->
         letBindNames_ [v] $ I.BasicOp $ I.SubExp se
       internaliseBody eCase
-  opAnd <- vnM "&&"
-  opEq  <- vnM "=="
-  let cond = BasicOp . SubExp <$> internaliseExp1 "cond" (generateCond opAnd opEq p e)
+  let cond = BasicOp . SubExp <$> internaliseExp1 "cond" (generateCond p e)
   eIf cond (return eCase') (return bFail)
-  where vnM op =
-          case find (\k -> baseName k == op) $ M.keys intrinsics of
-            Just vn -> return vn
-            Nothing -> newID op
 
 internaliseSlice :: SrcLoc
                  -> [SubExp]
