@@ -1,4 +1,5 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving, FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances, DeriveFunctor #-}
 -- | Facilities for type-checking Futhark terms.  Checking a term
 -- requires a little more context to track uniqueness and such.
 --
@@ -33,7 +34,7 @@ import Language.Futhark.TypeChecker.Types hiding (checkTypeDecl)
 import Language.Futhark.TypeChecker.Unify
 import qualified Language.Futhark.TypeChecker.Types as Types
 import qualified Language.Futhark.TypeChecker.Monad as TypeM
-import Futhark.Util.Pretty (Pretty)
+import Futhark.Util.Pretty hiding (space, bool)
 
 --- Uniqueness
 
@@ -1315,6 +1316,30 @@ checkCase mt ct (CasePat p caseExp loc) =
     caseType <- expType caseExp'
     unify loc (toStructural ct) (toStructural caseType)
     return $ CasePat p' caseExp' loc
+
+-- | An unmatched pattern. Used in in the generation of
+-- unmatched pattern warnings by the type checker.
+data Unmatched p = UnmatchedNum p [ExpBase Info VName]
+                 | UnmatchedBool p
+                 | UnmatchedEnum p
+                 | Unmatched p
+                 deriving (Functor, Show)
+
+instance Pretty (Unmatched (PatternBase Info VName)) where
+  ppr um = case um of
+      (UnmatchedNum p nums) -> ppr' p <+> text "where p is not one of" <+> ppr nums
+      (UnmatchedBool p)     -> ppr' p
+      (UnmatchedEnum p)     -> ppr' p
+      (Unmatched p)         -> ppr' p
+    where
+      ppr' (PatternAscription p t _) = ppr p <> text ":" <+> ppr t
+      ppr' (PatternParens p _)       = parens $ ppr' p
+      ppr' (Id v _ _)                = pprName v
+      ppr' (TuplePattern pats _)     = parens $ commasep $ map ppr' pats
+      ppr' (RecordPattern fs _)      = braces $ commasep $ map ppField fs
+        where ppField (name, t)      = text (nameToString name) <> equals <> ppr' t
+      ppr' Wildcard{}                = text "_"
+      ppr' (PatternLit e _ _)        = ppr e
 
 unpackPat :: Pattern -> [Maybe Pattern]
 unpackPat Wildcard{} = [Nothing]

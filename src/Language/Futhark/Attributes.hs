@@ -1,6 +1,5 @@
 {-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE DeriveFunctor #-}
 -- | This module provides various simple ways to query and manipulate
 -- fundamental Futhark terms, such as types and values.  The intent is to
 -- keep "Futhark.Language.Syntax" simple, and put whatever embellishments
@@ -97,8 +96,6 @@ module Language.Futhark.Attributes
   , UncheckedDec
   , UncheckedProg
   , UncheckedCase
-
-  , Unmatched(..)
   )
   where
 
@@ -677,16 +674,6 @@ patternType (RecordPattern fs _)      = Record $ patternType <$> M.fromList fs
 patternType (PatternAscription p _ _) = patternType p
 patternType (PatternLit _ (Info t) _) = removeShapeAnnotations t
 
--- | The type matched by the pattern, including shape declarations if present.
-patternStructType :: PatternBase Info VName -> StructType
-patternStructType (PatternAscription p _ _) = patternStructType p
-patternStructType (PatternParens p _) = patternStructType p
-patternStructType (Id _ (Info t) _) = t `setAliases` ()
-patternStructType (TuplePattern ps _) = tupleRecord $ map patternStructType ps
-patternStructType (RecordPattern fs _) = Record $ patternStructType <$> M.fromList fs
-patternStructType (Wildcard (Info t) _) = vacuousShapeAnnotations $ toStruct t
-patternStructType (PatternLit _ (Info t) _) = t `setAliases` ()
-
 -- | The type of a pattern, including shape annotations.
 patternPatternType :: PatternBase Info VName -> PatternType
 patternPatternType (Wildcard (Info t) _)      = t
@@ -696,6 +683,10 @@ patternPatternType (TuplePattern pats _)      = tupleRecord $ map patternPattern
 patternPatternType (RecordPattern fs _)       = Record $ patternPatternType <$> M.fromList fs
 patternPatternType (PatternAscription p _ _)  = patternPatternType p
 patternPatternType (PatternLit _ (Info t) _)  = t
+
+-- | The type matched by the pattern, including shape declarations if present.
+patternStructType :: PatternBase Info VName -> StructType
+patternStructType = toStruct . patternPatternType
 
 -- | When viewed as a function parameter, does this pattern correspond
 -- to a named parameter of some type?
@@ -1085,11 +1076,4 @@ type UncheckedProg = ProgBase NoInfo Name
 -- | A case (of a match expression) with no type annotations.
 type UncheckedCase = CaseBase NoInfo Name
 
--- | An unmatched pattern. Used in in the generation of
--- unmatched pattern warnings by the type checker.
-data Unmatched p = UnmatchedNum p [ExpBase Info VName]
-                 | UnmatchedBool p
-                 | UnmatchedEnum p
-                 | Unmatched p
-                 deriving (Functor, Show)
 
