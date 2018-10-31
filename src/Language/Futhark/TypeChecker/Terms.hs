@@ -1509,6 +1509,7 @@ consumeArg loc (Arrow _ _ t1 _) (FuncDiet d _)
   where contravariantArg (Array _ _ Unique) Observe =
           False
         contravariantArg (TypeVar _ Unique _ _) Observe =
+
           False
         contravariantArg (Record ets) (RecordDiet ds) =
           and (M.intersectionWith contravariantArg ets ds)
@@ -1545,6 +1546,10 @@ checkFunDef f = fmap fst $ runTermTypeM $ do
   maybe_retdecl' <- traverse updateExpTypes maybe_retdecl
   rettype' <- normaliseType rettype
 
+  -- Check if pattern matches are exhaustive and yield
+  -- warnings if not.
+  warnUnmatched body'
+
   return (fname, tparams, params', maybe_retdecl', rettype', body')
 
 -- | This is "fixing" as in "setting them", not "correcting them".  We
@@ -1576,6 +1581,11 @@ fixOverloadedTypes = getConstraints >>= mapM_ fixOverloaded . M.toList
                                    "Add a type annotation to disambiguate the type."]
           where fs' = intercalate ", " $ map field $ M.toList fs
                 field (l, t) = pretty l ++ ": " ++ pretty t
+
+        fixOverloaded (_, HasConstrs cs loc) =
+          typeError loc $ unlines [ "Type is ambiguous (must be an enum with constructors: " ++ cs' ++ ")."
+                                    ,"Add a type annotation to disambiguate the type."]
+          where cs' = intercalate " | " $ map (\c -> '#' : pretty c) cs
 
         fixOverloaded _ = return ()
 
@@ -1628,11 +1638,6 @@ checkFunDef' (fname, maybe_retdecl, tparams, params, body, loc) = noUnique $ do
     let new_substs = M.filterWithKey (\k _ -> not (k `S.member` keep_type_variables)) now_substs
     tparams'' <- closeOverTypes new_substs tparams' $
                  rettype : map patternStructType params''
-
-    -- Check if pattern matches are exhaustive and yield
-    -- warnings if not.
-    body'' <- updateExpTypes body'
-    warnUnmatched body''
 
     -- We keep those type variables that were not closed over by
     -- let-generalisation.
