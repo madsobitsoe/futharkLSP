@@ -721,7 +721,7 @@ matchPatternSV (Id vn (Info t) _) sv =
   else M.singleton vn sv
 matchPatternSV (Wildcard _ _) _ = mempty
 matchPatternSV (PatternAscription pat _ _) sv = matchPatternSV pat sv
-matchPatternSV (PatternLit _ _ _) _ = mempty
+matchPatternSV PatternLit{} _ = mempty
 matchPatternSV pat (Dynamic t) = matchPatternSV pat $ svFromType t
 matchPatternSV pat sv = error $ "Tried to match pattern " ++ pretty pat
                              ++ " with static value " ++ show sv ++ "."

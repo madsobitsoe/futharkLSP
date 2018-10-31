@@ -1346,7 +1346,7 @@ unpackPat Wildcard{} = [Nothing]
 unpackPat (PatternParens p _) = unpackPat p
 unpackPat Id{} = [Nothing]
 unpackPat (TuplePattern ps _) = Just <$> ps
-unpackPat (RecordPattern fs _) = (Just . snd) <$> sortFields (M.fromList fs)
+unpackPat (RecordPattern fs _) = Just . snd <$> sortFields (M.fromList fs)
 unpackPat (PatternAscription p _ _) = unpackPat p
 unpackPat p@PatternLit{} = [Just p]
 

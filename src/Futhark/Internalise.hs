@@ -948,7 +948,7 @@ generateCaseIf desc e bFail (CasePat p eCase loc) = do
       mapM_ (uncurry (internaliseDimConstant loc)) cm
       ses' <- match loc ses
       forM_ (zip pat_names ses') $ \(v,se) ->
-        letBindNames_ [v] $ I.BasicOp $ I.SubExp se
+        letBindNames_ [v] $ I.BasicOp (I.SubExp se)
       internaliseBody eCase
   let cond = BasicOp . SubExp <$> internaliseExp1 "cond" (generateCond p e)
   eIf cond (return eCase') (return bFail)

@@ -309,7 +309,7 @@ patternMatch env m (TuplePattern ps _) (ValueRecord vs)
     foldM (\m' (p,v) -> patternMatch env m' p v) m $
     zip ps (map snd $ sortFields vs)
     where vs' = sortFields vs
-patternMatch env m (RecordPattern ps _) (ValueRecord vs) 
+patternMatch env m (RecordPattern ps _) (ValueRecord vs)
   | length ps == length vs' =
     foldM (\m' (p,v) -> patternMatch env m' p v) m $
     zip (map snd $ sortFields $ M.fromList ps) (map snd $ sortFields vs)
