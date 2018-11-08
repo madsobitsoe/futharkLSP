@@ -15,7 +15,7 @@ module Language.Futhark.TypeChecker
   where
 
 import Control.Monad.Except
-import Control.Monad.Writer
+import Control.Monad.Writer hiding (Sum)
 import Data.List
 import Data.Loc
 import Data.Maybe
@@ -833,6 +833,8 @@ newNamesForMTy orig_mty = do
           Record $ fmap substituteInType ts
         substituteInType (Enum cs) =
           Enum cs
+        substituteInType (Sum ts) =
+          Sum $ (fmap . fmap) substituteInType ts
         substituteInType (Array (ArrayPrimElem t ()) shape u) =
           Array (ArrayPrimElem t ()) (substituteInShape shape) u
         substituteInType (Array (ArrayPolyElem (TypeName qs v) targs ()) shape u) =

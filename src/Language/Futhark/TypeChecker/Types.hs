@@ -60,6 +60,11 @@ unifyTypesU uf (Arrow as1 mn1 t1 t1') (Arrow as2 _ t2 t2') =
   Arrow (as1 <> as2) mn1 <$> unifyTypesU (flip uf) t1 t2 <*> unifyTypesU uf t1' t2'
 unifyTypesU _ e1@Enum{} e2@Enum{}
   | e1 == e2 = Just e1
+unifyTypesU uf (Sum cs1) (Sum cs2)
+  | length cs1 == length cs2,
+    sort (M.keys cs1) == sort (M.keys cs2) =
+      Sum <$> traverse (uncurry (zipWithM (unifyTypesU uf)))
+      (M.intersectionWith (,) cs1 cs2)
 unifyTypesU _ _ _ = Nothing
 
 unifyTypeArgs :: (Monoid als, Eq als, ArrayDim dim) =>
@@ -240,6 +245,21 @@ checkTypeExp t@(TEEnum names loc) = do
     throwError $ TypeError loc "Enums must have 256 or fewer constructors."
   return (TEEnum names loc, Enum names,  Unlifted)
 
+checkTypeExp t@(TESum cs loc) = do
+  let constructors = map fst cs
+  unless (sort constructors == sort (nub constructors)) $
+    throwError $ TypeError loc $ "Duplicate constructors in " ++ pretty t
+
+  -- TODO: This restriction may not apply to 1-ary constructors.
+  unless (length constructors <= 256) $
+    throwError $ TypeError loc "Sum types must have 256 or fewer constructors."
+
+  cs_ts_ls <- (traverse . traverse) checkTypeExp $ M.fromList cs
+  let cs'  = (fmap . fmap) (\(x,_,_) -> x) cs_ts_ls
+      ts_s = (fmap . fmap) (\(_, y, _) -> y) cs_ts_ls
+      ls   = (concatMap . fmap) (\(_, _, z) -> z) cs_ts_ls
+  return (TESum (M.toList cs') loc, Sum ts_s, foldl' max Unlifted ls)
+
 checkNamedDim :: MonadTypeChecker m =>
                  SrcLoc -> QualName Name -> m (QualName VName)
 checkNamedDim loc v = do
@@ -262,6 +282,7 @@ checkForDuplicateNames = (`evalStateT` mempty) . mapM_ check
         check (RecordPattern fs _) = mapM_ (check . snd) fs
         check (PatternAscription p _ _) = check p
         check PatternLit{} = return ()
+        check (PatternConstr _ _ p _) = check p
 
         seen v loc = do
           already <- gets $ M.lookup v
@@ -290,6 +311,7 @@ checkForDuplicateNamesInType = checkForDuplicateNames . pats
         pats (TEApply t1 TypeArgExpDim{} _) = pats t1
         pats TEVar{} = []
         pats TEEnum{} = []
+        pats (TESum cs _) = concatMap (concatMap pats . snd) cs
 
 checkTypeParams :: MonadTypeChecker m =>
                    [TypeParamBase Name]
@@ -404,6 +426,9 @@ instance Substitutable (TypeBase (DimDecl VName) ()) where
 instance Substitutable (TypeBase (DimDecl VName) Names) where
   applySubst = substTypesAny . (fmap (vacuousShapeAnnotations . fromStruct).)
 
+instance Substitutable a => Substitutable [a] where
+  applySubst f = map (applySubst f)
+
 -- | Perform substitutions, from type names to types, on a type. Works
 -- regardless of what shape and uniqueness information is attached to the type.
 substTypesAny :: (ArrayDim dim, Monoid as) =>
@@ -423,6 +448,7 @@ substTypesAny lookupSubst ot = case ot of
   Arrow als v t1 t2 ->
     Arrow als v (substTypesAny lookupSubst t1) (substTypesAny lookupSubst t2)
   Enum names -> Enum names
+  Sum ts -> Sum $ (fmap . fmap) (substTypesAny lookupSubst) ts
 
   where nope = error "substTypesAny: Cannot create array after substitution."
 

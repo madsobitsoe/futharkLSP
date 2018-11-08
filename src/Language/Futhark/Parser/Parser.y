@@ -448,16 +448,29 @@ TypeExpAtom :: { UncheckedTypeExp }
              | '{' '}'                        { TERecord [] (srcspan $1 $>) }
              | '{' FieldTypes1 '}'            { TERecord $2 (srcspan $1 $>) }
              | QualName                       { TEVar (fst $1) (snd $1) }
-             | Enum                           { TEEnum (fst $1)  (snd $1)}
+             | SumType                       { TESum (fst $1) (snd $1) }
 
-Enum :: { ([Name], SrcLoc) }
-      : VConstr0 %prec enumprec { ([fst $1], snd $1) }
-      | VConstr0 '|' Enum
-        { let names = fst $1 : fst $3; loc = srcspan (snd $1) (snd $3)
-          in (names, loc) }
+SumType :: { ([(Name, [UncheckedTypeExp])], SrcLoc) }
+SumType : SumTypeClauses { $1 }
 
-VConstr0 :: { (Name, SrcLoc) }
-          : '#' id  { let L _ (ID c) = $2 in  (c, srclocOf $1) }
+SumTypeClauses :: { ([(Name, [UncheckedTypeExp])], SrcLoc) }
+               : SumTypeClause                { let (n, t, loc) = $1 in ([(n, t)], loc) }
+               | SumTypeClauses SumTypeClause { let (cs, loc1)   = $1;
+                                                    (n, t, loc2) = $2
+                                                in (cs ++ [(n, t)], srcspan loc1 loc2) }
+
+VConstr :: { (Name, SrcLoc) }
+        : '#' id  { let L _ (ID c) = $2 in  (c, srclocOf $1) }
+
+SumTypeClause :: { (Name, [UncheckedTypeExp], SrcLoc) }
+SumTypeClause : VConstr SumTypeFields { let (n, loc1)  = $1;
+                                             (ts, loc2) = $2
+                                        in (n, ts, srcspan loc1 loc2) }
+
+SumTypeFields :: { ([UncheckedTypeExp], SrcLoc) }
+SumTypeFields : {- empty -}           { ([], noLoc) }
+              | SumTypeFields TypeExp { let (ts, loc) = $1
+                                            in (ts ++ [$2], srcspan loc $2) }
 
 TypeArg :: { TypeArgExp Name }
          : '[' DimDecl ']' { TypeArgExpDim (fst $2) (srcspan $1 $>) }
@@ -598,9 +611,12 @@ Apply :: { UncheckedExp }
       | Atom %prec juxtprec
         { $1 }
 
+
+
 Atom :: { UncheckedExp }
 Atom : PrimLit        { Literal (fst $1) (snd $1) }
-     | VConstr0       { VConstr0 (fst $1) NoInfo (snd $1) }
+     | VConstr Atom   { let (n, loc) = $1 in VConstr1 n $2 NoInfo (srcspan loc $>) }
+     | VConstr        { VConstr0 (fst $1) NoInfo (snd $1) }
      | intlit         { let L loc (INTLIT x) = $1 in IntLit x NoInfo loc }
      | floatlit       { let L loc (FLOATLIT x) = $1 in FloatLit x NoInfo loc }
      | stringlit      { let L loc (STRINGLIT s) = $1 in
@@ -747,6 +763,12 @@ CInnerPattern :: { PatternBase NoInfo Name }
                | '(' CPattern ',' CPatterns1 ')'    { TuplePattern ($2:$4) (srcspan $1 $>) }
                | '{' CFieldPatterns '}'             { RecordPattern $2 (srcspan $1 $>) }
                | CaseLiteral                        { PatternLit (fst $1) NoInfo (snd $1) }
+               | ConstrPattern                      { $1 } 
+
+ConstrPattern :: { PatternBase NoInfo Name}
+              : VConstr CPattern { let (n, loc) = $1;
+                                               loc' = srcspan loc $>
+                                           in PatternConstr n NoInfo $2 loc' }
 
 CFieldPattern :: { (Name, PatternBase NoInfo Name) }
                : FieldId '=' CPattern
@@ -770,7 +792,6 @@ CaseLiteral :: { (UncheckedExp, SrcLoc) }
              | floatlit       { let L loc (FLOATLIT x) = $1 in (FloatLit x NoInfo loc, loc) }
              | stringlit      { let L loc (STRINGLIT s) = $1 in
                               (ArrayLit (map (flip Literal loc . SignedValue . Int32Value . fromIntegral . ord) s) NoInfo loc, loc) }
-             | VConstr0       { (VConstr0 (fst $1) NoInfo (snd $1), snd $1) }
 
 LoopForm :: { LoopFormBase NoInfo Name }
 LoopForm : for VarId '<' Exp

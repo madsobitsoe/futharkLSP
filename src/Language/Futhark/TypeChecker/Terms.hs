@@ -16,7 +16,7 @@ where
 
 import Control.Monad.Except
 import Control.Monad.State
-import Control.Monad.RWS
+import Control.Monad.RWS hiding (Sum)
 import qualified Control.Monad.Fail as Fail
 import Data.List
 import Data.Loc
@@ -556,6 +556,21 @@ checkPattern' (PatternLit e NoInfo loc) NoneInferred = do
   t' <- expType e'
   return $ PatternLit e' (Info (vacuousShapeAnnotations t')) loc
 
+checkPattern' (PatternConstr n NoInfo p loc) (Ascribed (Sum cs))
+  | Just [t] <- M.lookup n cs =
+      PatternConstr n (Info (Sum cs)) <$> checkPattern' p (Ascribed t) <*> pure loc
+
+checkPattern' (PatternConstr n NoInfo p loc) (Ascribed t) = do
+  pt <- patternType <$> checkPattern' p NoneInferred
+  mustHaveConstr loc n t [toStructural pt]
+  PatternConstr n (Info t) <$> checkPattern' p (Ascribed (vacuousShapeAnnotations pt)) <*> pure loc
+
+checkPattern' (PatternConstr n NoInfo p loc) NoneInferred = do
+  t <- newTypeVar loc "t"
+  pt <- patternType <$> checkPattern' p NoneInferred
+  mustHaveConstr loc n t [toStructural pt]
+  PatternConstr n (Info t) <$> checkPattern' p (Ascribed (vacuousShapeAnnotations pt)) <*> pure loc
+
 bindPatternNames :: PatternBase NoInfo Name -> TermTypeM a -> TermTypeM a
 bindPatternNames = bindSpaced . map asTerm . S.toList . patIdentSet
   where asTerm v = (Term, identName v)
@@ -711,6 +726,7 @@ patternUses PatternLit{} = mempty
 patternUses (PatternParens p _) = patternUses p
 patternUses (TuplePattern ps _) = foldMap patternUses ps
 patternUses (RecordPattern fs _) = foldMap (patternUses . snd) fs
+patternUses (PatternConstr _ _ p _) = patternUses p
 patternUses (PatternAscription p (TypeDecl declte _) _) =
   patternUses p <> typeExpUses declte
   where typeExpUses (TEVar _ _) = mempty
@@ -723,6 +739,7 @@ patternUses (PatternAscription p (TypeDecl declte _) _) =
           let (pos, neg) = typeExpUses t1 <> typeExpUses t2
           in (mempty, pos <> neg)
         typeExpUses TEEnum{} = mempty
+        typeExpUses (TESum cs _) = foldMap (foldMap typeExpUses . snd) cs
         typeArgUses (TypeArgExpDim d _) = dimDeclUses d
         typeArgUses (TypeArgExpType te) = typeExpUses te
 
@@ -1241,6 +1258,8 @@ checkExp (DoLoop tparams mergepat mergeexp form loopbody loc) =
           uniquePat (PatternAscription p t ploc) =
             PatternAscription p t ploc
           uniquePat p@PatternLit{} = p
+          uniquePat (PatternConstr n t p ploc) =
+            PatternConstr n t (uniquePat p) ploc
 
           -- Make the pattern unique where needed.
           pat' = uniquePat pat
@@ -1288,8 +1307,15 @@ checkExp (DoLoop tparams mergepat mergeexp form loopbody loc) =
 
 checkExp (VConstr0 name NoInfo loc) = do
   t <- newTypeVar loc "t"
-  mustHaveConstr loc name t
+  mustHaveConstr loc name t []
   return $ VConstr0 name (Info t) loc
+
+checkExp (VConstr1 name payload NoInfo loc) = do
+  t <- newTypeVar loc "t"
+  payload' <- checkExp payload
+  pt <- expType payload'
+  mustHaveConstr loc name t [toStructural pt]
+  return $ VConstr1 name payload' (Info t) loc
 
 checkExp (Match e cs NoInfo loc) = do
   e' <- checkExp e
@@ -1340,6 +1366,7 @@ instance Pretty (Unmatched (PatternBase Info VName)) where
         where ppField (name, t)      = text (nameToString name) <> equals <> ppr' t
       ppr' Wildcard{}                = text "_"
       ppr' (PatternLit e _ _)        = ppr e
+      ppr' (PatternConstr n _ p _)   = text "#" <> ppr n <+> ppr p
 
 unpackPat :: Pattern -> [Maybe Pattern]
 unpackPat Wildcard{} = [Nothing]

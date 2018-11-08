@@ -99,7 +99,7 @@ module Language.Futhark.Attributes
   )
   where
 
-import           Control.Monad.Writer
+import           Control.Monad.Writer hiding (Sum)
 import           Data.Char
 import           Data.Foldable
 import qualified Data.Map.Strict       as M
@@ -139,6 +139,7 @@ nestedDims t =
             TypeVar _ _ _ targs -> concatMap typeArgDims targs
             Arrow _ v t1 t2     -> filter (notV v) $ nestedDims t1 <> nestedDims t2
             Enum{}              -> []
+            Sum cs              -> nub $ foldMap concat $ (fmap . fmap) nestedDims cs
   where arrayNestedDims ArrayPrimElem{} =
           mempty
         arrayNestedDims (ArrayPolyElem _ targs _) =
@@ -146,6 +147,8 @@ nestedDims t =
         arrayNestedDims (ArrayRecordElem ts) =
           fold (fmap recordArrayElemNestedDims ts)
         arrayNestedDims ArrayEnumElem{} = mempty
+        arrayNestedDims (ArraySumElem cs) =
+          foldMap (foldMap arrayNestedDims) cs
 
         recordArrayElemNestedDims (RecordArrayArrayElem a ds _) =
           arrayNestedDims a <> shapeDims ds
@@ -206,7 +209,8 @@ diet TypeVar{}             = Observe
 diet (Arrow _ _ t1 t2)     = FuncDiet (diet t1) (diet t2)
 diet (Array _ _ Unique)    = Consume
 diet (Array _ _ Nonunique) = Observe
-diet (Enum _)              = Observe
+diet Enum{}                = Observe
+diet Sum{}                 = Observe
 
 -- | @t `maskAliases` d@ removes aliases (sets them to 'mempty') from
 -- the parts of @t@ that are denoted as 'Consumed' by the 'Diet' @d@.
@@ -240,7 +244,7 @@ fromStruct t = t `setAliases` S.empty
 -- | @peelArray n t@ returns the type resulting from peeling the first
 -- @n@ array dimensions from @t@.  Returns @Nothing@ if @t@ has less
 -- than @n@ dimensions.
-peelArray :: Int -> TypeBase dim as -> Maybe (TypeBase dim as)
+peelArray :: Monoid as => Int -> TypeBase dim as -> Maybe (TypeBase dim as)
 peelArray 0 t = Just t
 peelArray n (Array (ArrayPrimElem et _) shape _)
   | shapeRank shape == n =
@@ -255,6 +259,7 @@ peelArray n (Array (ArrayRecordElem ts) shape u)
         asType (RecordArrayElem (ArrayPolyElem bt targs als)) = TypeVar als u bt targs
         asType (RecordArrayElem (ArrayRecordElem ts')) = Record $ fmap asType ts'
         asType (RecordArrayElem (ArrayEnumElem cs _)) = Enum cs
+        asType (RecordArrayElem (ArraySumElem cs))  = Sum $ (fmap . fmap) (fst . arrayElemToType) cs
         asType (RecordArrayArrayElem et e_shape _) = Array et e_shape u
 peelArray n (Array (ArrayEnumElem cs _) shape _)
   | shapeRank shape == n =
@@ -509,6 +514,7 @@ typeOf (ProjectSection _ (Info t) _) =
 typeOf (IndexSection _ (Info t) _) =
   removeShapeAnnotations t
 typeOf (VConstr0 _ (Info t) _)  = t
+typeOf (VConstr1 _ _ (Info t) _) = t
 typeOf (Match _ _ (Info t) _) = t
 
 foldFunType :: Monoid as => [TypeBase dim as] -> TypeBase dim as -> TypeBase dim as
@@ -537,6 +543,7 @@ typeVars t =
       foldMap (typeVars . fst . recordArrayElemToType) fields
     Array ArrayEnumElem{} _ _ -> mempty
     Enum{} -> mempty
+    Sum cs -> foldMap (foldMap typeVars) cs
   where typeVarFree = S.singleton . typeLeaf
         typeArgFree (TypeArgType ta _) = typeVars ta
         typeArgFree TypeArgDim{} = mempty
@@ -564,6 +571,8 @@ returnType (Arrow _ v t1 t2) ds args =
   Arrow als v (bimap id (const mempty) t1) (returnType t2 ds args)
   where als = foldMap aliases $ zipWith maskAliases args ds
 returnType (Enum cs) _ _ = Enum cs
+returnType (Sum cs) ds args =
+  Sum $ (fmap . fmap) (\c -> returnType c ds args) cs
 
 typeArgReturnType :: TypeArg shape () -> [Diet] -> [CompType]
                   -> TypeArg shape Names
@@ -604,11 +613,13 @@ concreteType TypeVar{} = False
 concreteType Arrow{} = False
 concreteType (Record ts) = all concreteType ts
 concreteType Enum{} = True
+concreteType (Sum cs) = (all . all) concreteType cs
 concreteType (Array at _ _) = concreteArrayType at
   where concreteArrayType ArrayPrimElem{}      = True
         concreteArrayType ArrayPolyElem{}      = False
         concreteArrayType (ArrayRecordElem ts) = all concreteRecordArrayElem ts
         concreteArrayType ArrayEnumElem{}      = True
+        concreteArrayType (ArraySumElem cs)    = (all . all) concreteArrayType cs
 
         concreteRecordArrayElem (RecordArrayElem et) = concreteArrayType et
         concreteRecordArrayElem (RecordArrayArrayElem et _ _) = concreteArrayType et
@@ -623,6 +634,7 @@ orderZero (Record fs)     = all orderZero $ M.elems fs
 orderZero TypeVar{}       = True
 orderZero Arrow{}         = False
 orderZero Enum{}          = True
+orderZero (Sum cs)        = (all . all) orderZero $ M.elems cs
 
 -- | Extract all the shape names that occur in a given pattern.
 patternDimNames :: PatternBase Info VName -> Names
@@ -634,6 +646,8 @@ patternDimNames (Wildcard (Info tp) _) = typeDimNames tp
 patternDimNames (PatternAscription p (TypeDecl _ (Info t)) _) =
   patternDimNames p <> typeDimNames t
 patternDimNames (PatternLit _ (Info tp) _) = typeDimNames tp
+patternDimNames (PatternConstr _ (Info tp) p _) =
+  patternDimNames p <> typeDimNames tp
 
 -- | Extract all the shape names that occur in a given type.
 typeDimNames :: TypeBase (DimDecl VName) als -> Names
@@ -646,13 +660,14 @@ typeDimNames = foldMap dimName . nestedDims
 -- have order 0.
 patternOrderZero :: PatternBase Info vn -> Bool
 patternOrderZero pat = case pat of
-  TuplePattern ps _       -> all patternOrderZero ps
-  RecordPattern fs _      -> all (patternOrderZero . snd) fs
-  PatternParens p _       -> patternOrderZero p
-  Id _ (Info t) _         -> orderZero t
-  Wildcard (Info t) _     -> orderZero t
-  PatternAscription p _ _ -> patternOrderZero p
-  PatternLit _ (Info t) _ -> orderZero t
+  TuplePattern ps _            -> all patternOrderZero ps
+  RecordPattern fs _           -> all (patternOrderZero . snd) fs
+  PatternParens p _            -> patternOrderZero p
+  Id _ (Info t) _              -> orderZero t
+  Wildcard (Info t) _          -> orderZero t
+  PatternAscription p _ _      -> patternOrderZero p
+  PatternLit _ (Info t) _      -> orderZero t
+  PatternConstr _ (Info t) _ _ -> orderZero t
 
 -- | The set of identifiers bound in a pattern.
 patIdentSet :: (Functor f, Ord vn) => PatternBase f vn -> S.Set (IdentBase f vn)
@@ -663,26 +678,29 @@ patIdentSet (RecordPattern fs _)      = mconcat $ map (patIdentSet . snd) fs
 patIdentSet Wildcard{}                = mempty
 patIdentSet (PatternAscription p _ _) = patIdentSet p
 patIdentSet PatternLit{}              = mempty
+patIdentSet (PatternConstr _ _ p _)   = patIdentSet p
 
 -- | The type of values bound by the pattern.
 patternType :: PatternBase Info VName -> CompType
-patternType (Wildcard (Info t) _)     = removeShapeAnnotations t
-patternType (PatternParens p _)       = patternType p
-patternType (Id _ (Info t) _)         = removeShapeAnnotations t
-patternType (TuplePattern pats _)     = tupleRecord $ map patternType pats
-patternType (RecordPattern fs _)      = Record $ patternType <$> M.fromList fs
-patternType (PatternAscription p _ _) = patternType p
-patternType (PatternLit _ (Info t) _) = removeShapeAnnotations t
+patternType (Wildcard (Info t) _)          = removeShapeAnnotations t
+patternType (PatternParens p _)            = patternType p
+patternType (Id _ (Info t) _)              = removeShapeAnnotations t
+patternType (TuplePattern pats _)          = tupleRecord $ map patternType pats
+patternType (RecordPattern fs _)           = Record $ patternType <$> M.fromList fs
+patternType (PatternAscription p _ _)      = patternType p
+patternType (PatternLit _ (Info t) _)      = removeShapeAnnotations t
+patternType (PatternConstr _ (Info t) _ _) = removeShapeAnnotations t
 
 -- | The type of a pattern, including shape annotations.
 patternPatternType :: PatternBase Info VName -> PatternType
-patternPatternType (Wildcard (Info t) _)      = t
-patternPatternType (PatternParens p _)        = patternPatternType p
-patternPatternType (Id _ (Info t) _)          = t
-patternPatternType (TuplePattern pats _)      = tupleRecord $ map patternPatternType pats
-patternPatternType (RecordPattern fs _)       = Record $ patternPatternType <$> M.fromList fs
-patternPatternType (PatternAscription p _ _)  = patternPatternType p
-patternPatternType (PatternLit _ (Info t) _)  = t
+patternPatternType (Wildcard (Info t) _)          = t
+patternPatternType (PatternParens p _)            = patternPatternType p
+patternPatternType (Id _ (Info t) _)              = t
+patternPatternType (TuplePattern pats _)          = tupleRecord $ map patternPatternType pats
+patternPatternType (RecordPattern fs _)           = Record $ patternPatternType <$> M.fromList fs
+patternPatternType (PatternAscription p _ _)      = patternPatternType p
+patternPatternType (PatternLit _ (Info t) _)      = t
+patternPatternType (PatternConstr _ (Info t) _ _) = t
 
 -- | The type matched by the pattern, including shape declarations if present.
 patternStructType :: PatternBase Info VName -> StructType
@@ -716,6 +734,8 @@ patternNoShapeAnnotations (Wildcard (Info t) loc) =
   Wildcard (Info (vacuousShapeAnnotations t)) loc
 patternNoShapeAnnotations (PatternLit e (Info t) loc) =
   PatternLit e (Info (vacuousShapeAnnotations t)) loc
+patternNoShapeAnnotations (PatternConstr n (Info t) p loc) =
+  PatternConstr n (Info (vacuousShapeAnnotations t)) p loc
 
 -- | Names of primitive types to types.  This is only valid if no
 -- shadowing is going on, but useful for tools.
@@ -1077,3 +1097,5 @@ type UncheckedProg = ProgBase NoInfo Name
 
 -- | A case (of a match expression) with no type annotations.
 type UncheckedCase = CaseBase NoInfo Name
+
+

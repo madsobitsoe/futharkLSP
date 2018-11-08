@@ -28,7 +28,7 @@ import Data.List hiding (break)
 import Data.Maybe
 import qualified Data.Map as M
 import qualified Data.Semigroup as Sem
-import Data.Monoid
+import Data.Monoid hiding (Sum)
 import Data.Loc
 
 import Language.Futhark hiding (Value)
@@ -89,13 +89,14 @@ data Value = ValuePrim !PrimValue
            | ValueArray !(Array Int Value)
            | ValueRecord (M.Map Name Value)
            | ValueFun (Value -> EvalM Value)
-           | ValueEnum Name
+           | ValueSum Name (Maybe Value)
 
 instance Eq Value where
   ValuePrim x == ValuePrim y = x == y
   ValueArray x == ValueArray y = x == y
   ValueRecord x == ValueRecord y = x == y
-  ValueEnum x == ValueEnum y = x == y
+  ValueSum x Nothing == ValueSum y Nothing = x == y
+  ValueSum x (Just v1) == ValueSum y (Just v2) = x == y && v1 == v2
   _ == _ = False
 
 prettyRecord :: Pretty a => M.Map Name a -> Doc
@@ -118,7 +119,10 @@ instance Pretty Value where
 
   ppr (ValueRecord m) = prettyRecord m
   ppr ValueFun{} = text "#<fun>"
-  ppr (ValueEnum n) = text "#" <> ppr n
+  ppr (ValueSum n mv) =
+    case mv of
+      Nothing -> text "#" <> ppr n
+      Just v  -> text "#" <> ppr n <+> ppr v
 
 -- | Create an array value; failing if that would result in an
 -- irregular array.
@@ -325,6 +329,8 @@ patternMatch env m (PatternLit e _ _) v = do
   if v == v'
     then pure m
     else mzero
+patternMatch env m (PatternConstr n _ p _) (ValueSum n' (Just v))
+  | n == n' = patternMatch env m p v
 
 patternMatch _ _ _ _ = mzero
 
@@ -529,6 +535,7 @@ evalType env t@(TypeVar () _ tn args) =
           return (mempty, M.singleton p $ T.TypeAbbr l [] t'')
         matchPtoA _ _ = return mempty
 evalType _ (Enum cs) = return $ Enum cs
+evalType env (Sum cs) = Sum <$> (traverse . traverse) (evalType env) cs
 
 eval :: Env -> Exp -> EvalM Value
 
@@ -767,7 +774,11 @@ eval env (Assert what e (Info s) loc) = do
   unless cond $ bad loc env s
   eval env e
 
-eval _ (VConstr0 c _ _) = return $ ValueEnum c
+eval _ (VConstr0 c _ _) = return $ ValueSum c Nothing
+
+eval env (VConstr1 c e _ _) = do
+  v <- eval env e
+  return $ ValueSum c (Just v)
 
 eval env (Match e cs _ _) = do
   v <- eval env e

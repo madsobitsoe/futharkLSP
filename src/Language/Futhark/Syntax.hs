@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE MultiParamTypeClasses      #-}
 {-# LANGUAGE StandaloneDeriving         #-}
+{-# LANGUAGE DeriveFunctor              #-}
 -- | This is an ever-changing syntax representation for Futhark.  Some
 -- types, such as @Exp@, are parametrised by type and name
 -- representation.  See the @https://futhark.readthedocs.org@ for a
@@ -92,7 +93,7 @@ import           Data.Bitraversable
 import           Data.Foldable
 import           Data.Loc
 import qualified Data.Map.Strict                  as M
-import           Data.Monoid
+import           Data.Monoid hiding (Sum)
 import           Data.Ord
 import qualified Data.Set                         as S
 import           Data.Traversable
@@ -314,6 +315,7 @@ data ArrayElemTypeBase dim as =
   | ArrayPolyElem TypeName [TypeArg dim as] as
   | ArrayRecordElem (M.Map Name (RecordArrayElemTypeBase dim as))
   | ArrayEnumElem [Name] as
+  | ArraySumElem (M.Map Name [ArrayElemTypeBase dim as]) -- TODO: Is this right?
   deriving (Eq, Show)
 
 instance Bitraversable ArrayElemTypeBase where
@@ -325,6 +327,8 @@ instance Bitraversable ArrayElemTypeBase where
     ArrayRecordElem <$> traverse (bitraverse f g) fs
   bitraverse _ g (ArrayEnumElem cs as) =
     ArrayEnumElem cs <$> g as
+  bitraverse f g (ArraySumElem cs) =
+    ArraySumElem <$> (traverse . traverse) (bitraverse f g) cs
 
 instance Bifunctor ArrayElemTypeBase where
   bimap = bimapDefault
@@ -338,6 +342,7 @@ instance Bifoldable ArrayElemTypeBase where
 -- parameter names are ignored.
 data TypeBase dim as = Prim PrimType
                      | Enum [Name]
+                     | Sum (M.Map Name [TypeBase dim as])
                      | Array (ArrayElemTypeBase dim as) (ShapeDecl dim) Uniqueness
                      | Record (M.Map Name (TypeBase dim as))
                      | TypeVar as Uniqueness TypeName [TypeArg dim as]
@@ -365,6 +370,7 @@ instance Bitraversable TypeBase where
   bitraverse f g (Arrow als v t1 t2) =
     Arrow <$> g als <*> pure v <*> bitraverse f g t1 <*> bitraverse f g t2
   bitraverse _ _ (Enum n) = pure $ Enum n
+  bitraverse f g (Sum cs) = Sum <$> (traverse . traverse) (bitraverse f g) cs
 
 instance Bifunctor TypeBase where
   bimap = bimapDefault
@@ -404,6 +410,7 @@ data TypeExp vn = TEVar (QualName vn) SrcLoc
                 | TEApply (TypeExp vn) (TypeArgExp vn) SrcLoc
                 | TEArrow (Maybe vn) (TypeExp vn) (TypeExp vn) SrcLoc
                 | TEEnum [Name] SrcLoc
+                | TESum [(Name, [TypeExp vn])] SrcLoc
                  deriving (Eq, Show)
 
 instance Located (TypeExp vn) where
@@ -414,7 +421,8 @@ instance Located (TypeExp vn) where
   locOf (TEUnique _ loc)    = locOf loc
   locOf (TEApply _ _ loc)   = locOf loc
   locOf (TEArrow _ _ _ loc) = locOf loc
-  locOf (TEEnum _ loc)    = locOf loc
+  locOf (TEEnum _ loc)      = locOf loc
+  locOf (TESum _ loc)      = locOf loc
 
 data TypeArgExp vn = TypeArgExpDim (DimDecl vn) SrcLoc
                    | TypeArgExpType (TypeExp vn)
@@ -722,6 +730,9 @@ data ExpBase f vn =
             | VConstr0 Name (f CompType) SrcLoc
             -- ^ An enum element, e.g., @#foo@.
 
+            | VConstr1 Name (ExpBase f vn) (f CompType) SrcLoc
+            -- ^ A 1-ary value constructor.
+
             | Match (ExpBase f vn) [CaseBase f vn] (f CompType) SrcLoc
             -- ^ A match expression.
 
@@ -773,7 +784,8 @@ instance Located (ExpBase f vn) where
   locOf (Unsafe _ loc)                 = locOf loc
   locOf (Assert _ _ _ loc)             = locOf loc
   locOf (VConstr0 _ _ loc)             = locOf loc
-  locOf (Match _ _ _ loc)                = locOf loc
+  locOf (VConstr1 _ _ _ loc)           = locOf loc
+  locOf (Match _ _ _ loc)              = locOf loc
 
 -- | An entry in a record literal.
 data FieldBase f vn = RecordFieldExplicit Name (ExpBase f vn) SrcLoc
@@ -808,6 +820,7 @@ data PatternBase f vn = TuplePattern [PatternBase f vn] SrcLoc
                       | Wildcard (f PatternType) SrcLoc -- Nothing, i.e. underscore.
                       | PatternAscription (PatternBase f vn) (TypeDeclBase f vn) SrcLoc
                       | PatternLit (ExpBase f vn) (f PatternType) SrcLoc
+                      | PatternConstr Name (f PatternType) (PatternBase f vn) SrcLoc
 deriving instance Showable f vn => Show (PatternBase f vn)
 
 instance Located (PatternBase f vn) where
@@ -818,6 +831,7 @@ instance Located (PatternBase f vn) where
   locOf (Wildcard _ loc)            = locOf loc
   locOf (PatternAscription _ _ loc) = locOf loc
   locOf (PatternLit _ _ loc)        = locOf loc
+  locOf (PatternConstr _ _ _ loc)     = locOf loc
 
 -- | Documentation strings, including source location.
 data DocComment = DocComment String SrcLoc

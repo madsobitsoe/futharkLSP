@@ -178,6 +178,8 @@ instance ASTMappable (ExpBase Info VName) where
     mapOnExp tv loopbody <*> pure loc
   astMap tv (VConstr0 name t loc) =
     VConstr0 name <$> traverse (mapOnCompType tv) t <*> pure loc
+  astMap tv (VConstr1 name e t loc) =
+    VConstr1 name <$> mapOnExp tv e <*> traverse (mapOnCompType tv) t <*> pure loc
   astMap tv (Match e cases t loc) =
     Match <$> mapOnExp tv e <*> astMap tv cases
           <*> traverse (mapOnCompType tv) t <*> pure loc
@@ -200,6 +202,8 @@ instance ASTMappable (TypeExp VName) where
   astMap tv (TEArrow v t1 t2 loc) =
     TEArrow v <$> astMap tv t1 <*> astMap tv t2 <*> pure loc
   astMap _ te@TEEnum{} = pure te
+  astMap tv (TESum cs loc) =
+    TESum <$> traverse (traverse $ astMap tv) cs <*> pure loc
 
 instance ASTMappable (TypeArgExp VName) where
   astMap tv (TypeArgExpDim dim loc) =
@@ -241,6 +245,7 @@ traverseType f g h (TypeVar als u t args) =
 traverseType f g h (Arrow als v t1 t2) =
   Arrow <$> h als <*> pure v <*> traverseType f g h t1 <*> traverseType f g h t2
 traverseType _ _ _ (Enum cs) = pure $ Enum cs
+traverseType f g h (Sum cs) = Sum <$> (traverse . traverse) (traverseType f g h) cs
 
 traverseArrayElemType :: Applicative f =>
                          TypeTraverser f ArrayElemTypeBase dim1 als1 dim2 als2
@@ -305,6 +310,8 @@ instance ASTMappable (PatternBase Info VName) where
     Wildcard <$> (Info <$> mapOnPatternType tv t) <*> pure loc
   astMap tv (PatternLit e (Info t) loc) =
     PatternLit <$> astMap tv e <*> (Info <$> mapOnPatternType tv t) <*>  pure loc
+  astMap tv (PatternConstr n (Info t) pat loc) =
+    PatternConstr n <$> (Info <$> mapOnPatternType tv t) <*> astMap tv pat <*> pure loc
 
 instance ASTMappable (FieldBase Info VName) where
   astMap tv (RecordFieldExplicit name e loc) =
