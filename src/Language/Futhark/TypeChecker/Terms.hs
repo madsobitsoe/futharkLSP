@@ -1596,7 +1596,7 @@ checkFunDef f = fmap fst $ runTermTypeM $ do
 
   -- Check if pattern matches are exhaustive and yield
   -- errors if not.
-  checkUnmatched body'
+  -- checkUnmatched body'
 
   return (fname, tparams, params', maybe_retdecl', rettype', body')
 

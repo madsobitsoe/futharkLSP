@@ -148,7 +148,7 @@ nestedDims t =
           fold (fmap recordArrayElemNestedDims ts)
         arrayNestedDims ArrayEnumElem{} = mempty
         arrayNestedDims (ArraySumElem cs) =
-          foldMap (foldMap arrayNestedDims) cs
+          fold (fmap (concatMap recordArrayElemNestedDims) cs)
 
         recordArrayElemNestedDims (RecordArrayArrayElem a ds _) =
           arrayNestedDims a <> shapeDims ds
@@ -259,11 +259,20 @@ peelArray n (Array (ArrayRecordElem ts) shape u)
         asType (RecordArrayElem (ArrayPolyElem bt targs als)) = TypeVar als u bt targs
         asType (RecordArrayElem (ArrayRecordElem ts')) = Record $ fmap asType ts'
         asType (RecordArrayElem (ArrayEnumElem cs _)) = Enum cs
-        asType (RecordArrayElem (ArraySumElem cs))  = Sum $ (fmap . fmap) (fst . arrayElemToType) cs
+        asType (RecordArrayElem (ArraySumElem cs))  = Sum $ (fmap . fmap) asType cs
         asType (RecordArrayArrayElem et e_shape _) = Array et e_shape u
 peelArray n (Array (ArrayEnumElem cs _) shape _)
   | shapeRank shape == n =
     Just $ Enum cs
+peelArray n (Array (ArraySumElem cs) shape u) -- TODO : fix
+  | shapeRank shape == n =
+    Just $ Sum $ (fmap . fmap) asType cs
+  where asType (RecordArrayElem (ArrayPrimElem bt _)) = Prim bt
+        asType (RecordArrayElem (ArrayPolyElem bt targs als)) = TypeVar als u bt targs
+        asType (RecordArrayElem (ArrayRecordElem ts')) = Record $ fmap asType ts'
+        asType (RecordArrayElem (ArrayEnumElem cs _)) = Enum cs
+        asType (RecordArrayElem (ArraySumElem cs))  = Sum $ (fmap . fmap) asType cs
+        asType (RecordArrayArrayElem et e_shape _) = Array et e_shape u
 peelArray n (Array et shape u) = do
   shape' <- stripDims n shape
   return $ Array et shape' u
@@ -307,6 +316,9 @@ arrayOfWithAliases (Record ts) as shape u = do
 arrayOfWithAliases Arrow{} _ _ _ = Nothing
 arrayOfWithAliases (Enum cs) as shape u  =
   Just $ Array (ArrayEnumElem cs as) shape u
+arrayOfWithAliases (Sum cs) as shape u = do
+  cs' <- (traverse . traverse) (typeToRecordArrayElem' as) cs -- TODO: update name
+  return $ Array (ArraySumElem cs') shape u
 
 typeToRecordArrayElem :: Monoid as =>
                          TypeBase dim as
@@ -342,6 +354,9 @@ arrayElemToType (ArrayRecordElem ts) =
   let ts' = fmap recordArrayElemToType ts
   in (Record $ fmap fst ts', foldMap snd ts')
 arrayElemToType (ArrayEnumElem cs als) = (Enum cs, als)
+arrayElemToType (ArraySumElem cs) =
+  let cs' = (fmap . fmap) recordArrayElemToType cs
+  in (Sum $ (fmap . fmap) fst cs', foldMap (foldMap snd) cs')
 
 -- | @stripArray n t@ removes the @n@ outermost layers of the array.
 -- Essentially, it is the type of indexing an array of type @t@ with
@@ -412,6 +427,12 @@ setArrayElemUniqueness (ArrayRecordElem r) u =
         set (RecordArrayArrayElem et shape e_u) =
           RecordArrayArrayElem (setArrayElemUniqueness et u) shape e_u
 setArrayElemUniqueness (ArrayEnumElem cs as) _ = ArrayEnumElem cs as
+setArrayElemUniqueness (ArraySumElem cs) u =
+  ArraySumElem $ (fmap . fmap) set cs
+  where set (RecordArrayElem et) =
+          RecordArrayElem $ setArrayElemUniqueness et u
+        set (RecordArrayArrayElem et shape e_u) =
+          RecordArrayArrayElem (setArrayElemUniqueness et u) shape e_u
 
 -- | @t \`setAliases\` als@ returns @t@, but with @als@ substituted for
 -- any already present aliasing.
@@ -542,6 +563,8 @@ typeVars t =
     Array (ArrayRecordElem fields) _ _ ->
       foldMap (typeVars . fst . recordArrayElemToType) fields
     Array ArrayEnumElem{} _ _ -> mempty
+    Array (ArraySumElem cs) _ _ ->
+      foldMap (foldMap (typeVars . fst . recordArrayElemToType)) cs
     Enum{} -> mempty
     Sum cs -> foldMap (foldMap typeVars) cs
   where typeVarFree = S.singleton . typeLeaf
@@ -619,7 +642,7 @@ concreteType (Array at _ _) = concreteArrayType at
         concreteArrayType ArrayPolyElem{}      = False
         concreteArrayType (ArrayRecordElem ts) = all concreteRecordArrayElem ts
         concreteArrayType ArrayEnumElem{}      = True
-        concreteArrayType (ArraySumElem cs)    = (all . all) concreteArrayType cs
+        concreteArrayType (ArraySumElem cs)    = (all . all) concreteRecordArrayElem cs
 
         concreteRecordArrayElem (RecordArrayElem et) = concreteArrayType et
         concreteRecordArrayElem (RecordArrayArrayElem et _ _) = concreteArrayType et

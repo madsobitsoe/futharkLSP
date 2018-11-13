@@ -448,16 +448,16 @@ TypeExpAtom :: { UncheckedTypeExp }
              | '{' '}'                        { TERecord [] (srcspan $1 $>) }
              | '{' FieldTypes1 '}'            { TERecord $2 (srcspan $1 $>) }
              | QualName                       { TEVar (fst $1) (snd $1) }
-             | SumType                       { TESum (fst $1) (snd $1) }
+             | SumType                        { TESum (fst $1) (snd $1) }
 
 SumType :: { ([(Name, [UncheckedTypeExp])], SrcLoc) }
 SumType : SumTypeClauses { $1 }
 
 SumTypeClauses :: { ([(Name, [UncheckedTypeExp])], SrcLoc) }
                : SumTypeClause                { let (n, t, loc) = $1 in ([(n, t)], loc) }
-               | SumTypeClauses SumTypeClause { let (cs, loc1)   = $1;
-                                                    (n, t, loc2) = $2
-                                                in (cs ++ [(n, t)], srcspan loc1 loc2) }
+               | SumTypeClauses '|' SumTypeClause { let (cs, loc1)   = $1;
+                                                        (n, t, loc2) = $3
+                                                    in (cs ++ [(n, t)], srcspan loc1 loc2) }
 
 VConstr :: { (Name, SrcLoc) }
         : '#' id  { let L _ (ID c) = $2 in  (c, srclocOf $1) }
@@ -792,6 +792,7 @@ CaseLiteral :: { (UncheckedExp, SrcLoc) }
              | floatlit       { let L loc (FLOATLIT x) = $1 in (FloatLit x NoInfo loc, loc) }
              | stringlit      { let L loc (STRINGLIT s) = $1 in
                               (ArrayLit (map (flip Literal loc . SignedValue . Int32Value . fromIntegral . ord) s) NoInfo loc, loc) }
+             | VConstr        { (VConstr0 (fst $1) NoInfo (snd $1), snd $1) }
 
 LoopForm :: { LoopFormBase NoInfo Name }
 LoopForm : for VarId '<' Exp

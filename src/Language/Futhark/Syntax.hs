@@ -315,7 +315,7 @@ data ArrayElemTypeBase dim as =
   | ArrayPolyElem TypeName [TypeArg dim as] as
   | ArrayRecordElem (M.Map Name (RecordArrayElemTypeBase dim as))
   | ArrayEnumElem [Name] as
-  | ArraySumElem (M.Map Name [ArrayElemTypeBase dim as]) -- TODO: Is this right?
+  | ArraySumElem (M.Map Name [RecordArrayElemTypeBase dim as]) -- TODO:  Is this right?
   deriving (Eq, Show)
 
 instance Bitraversable ArrayElemTypeBase where

@@ -95,6 +95,10 @@ unifyArrayElemTypes uf (ArrayRecordElem et1) (ArrayRecordElem et2)
 unifyArrayElemTypes _ (ArrayEnumElem cs1 als1) (ArrayEnumElem cs2 als2)
   | cs1 == cs2 =
      Just $ ArrayEnumElem cs1 (als1 <> als2)
+unifyArrayElemTypes uf (ArraySumElem cs1) (ArraySumElem cs2)
+  | sort (M.keys cs1) == sort (M.keys cs2) =
+    ArraySumElem <$>
+    traverse (uncurry (zipWithM (unifyRecordArrayElemTypes uf))) (M.intersectionWith (,) cs1 cs2)
 unifyArrayElemTypes _ _ _ =
   Nothing
 
@@ -461,6 +465,9 @@ substTypesAny lookupSubst ot = case ot of
           let ts' = fmap recordArrayElemToType ts
           in (Record $ fmap (substTypesAny lookupSubst . fst) ts', foldMap snd ts')
         subsArrayElem (ArrayEnumElem cs as) = (Enum cs, as)
+        subsArrayElem (ArraySumElem cs) =
+          let cs' = (fmap . fmap) recordArrayElemToType cs
+          in (Sum $ (fmap . fmap) (substTypesAny lookupSubst . fst) cs', foldMap (foldMap snd) cs')
 
         subsTypeArg (TypeArgType t loc) =
           TypeArgType (substTypesAny lookupSubst t) loc

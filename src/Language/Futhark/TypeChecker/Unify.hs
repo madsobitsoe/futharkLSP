@@ -250,6 +250,8 @@ removeUniqueness (Record ets) =
   Record $ fmap removeUniqueness ets
 removeUniqueness (Arrow als p t1 t2) =
   Arrow als p (removeUniqueness t1) (removeUniqueness t2)
+removeUniqueness (Sum cs) =
+  Sum $ (fmap . fmap) removeUniqueness cs
 removeUniqueness t = t `setUniqueness` Nonunique
 
 mustBeOneOf :: MonadUnify m => [PrimType] -> SrcLoc -> TypeBase () () -> m ()

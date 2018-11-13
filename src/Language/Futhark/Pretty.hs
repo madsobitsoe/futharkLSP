@@ -124,6 +124,9 @@ instance Pretty (ShapeDecl dim) => Pretty (ArrayElemTypeBase dim as) where
     where ppField (name, t) = text (nameToString name) <> colon <+> ppr t
   ppr (ArrayEnumElem cs _) =
     cat $ punctuate (text " | ") $ map ((text "#" <>) . ppr) cs
+  ppr (ArraySumElem cs) =
+    cat $ punctuate (text " | ") $ map ppConstr $ M.toList cs
+    where ppConstr (name, fs) = text "#" <> ppr name <+> sep (map ppr fs)
 
 instance Pretty (ShapeDecl dim) => Pretty (TypeBase dim as) where
   ppr = pprPrec 0

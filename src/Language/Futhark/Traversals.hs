@@ -257,6 +257,8 @@ traverseArrayElemType f g h (ArrayRecordElem fs) =
   ArrayRecordElem <$> traverse (traverseRecordArrayElemType f g h) fs
 traverseArrayElemType _ _ h (ArrayEnumElem cs as) =
   ArrayEnumElem cs <$> h as
+traverseArrayElemType f g h (ArraySumElem cs) =
+  ArraySumElem <$> (traverse . traverse) (traverseRecordArrayElemType f g h) cs
 
 traverseRecordArrayElemType :: Applicative f =>
                                TypeTraverser f RecordArrayElemTypeBase dim1 als1 dim2 als2
