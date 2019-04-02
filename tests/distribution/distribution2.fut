@@ -8,17 +8,14 @@
 -- }
 
 
-let take(n: i32, a: []f64): []f64 = let (first, _) = unsafe split (n) a in first
-
-let fftmp(num_paths: i32, md_c: [][]f64) (zi: []f64): []f64 =
+let fftmp (num_paths: i32) (md_c: [][]f64) (zi: []f64): [num_paths]f64 =
     map (\(j: i32): f64  ->
-            let x = map2 (*) (take(j+1,zi)) (take(j+1,unsafe md_c[j]))
+            let x = map2 (*) (take (j+1) zi) (take (j+1) (unsafe md_c[j]))
             in  reduce (+) (0.0) x
-         ) (iota(num_paths)
-       )
+         ) (iota num_paths)
 
-let correlateDeltas(num_paths: i32, md_c: [][]f64, zds: [][]f64): [][]f64 =
-    map (fftmp(num_paths, md_c)) zds
+let correlateDeltas [n] (num_paths: i32) (md_c: [][]f64) (zds: [n][]f64): [n][num_paths]f64 =
+    map (fftmp num_paths md_c) zds
 
 let combineVs(n_row: []f64, vol_row: []f64, dr_row: []f64): []f64 =
     map2 (+) dr_row (map2 (*) n_row vol_row)
@@ -33,13 +30,13 @@ let mkPrices [num_und][num_dates]
               md_starts) (e_rows )
 
 --[num_dates, num_paths]
-let main(num_paths: i32,
-                    md_c: [][]f64,
-                    md_vols: [][]f64,
-                    md_drifts: [][]f64,
-                    md_starts: []f64,
-                    bb_mat: [][][]f64): [][][]f64 =
-  map  (\(bb_row: [][]f64): [][]f64  ->
-         let noises = correlateDeltas(num_paths, md_c, bb_row)
-         in  mkPrices(md_starts, md_vols, md_drifts, noises)) (
-       bb_mat)
+let main(num_paths: i32)
+        (md_c: [][]f64)
+        (md_vols: [][]f64)
+        (md_drifts: [][]f64)
+        (md_starts: []f64)
+        (bb_mat: [][][]f64): [][][]f64 =
+  map (\(bb_row: [][]f64): [][]f64  ->
+         let noises = correlateDeltas num_paths md_c bb_row
+         in  mkPrices(md_starts, md_vols, md_drifts, noises))
+       bb_mat

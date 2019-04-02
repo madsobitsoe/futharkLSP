@@ -210,6 +210,8 @@ data DimDecl vn = NamedDim (QualName vn)
                 deriving Show
 deriving instance Eq (DimDecl Name)
 deriving instance Eq (DimDecl VName)
+deriving instance Ord (DimDecl Name)
+deriving instance Ord (DimDecl VName)
 
 instance Functor DimDecl where
   fmap = fmapDefault
@@ -413,6 +415,8 @@ data TypeExp vn = TEVar (QualName vn) SrcLoc
                  deriving (Show)
 deriving instance Eq (TypeExp Name)
 deriving instance Eq (TypeExp VName)
+deriving instance Ord (TypeExp Name)
+deriving instance Ord (TypeExp VName)
 
 instance Located (TypeExp vn) where
   locOf (TEArray _ _ loc)   = locOf loc
@@ -429,6 +433,8 @@ data TypeArgExp vn = TypeArgExpDim (DimDecl vn) SrcLoc
                 deriving (Show)
 deriving instance Eq (TypeArgExp Name)
 deriving instance Eq (TypeArgExp VName)
+deriving instance Ord (TypeArgExp Name)
+deriving instance Ord (TypeArgExp VName)
 
 instance Located (TypeArgExp vn) where
   locOf (TypeArgExpDim _ loc) = locOf loc
@@ -442,6 +448,8 @@ data TypeDeclBase f vn =
                              -- ^ The type deduced by the type checker.
            }
 deriving instance Showable f vn => Show (TypeDeclBase f vn)
+deriving instance Eq (TypeDeclBase NoInfo VName)
+deriving instance Ord (TypeDeclBase NoInfo VName)
 
 instance Located (TypeDeclBase f vn) where
   locOf = locOf . declaredType
@@ -545,6 +553,8 @@ data DimIndexBase f vn = DimFix (ExpBase f vn)
                                   (Maybe (ExpBase f vn))
                                   (Maybe (ExpBase f vn))
 deriving instance Showable f vn => Show (DimIndexBase f vn)
+deriving instance Eq (DimIndexBase NoInfo VName)
+deriving instance Ord (DimIndexBase NoInfo VName)
 
 -- | A name qualified with a breadcrumb of module accesses.
 data QualName vn = QualName { qualQuals :: ![vn]
@@ -682,8 +692,9 @@ data ExpBase f vn =
 
             | Match (ExpBase f vn) [CaseBase f vn] (f PatternType) SrcLoc
             -- ^ A match expression.
-
 deriving instance Showable f vn => Show (ExpBase f vn)
+deriving instance Eq (ExpBase NoInfo VName)
+deriving instance Ord (ExpBase NoInfo VName)
 
 instance Located (ExpBase f vn) where
   locOf (Literal _ loc)                = locOf loc
@@ -723,8 +734,9 @@ instance Located (ExpBase f vn) where
 -- | An entry in a record literal.
 data FieldBase f vn = RecordFieldExplicit Name (ExpBase f vn) SrcLoc
                     | RecordFieldImplicit vn (f PatternType) SrcLoc
-
 deriving instance Showable f vn => Show (FieldBase f vn)
+deriving instance Eq (FieldBase NoInfo VName)
+deriving instance Ord (FieldBase NoInfo VName)
 
 instance Located (FieldBase f vn) where
   locOf (RecordFieldExplicit _ _ loc) = locOf loc
@@ -732,8 +744,9 @@ instance Located (FieldBase f vn) where
 
 -- | A case in a match expression.
 data CaseBase f vn = CasePat (PatternBase f vn) (ExpBase f vn) SrcLoc
-
 deriving instance Showable f vn => Show (CaseBase f vn)
+deriving instance Eq (CaseBase NoInfo VName)
+deriving instance Ord (CaseBase NoInfo VName)
 
 instance Located (CaseBase f vn) where
   locOf (CasePat _ _ loc) = locOf loc
@@ -743,6 +756,8 @@ data LoopFormBase f vn = For (IdentBase f vn) (ExpBase f vn)
                        | ForIn (PatternBase f vn) (ExpBase f vn)
                        | While (ExpBase f vn)
 deriving instance Showable f vn => Show (LoopFormBase f vn)
+deriving instance Eq (LoopFormBase NoInfo VName)
+deriving instance Ord (LoopFormBase NoInfo VName)
 
 -- | A pattern as used most places where variables are bound (function
 -- parameters, @let@ expressions, etc).
@@ -755,6 +770,8 @@ data PatternBase f vn = TuplePattern [PatternBase f vn] SrcLoc
                       | PatternLit (ExpBase f vn) (f PatternType) SrcLoc
                       | PatternConstr Name (f PatternType) [PatternBase f vn] SrcLoc
 deriving instance Showable f vn => Show (PatternBase f vn)
+deriving instance Eq (PatternBase NoInfo VName)
+deriving instance Ord (PatternBase NoInfo VName)
 
 instance Located (PatternBase f vn) where
   locOf (TuplePattern _ loc)        = locOf loc
@@ -818,7 +835,7 @@ data TypeParamBase vn = TypeParamDim vn SrcLoc
                         -- ^ A type parameter that must be a size.
                       | TypeParamType Liftedness vn SrcLoc
                         -- ^ A type parameter that must be a type.
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 instance Functor TypeParamBase where
   fmap = fmapDefault

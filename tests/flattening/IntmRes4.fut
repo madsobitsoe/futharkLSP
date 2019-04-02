@@ -33,5 +33,5 @@ let main (xssss: [][][][]i32) (cs: []i32) (y: i32): [][][][]i32 =
                 map (\(xs: []i32, ys: []i32): []i32  ->
                       addRows(xs,ys)
                    ) (zip  xss yss)
-            ) xsss
+            ) (xsss : [][2][c]i32)
       ) (zip  xssss cs)

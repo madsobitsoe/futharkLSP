@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Language.Futhark.TypeChecker.Unify
   ( Constraint(..)
   , Usage
@@ -8,6 +9,7 @@ module Language.Futhark.TypeChecker.Unify
   , Constraints
   , lookupSubst
   , MonadUnify(..)
+  , Rigidity(..)
   , BreadCrumb(..)
   , typeError
   , mkTypeVarName
@@ -18,14 +20,20 @@ module Language.Futhark.TypeChecker.Unify
   , mustBeOneOf
   , equalityType
   , normaliseType
+  , instantiateMissingDims
+  , instantiateEmptyArrayDims
 
   , unify
+  , unifyMostCommon
+  , anyDimOnMismatch
   , doUnification
   )
 where
-
+import Debug.Trace
 import Control.Monad.Except
 import Control.Monad.State
+import Control.Monad.Writer
+import Data.Bitraversable
 import Data.List
 import Data.Loc
 import Data.Maybe
@@ -61,27 +69,40 @@ instance Located Usage where
 
 data Constraint = NoConstraint (Maybe Liftedness) Usage
                 | ParamType Liftedness SrcLoc
-                | Constraint (TypeBase () ()) Usage
+                | Constraint StructType Usage
                 | Overloaded [PrimType] Usage
-                | HasFields (M.Map Name (TypeBase () ())) Usage
+                | HasFields (M.Map Name StructType) Usage
                 | Equality Usage
-                | HasConstrs (M.Map Name [TypeBase () ()]) Usage
+                | HasConstrs (M.Map Name [StructType]) Usage
+                | Size (Maybe (DimDecl VName)) Usage
+                  -- ^ Is not actually a type, but a term-level size,
+                  -- possibly already set to something specific.
+                | RigidSize SrcLoc
+                  -- ^ A size that does not unify with anything -
+                  -- created from the result of applying a function
+                  -- whose return size is existential.
                 deriving Show
 
 instance Located Constraint where
   locOf (NoConstraint _ usage) = locOf usage
-  locOf (ParamType _ loc) = locOf loc
+  locOf (ParamType _ usage) = locOf usage
   locOf (Constraint _ usage) = locOf usage
   locOf (Overloaded _ usage) = locOf usage
   locOf (HasFields _ usage) = locOf usage
   locOf (Equality usage) = locOf usage
   locOf (HasConstrs _ usage) = locOf usage
+  locOf (Size _ usage) = locOf usage
+  locOf (RigidSize usage) = locOf usage
 
-lookupSubst :: VName -> Constraints -> Maybe (Subst (TypeBase () ()))
+lookupSubst :: VName -> Constraints -> Maybe (Subst StructType)
 lookupSubst v constraints = case M.lookup v constraints of
                               Just (Constraint t _) -> Just $ Subst t
                               Just Overloaded{} -> Just PrimSubst
+                              Just (Size (Just v2) _) -> Just $ SizeSubst v2
                               _ -> Nothing
+
+-- | The ridigity of a type- or dimension variable.
+data Rigidity = Rigid | Nonrigid
 
 class (MonadBreadCrumbs m, MonadError TypeError m) => MonadUnify m where
   getConstraints :: m Constraints
@@ -92,21 +113,73 @@ class (MonadBreadCrumbs m, MonadError TypeError m) => MonadUnify m where
     putConstraints $ f x
 
   newTypeVar :: Monoid als => SrcLoc -> String -> m (TypeBase dim als)
+  newDimVar :: SrcLoc -> Rigidity -> String -> m VName
 
 normaliseType :: (Substitutable a, MonadUnify m) => a -> m a
 normaliseType t = do constraints <- getConstraints
                      return $ applySubst (`lookupSubst` constraints) t
 
+data Position = Positive | Negative
+
+traverseDims :: forall m als1 . Monad m =>
+                (Position -> DimDecl VName -> m (DimDecl VName))
+             -> TypeBase (DimDecl VName) als1
+             -> m (TypeBase (DimDecl VName) als1)
+traverseDims onDim (Arrow als p t1 t2) =
+  Arrow als p <$> onParam t1 <*> traverseDims onDim t2
+  where onParam :: forall als2 .
+                   TypeBase (DimDecl VName) als2
+                -> m (TypeBase (DimDecl VName) als2)
+        onParam t@Arrow{} = bitraverse (onDim Negative) pure t
+        onParam t@Array{} = bitraverse (onDim Positive) pure t
+        onParam (Record fs) = Record <$> traverse onParam fs
+        onParam (TypeVar as u tn targs) = TypeVar as u tn <$> mapM onTypeArg targs
+        onParam (SumT cs) = SumT <$> traverse (mapM onParam) cs
+        onParam (Prim t) = return $ Prim t
+        onTypeArg (TypeArgDim d loc) =
+          TypeArgDim <$> onDim Positive d <*> pure loc
+        onTypeArg (TypeArgType t loc) =
+          TypeArgType <$> onParam t <*> pure loc
+traverseDims onDim (Record fs) = Record <$> traverse (traverseDims onDim) fs
+traverseDims onDim t = bitraverse (onDim Negative) pure t
+
+-- | Synthesize nonrigid dimension names for 'AnyDim'
+-- dimensions in positive position in the given type.
+instantiateMissingDims :: MonadUnify m =>
+                          SrcLoc
+                       -> TypeBase (DimDecl VName) als
+                       -> m (TypeBase (DimDecl VName) als, [VName])
+instantiateMissingDims loc = runWriterT . traverseDims onDim
+  where onDim Positive AnyDim = do
+          dim <- lift $ newDimVar loc Nonrigid "dim"
+          tell [dim]
+          return $ NamedDim $ qualName dim
+        onDim _ d = return d
+
+instantiateEmptyArrayDims :: MonadUnify f =>
+                             SrcLoc -> Rigidity -> TypeBase (DimDecl VName) als
+                          -> f (TypeBase (DimDecl VName) als, [VName])
+instantiateEmptyArrayDims loc r = runWriterT . instantiate
+  where instantiate t@Array{} = bitraverse onDim pure t
+        instantiate (Record fs) = Record <$> traverse instantiate fs
+        instantiate t = return t
+
+        onDim AnyDim = do v <- lift $ newDimVar loc r "impl_dim"
+                          tell [v]
+                          return $ NamedDim $ qualName v
+        onDim d = pure d
+
 -- | Is the given type variable actually the name of an abstract type
 -- or type parameter, which we cannot substitute?
 isRigid :: VName -> Constraints -> Bool
 isRigid v constraints = case M.lookup v constraints of
-                             Nothing -> True
-                             Just ParamType{} -> True
-                             _ -> False
+                          Nothing -> True
+                          Just ParamType{} -> True
+                          Just RigidSize{} -> True
+                          _ -> False
 
 -- | Unifies two types.
-unify :: MonadUnify m => Usage -> TypeBase () () -> TypeBase () () -> m ()
+unify :: MonadUnify m => Usage -> StructType -> StructType -> m ()
 unify usage orig_t1 orig_t2 = do
   orig_t1' <- normaliseType orig_t1
   orig_t2' <- normaliseType orig_t2
@@ -120,8 +193,19 @@ unify usage orig_t1 orig_t2 = do
           t2' = applySubst (`lookupSubst` constraints) t2
 
           failure =
-            typeError (srclocOf usage) $ "Couldn't match expected type `" ++
+            typeError usage $ "Couldn't match expected type `" ++
             pretty t1' ++ "' with actual type `" ++ pretty t2' ++ "'."
+
+          unifyDims' d1 d2 | isJust $ unifyDims d1 d2 = return ()
+          unifyDims' (NamedDim (QualName _ d1)) d2
+            | not $ isRigid' d1 =
+                linkVarToDim usage d1 d2
+          unifyDims' d1 (NamedDim (QualName _ d2))
+            | not $ isRigid' d2 =
+                linkVarToDim usage d2 d1
+          unifyDims' d1 d2 =
+            typeError usage $ "Dimensions " ++ quote (pretty d1) ++
+            " and " ++ quote (pretty d2) ++ " do not match."
 
       case (t1', t2') of
         _ | t1' == t2' -> return ()
@@ -152,14 +236,34 @@ unify usage orig_t1 orig_t2 = do
           | not $ isRigid' v2 ->
               linkVarToType usage v2 t1'
 
-        (Arrow _ _ a1 b1,
-         Arrow _ _ a2 b2) -> do
+        (Arrow _ p1 a1 b1,
+         Arrow _ p2 a2 b2) -> do
           subunify a1 a2
-          subunify b1 b2
+          subunify b1' b2'
+          where (b1', b2') =
+                  -- Replace one parameter name with the other in the
+                  -- return type, in case of dependent types.  I.e.,
+                  -- we want type '(n: i32) -> [n]i32' to unify with
+                  -- type '(x: i32) -> [x]i32'.
+                  --
+                  -- In case only one of the functions has a named
+                  -- parameter, we weaken that type by removing all
+                  -- references to the parameter.  XXX: is this
+                  -- sensible?
+                  case (p1, p2) of
+                    (Just p1', Just p2') ->
+                      let f v | v == p2' = Just $ SizeSubst $ NamedDim $ qualName p1'
+                              | otherwise = Nothing
+                      in (b1, applySubst f b2)
+                    _ ->
+                      (b1, b2)
 
         (Array{}, Array{})
-          | Just t1'' <- peelArray 1 t1',
-            Just t2'' <- peelArray 1 t2' ->
+          | ShapeDecl (t1_d : _) <- arrayShape t1',
+            ShapeDecl (t2_d : _) <- arrayShape t2',
+            Just t1'' <- peelArray 1 t1',
+            Just t2'' <- peelArray 1 t2' -> do
+              unifyDims' t1_d t2_d
               subunify t1'' t2''
 
         (SumT cs,
@@ -177,7 +281,7 @@ unify usage orig_t1 orig_t2 = do
             unifyTypeArg _ _ = typeError usage
               "Cannot unify a type argument with a dimension argument (or vice versa)."
 
-applySubstInConstraint :: VName -> Subst (TypeBase () ()) -> Constraint -> Constraint
+applySubstInConstraint :: VName -> Subst StructType -> Constraint -> Constraint
 applySubstInConstraint vn subst (Constraint t loc) =
   Constraint (applySubst (flip M.lookup $ M.singleton vn subst) t) loc
 applySubstInConstraint vn subst (HasFields fs loc) =
@@ -188,8 +292,12 @@ applySubstInConstraint _ _ (Equality loc) = Equality loc
 applySubstInConstraint _ _ (ParamType l loc) = ParamType l loc
 applySubstInConstraint vn subst (HasConstrs cs loc) =
   HasConstrs (M.map (map (applySubst (flip M.lookup $ M.singleton vn subst))) cs) loc
+applySubstInConstraint vn (SizeSubst v') (Size (Just (NamedDim v)) loc)
+  | vn == qualLeaf v = Size (Just v') loc
+applySubstInConstraint _ _ (Size v loc) = Size v loc
+applySubstInConstraint _ _ (RigidSize loc) = RigidSize loc
 
-linkVarToType :: MonadUnify m => Usage -> VName -> TypeBase () () -> m ()
+linkVarToType :: MonadUnify m => Usage -> VName -> StructType -> m ()
 linkVarToType usage vn tp = do
   constraints <- getConstraints
   if vn `S.member` typeVars tp
@@ -248,6 +356,11 @@ linkVarToType usage vn tp = do
               _ -> return ()
   where tp' = removeUniqueness tp
 
+linkVarToDim :: MonadUnify m => Usage -> VName -> DimDecl VName -> m ()
+linkVarToDim usage vn1 dim = do
+  modifyConstraints $ M.insert vn1 $ Size (Just dim) usage
+  modifyConstraints $ M.map $ applySubstInConstraint vn1 $ SizeSubst dim
+
 removeUniqueness :: TypeBase dim as -> TypeBase dim as
 removeUniqueness (Record ets) =
   Record $ fmap removeUniqueness ets
@@ -257,22 +370,22 @@ removeUniqueness (SumT cs) =
   SumT $ (fmap . fmap) removeUniqueness cs
 removeUniqueness t = t `setUniqueness` Nonunique
 
-mustBeOneOf :: MonadUnify m => [PrimType] -> Usage -> TypeBase () () -> m ()
-mustBeOneOf [req_t] loc t = unify loc (Prim req_t) t
-mustBeOneOf ts loc t = do
+mustBeOneOf :: MonadUnify m => [PrimType] -> Usage -> StructType -> m ()
+mustBeOneOf [req_t] usage t = unify usage (Prim req_t) t
+mustBeOneOf ts usage t = do
   constraints <- getConstraints
   let t' = applySubst (`lookupSubst` constraints) t
       isRigid' v = isRigid v constraints
 
   case t' of
     TypeVar _ _ (TypeName [] v) []
-      | not $ isRigid' v -> linkVarToTypes loc v ts
+      | not $ isRigid' v -> linkVarToTypes usage v ts
 
     Prim pt | pt `elem` ts -> return ()
 
     _ -> failure
 
-  where failure = typeError loc $ "Cannot unify type \"" ++ pretty t ++
+  where failure = typeError usage $ "Cannot unify type \"" ++ pretty t ++
                   "\" with any of " ++ intercalate "," (map pretty ts) ++ "."
 
 linkVarToTypes :: MonadUnify m => Usage -> VName -> [PrimType] -> m ()
@@ -342,14 +455,13 @@ zeroOrderType usage desc t = do
 -- In @mustHaveConstr usage c t fs@, the type @t@ must have a
 -- constructor named @c@ that takes arguments of types @ts@.
 mustHaveConstr :: MonadUnify m =>
-                  Usage -> Name -> TypeBase dim as -> [TypeBase () ()] -> m ()
+                  Usage -> Name -> StructType -> [StructType] -> m ()
 mustHaveConstr usage c t fs = do
-  let struct_f = toStructural <$> fs
   constraints <- getConstraints
   case t of
     TypeVar _ _ (TypeName _ tn) []
       | Just NoConstraint{} <- M.lookup tn constraints ->
-          modifyConstraints $ M.insert tn $ HasConstrs (M.singleton c struct_f) usage
+          modifyConstraints $ M.insert tn $ HasConstrs (M.singleton c fs) usage
       | Just (HasConstrs cs _) <- M.lookup tn constraints ->
         case M.lookup c cs of
           Nothing  -> modifyConstraints $ M.insert tn $ HasConstrs (M.insert c fs cs) usage
@@ -362,19 +474,19 @@ mustHaveConstr usage c t fs = do
       case M.lookup c cs of
         Nothing -> typeError usage $ "Constuctor " ++ quote (pretty c) ++ " not present in type."
         Just fs'
-            | length fs == length fs' -> zipWithM_ (unify usage) fs (toStructural <$> fs')
+            | length fs == length fs' -> zipWithM_ (unify usage) fs fs'
             | otherwise -> typeError usage $ "Different arity for constructor " ++
                            quote (pretty c) ++ "."
 
-    _ -> do unify usage (toStructural t) $ SumT $ M.singleton c fs
+    _ -> do unify usage t $ SumT $ M.singleton c fs
             return ()
 
-mustHaveField :: (MonadUnify m, Monoid as) =>
-                 Usage -> Name -> TypeBase dim as -> m (TypeBase dim as)
+mustHaveField :: MonadUnify m =>
+                 Usage -> Name -> PatternType -> m PatternType
 mustHaveField usage l t = do
   constraints <- getConstraints
   l_type <- newTypeVar (srclocOf usage) "t"
-  let l_type' = toStructural l_type
+  let l_type' = toStruct l_type
   case t of
     TypeVar _ _ (TypeName _ tn) []
       | Just NoConstraint{} <- M.lookup tn constraints -> do
@@ -388,14 +500,78 @@ mustHaveField usage l t = do
           return l_type
     Record fields
       | Just t' <- M.lookup l fields -> do
-          unify usage l_type' (toStructural t')
+          unify usage l_type' $ toStruct t'
           return t'
       | otherwise ->
           typeError usage $
-          "Attempt to access field " ++ quote (pretty l) ++ "` of value of type " ++
-          quote (pretty (toStructural t)) ++ "."
-    _ -> do unify usage (toStructural t) $ Record $ M.singleton l l_type'
+          "Attempt to access field '" ++ pretty l ++ "' of value of type " ++
+          pretty (toStructural t) ++ "."
+    _ -> do unify usage (toStruct t) $ Record $ M.singleton l l_type'
             return l_type
+
+matchDims :: (Monoid as, Monad m) =>
+             (d -> d -> m d)
+          -> TypeBase d as -> TypeBase d as
+          -> m (TypeBase d as)
+matchDims onDims t1 t2 =
+  case (t1, t2) of
+    (Array als1 u1 et1 shape1, Array als2 u2 et2 shape2) ->
+      Array (als1<>als2) (min u1 u2) <$>
+      matchArrayElems et1 et2 <*> onShapes shape1 shape2
+    (Record f1, Record f2) ->
+      Record <$> traverse (uncurry (matchDims onDims)) (M.intersectionWith (,) f1 f2)
+    (TypeVar als1 u v targs1, TypeVar als2 _ _ targs2) ->
+      TypeVar (als1 <> als2) u v <$> zipWithM matchTypeArg targs1 targs2
+    _ -> return t1
+
+  where matchArrayElems (ArrayPrimElem pt1) (ArrayPrimElem _) =
+          return $ ArrayPrimElem pt1
+        matchArrayElems (ArrayPolyElem v targs1) (ArrayPolyElem _ _targs2) =
+          return $ ArrayPolyElem v targs1
+        matchArrayElems (ArrayRecordElem fields1) (ArrayRecordElem fields2) =
+          ArrayRecordElem <$> traverse (uncurry matchRecordArray)
+          (M.intersectionWith (,) fields1 fields2)
+        matchArrayElems x _ = return x
+
+        matchRecordArray (RecordArrayElem at1) (RecordArrayElem at2) =
+          RecordArrayElem <$> matchArrayElems at1 at2
+        matchRecordArray (RecordArrayArrayElem at1 shape1) (RecordArrayArrayElem at2 shape2) =
+          RecordArrayArrayElem <$> matchArrayElems at1 at2 <*> onShapes shape1 shape2
+        matchRecordArray x _ =
+          return x
+
+        matchTypeArg ta@TypeArgType{} _ = return ta
+        matchTypeArg a _ = return a
+
+        onShapes shape1 shape2 =
+          ShapeDecl <$> zipWithM onDims (shapeDims shape1) (shapeDims shape2)
+
+-- | Replace dimension mismatches with AnyDim.  Where one of the types
+-- contains an AnyDim dimension, the corresponding dimension in the
+-- other type is used.
+anyDimOnMismatch :: Monoid as =>
+                    TypeBase (DimDecl VName) as -> TypeBase (DimDecl VName) as
+                 -> (TypeBase (DimDecl VName) as, [(DimDecl VName, DimDecl VName)])
+anyDimOnMismatch t1 t2 = runWriter $ matchDims onDims t1 t2
+  where onDims AnyDim d2 = return d2
+        onDims d1 AnyDim = return d1
+        onDims d1 d2
+          | d1 == d2 = return d1
+          | otherwise = do tell [(d1, d2)]
+                           return AnyDim
+
+-- | Like unification, but creates new size variables where mismatches
+-- occur.  Returns the new dimensions thus created.
+unifyMostCommon :: MonadUnify m =>
+                   Usage -> PatternType -> PatternType -> m (PatternType, [VName])
+unifyMostCommon usage t1 t2 = do
+  -- We are ignoring the dimensions here, because any mismatches
+  -- should be turned into fresh size variables.
+  unify usage (toStruct (anyDimShapeAnnotations t1))
+              (toStruct (anyDimShapeAnnotations t2))
+  t1' <- normaliseType t1
+  t2' <- normaliseType t2
+  instantiateEmptyArrayDims (srclocOf usage) Rigid $ fst $ anyDimOnMismatch t1' t2'
 
 -- Simple MonadUnify implementation.
 
@@ -406,17 +582,27 @@ newtype UnifyM a = UnifyM (StateT UnifyMState (Except TypeError) a)
             MonadState UnifyMState,
             MonadError TypeError)
 
+newVar :: String -> UnifyM VName
+newVar name = do
+  (x, i) <- get
+  put (x, i+1)
+  return $ VName (mkTypeVarName name i) i
+
 instance MonadUnify UnifyM where
   getConstraints = gets fst
   putConstraints x = modify $ \s -> (x, snd s)
 
-  newTypeVar loc desc = do
-    i <- do (x, i) <- get
-            put (x, i+1)
-            return i
-    let v = VName (mkTypeVarName desc i) 0
+  newTypeVar loc name = do
+    v <- newVar name
     modifyConstraints $ M.insert v $ NoConstraint Nothing $ Usage Nothing loc
     return $ TypeVar mempty Nonunique (typeName v) []
+
+  newDimVar loc rigidity name = do
+    dim <- newVar name
+    case rigidity of
+      Rigid -> modifyConstraints $ M.insert dim $ RigidSize loc
+      Nonrigid -> modifyConstraints $ M.insert dim $ Size Nothing $ Usage Nothing loc
+    return dim
 
 -- | Construct a the name of a new type variable given a base
 -- description and a tag number (note that this is distinct from
@@ -429,18 +615,20 @@ mkTypeVarName desc i =
 
 instance MonadBreadCrumbs UnifyM where
 
--- | Perform a unification of two types outside a monadic context.
--- The type parameters are allowed to be instantiated (with
--- 'TypeParamDim ignored); all other types are considered rigid.
-doUnification :: SrcLoc -> [TypeParam]
-              -> TypeBase () () -> TypeBase () ()
-              -> Either TypeError (TypeBase () ())
-doUnification loc tparams t1 t2 = runUnifyM tparams $ do
-  unify (Usage Nothing loc) t1 t2
-  normaliseType t2
-
 runUnifyM :: [TypeParam] -> UnifyM a -> Either TypeError a
 runUnifyM tparams (UnifyM m) = runExcept $ evalStateT m (constraints, 0)
-  where constraints = M.fromList $ mapMaybe f tparams
-        f TypeParamDim{} = Nothing
-        f (TypeParamType l p loc) = Just (p, NoConstraint (Just l) $ Usage Nothing loc)
+  where constraints = M.fromList $ map f tparams
+        f (TypeParamDim p loc) = (p, Size Nothing $ Usage Nothing loc)
+        f (TypeParamType l p loc) = (p, NoConstraint (Just l) $ Usage Nothing loc)
+
+-- | Perform a unification of two types outside a monadic context.
+-- The type parameters are allowed to be instantiated; all other types
+-- are considered rigid.
+doUnification :: SrcLoc -> [TypeParam]
+              -> Rigidity -> StructType -> Rigidity -> StructType
+              -> Either TypeError StructType
+doUnification loc tparams r1 t1 r2 t2 = runUnifyM tparams $ do
+  (t1', _) <- instantiateEmptyArrayDims loc r1 t1
+  (t2', _) <- instantiateEmptyArrayDims loc r2 t2
+  unify (Usage Nothing loc) t1' t2'
+  normaliseType t2

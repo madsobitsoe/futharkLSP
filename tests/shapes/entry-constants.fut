@@ -7,4 +7,4 @@
 let three: i32 = 3
 let two: i32 = 2
 
-let main(a: [three]i32): [two]i32 = iota a[1]
+let main(a: [three]i32): [two]i32 = iota a[1] : [two]i32

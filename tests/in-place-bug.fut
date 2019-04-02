@@ -6,8 +6,8 @@
 let tridagSeq(a:  []f64, b: []f64, c: []f64, y: []f64 ): []f64 =
   concat (concat a b) (concat c y)
 
-let explicitMethod [m] (myD:  [][m]f64,  myDD: [][]f64,
-                        myMu: [][]f64, myVar: [][]f64, result: [][]f64 ): [][]f64 =
+let explicitMethod [n][m][k] (myD:  [][m]f64,  myDD: [][m]f64,
+                              myMu: [n][]f64, myVar: [n][]f64, result: [n][k]f64 ): [n][]f64 =
   copy( map (\(tup:  ([]f64,[]f64,[]f64) ): []f64  ->
                let (mu_row, var_row, result_row) = tup in
                map (\(tup: ([]f64, []f64, f64, f64, i32)): f64  ->

@@ -39,5 +39,5 @@ let main (xssss: [][][][]i32) (cs: []i32): [][][][]i32 =
                              -- the compiler.
                              unsafe addRows(xs,ys)
                           ) xss yss
-                ) xsss
+                ) (xsss : [][2][c]i32)
          ) xssss cs

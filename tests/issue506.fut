@@ -2,7 +2,7 @@
 -- function.  This program does not compute anything interesting.
 -- ==
 
-let map2 'a 'b 'x (f: a -> b -> x) (as: []a) (bs: []b): []x =
+let map2 [n] 'a 'b 'x (f: a -> b -> x) (as: [n]a) (bs: [n]b): []x =
   map (\(a, b) -> f a b) (zip as bs)
 
 let main (n: i32) =

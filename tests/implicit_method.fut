@@ -44,7 +44,7 @@
 -- }
 
 
-let tridagSeq [n] (a:  [n]f32,b: *[]f32,c: []f32,y: *[]f32 ): *[]f32 =
+let tridagSeq [n][m] (a:  [n]f32,b: *[m]f32,c: [m]f32,y: *[m]f32 ): *[m]f32 =
     let (y,b) = loop ((y, b))
       for i < n-1 do
         let i    = i + 1

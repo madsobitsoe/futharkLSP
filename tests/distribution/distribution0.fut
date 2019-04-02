@@ -8,11 +8,9 @@
 --
 -- structure distributed { SegMap 1 DoLoop 2 }
 
-let take(n: i32, a: []f64): []f64 = let (first, rest) = unsafe split (n) a in first
-
 let fftmp(num_paths: i32, md_c: [][]f64) (zi: []f64): []f64 =
     map (\(j: i32): f64  ->
-            let x = map2 (*) (take(j+1,zi)) (take(j+1,unsafe md_c[j]))
+            let x = map2 (*) (take(j+1) zi) (take (j+1) (unsafe md_c[j]))
             in  reduce (+) (0.0) x
          ) (iota(num_paths)
        )
