@@ -355,7 +355,7 @@ matchValueToType env t@(Array _ _ _ (ShapeDecl ds@(d:_))) val@(ValueArray arr) =
       | Just x <- look v ->
           if x == arr_n
           then continue env
-          else emptyOrWrong (Just $ pretty v) $ "`" <> pretty v <> "` (" <> pretty x <> ")"
+          else emptyOrWrong $ "`" <> pretty v <> "` (" <> pretty x <> ")"
       | otherwise ->
           continue $
           valEnv (M.singleton (qualLeaf v)
@@ -365,7 +365,7 @@ matchValueToType env t@(Array _ _ _ (ShapeDecl ds@(d:_))) val@(ValueArray arr) =
     AnyDim -> continue env
     ConstDim x
       | fromIntegral x == arr_n -> continue env
-      | otherwise -> emptyOrWrong Nothing $ pretty x
+      | otherwise -> emptyOrWrong $ pretty x
   where arr_n = arrayLength arr
 
         look v
@@ -378,16 +378,12 @@ matchValueToType env t@(Array _ _ _ (ShapeDecl ds@(d:_))) val@(ValueArray arr) =
           v:_ -> matchValueToType env' (stripArray 1 t) v
 
         -- Empty arrays always match if nothing else does.
-        emptyOrWrong s x
+        emptyOrWrong x
           | any zeroDim ds, emptyShape (valueShape val) =
               Right env
-          | otherwise = wrong s x
+          | otherwise = wrong x
 
-        wrong (Just v) x =
-          Left $ "Size annotation `" <> v <>
-          "` bound to " <> pretty x <>
-          " does not match observed size " <> pretty arr_n <> "."
-        wrong Nothing x =
+        wrong x =
           Left $ "Size annotation " <> x <>
           " does not match observed size " <> pretty arr_n <> "."
 
