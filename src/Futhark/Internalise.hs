@@ -454,7 +454,7 @@ internaliseExp desc e@E.Apply{} = do
   -- Note that polymorphic functions (which are not magical) are not
   -- handled here.
   case () of
-    () | Just internalise <- isOverloadedFunction qfname args loc ->
+    () | Just internalise <- isOverloadedFunction qfname args (E.typeOf e) loc ->
            internalise desc
        | Just (rettype, _) <- M.lookup fname I.builtInFunctions -> do
            let tag ses = [ (se, I.Observe) | se <- ses ]
@@ -708,8 +708,8 @@ internaliseExp desc (E.If ce te fe _ _) =
 
 -- Builtin operators are handled specially because they are
 -- overloaded.
-internaliseExp desc (E.BinOp op _ (xe,_) (ye,_) _ loc)
-  | Just internalise <- isOverloadedFunction op [xe, ye] loc =
+internaliseExp desc (E.BinOp op _ (xe,_) (ye,_) (Info t) loc)
+  | Just internalise <- isOverloadedFunction op [xe, ye] t loc =
       internalise desc
 
 -- User-defined operators are just the same as a function call.
@@ -1221,9 +1221,9 @@ internaliseDimConstant loc fname name =
 
 -- | Some operators and functions are overloaded or otherwise special
 -- - we detect and treat them here.
-isOverloadedFunction :: E.QualName VName -> [E.Exp] -> SrcLoc
+isOverloadedFunction :: E.QualName VName -> [E.Exp] -> PatternType -> SrcLoc
                      -> Maybe (String -> InternaliseM [SubExp])
-isOverloadedFunction qname args loc = do
+isOverloadedFunction qname args ret loc = do
   guard $ baseTag (qualLeaf qname) <= maxIntrinsicTag
   handle args $ baseString $ qualLeaf qname
   where
@@ -1456,6 +1456,13 @@ isOverloadedFunction qname args loc = do
     handle [x] "unzip" = Just $ flip internaliseExp x
     handle [x] "trace" = Just $ flip internaliseExp x
     handle [x] "break" = Just $ flip internaliseExp x
+
+    handle [_] "arbitrary" = Just $ \desc -> do
+      (ts, cm) <- internaliseReturnType $ toStruct ret
+      mapM_ (uncurry (internaliseDimConstant loc)) cm
+      let noExt = const $ fail $ "arbitrary: unexpected existential type: " ++ pretty ret
+      instantiateShapes noExt (map fromDecl ts) >>=
+        mapM (eBlank >=> letSubExp desc)
 
     handle _ _ = Nothing
 

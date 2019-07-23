@@ -1195,6 +1195,9 @@ initialCtx =
       break
       return v
 
+    def "arbitrary" = Just $ fun1 $ \_ ->
+      error "`arbitrary` does not exist in the interpreter."
+
     def s | nameFromString s `M.member` namesToPrimTypes = Nothing
 
     def s = error $ "Missing intrinsic: " ++ s

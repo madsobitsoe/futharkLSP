@@ -42,7 +42,7 @@ import qualified Data.Sequence as Seq
 import           Data.Foldable
 
 import           Futhark.MonadFreshNames
-import           Futhark.Representation.Primitive (intValue, floatValue)
+import           Futhark.Representation.Primitive (intValue)
 import           Language.Futhark
 import           Language.Futhark.Traversals
 import           Language.Futhark.Semantic (TypeBinding(..))
@@ -326,44 +326,28 @@ transformExp (Unsafe e1 loc) =
 transformExp (Assert e1 e2 desc loc) =
   Assert <$> transformExp e1 <*> transformExp e2 <*> pure desc <*> pure loc
 
-transformExp (Constr name es (Info t@(SumT cs)) loc) =
-  case constrIndex name t of
+transformExp (Constr name es (Info (SumT cs)) loc) =
+  case constrIndex name cs of
     Nothing -> error "transFormExp: malformed constructor value."
     Just n  -> TupLit <$> ((index :) <$> clauses) <*> pure noLoc
       where index =  Literal (UnsignedValue (intValue Int8 n)) noLoc
             clauses = mapM clause $ sortConstrs cs
             clause (name', ts)
               | name == name' = TupLit <$> mapM transformExp es <*> pure loc
-              | otherwise     = return $ TupLit (map defaultValue ts) noLoc
+              | otherwise     = return $ TupLit (map defaultPayload ts) noLoc
+
+            defaultPayload t = Apply (Var (qualName (VName (nameFromString "arbitrary") (-1)))
+                                     (Info $ Arrow mempty Nothing (Record mempty) t) loc)
+                               (TupLit [] mempty) (Info Observe) (Info t) loc
 
 transformExp Constr{} = error "transformExp: invalid constructor type."
 
 transformExp (Match e cs t loc) =
   Match <$> transformExp e <*> mapM transformCase cs <*> traverse transformType t <*> pure loc
 
-constrIndex :: Name -> TypeBase dim as -> Maybe Int
-constrIndex name (SumT cs) = fst <$> L.find (\(_, (name', _)) -> name == name') cs'
+constrIndex :: Name -> M.Map Name t -> Maybe Int
+constrIndex name cs = fst <$> L.find (\(_, (name', _)) -> name == name') cs'
   where cs' = zip [0..] $ sortConstrs cs
-constrIndex _ _ = error "constrIndex: invalid type."
-
-defaultValue :: PatternType -> Exp
-defaultValue (Prim Bool) = Literal (BoolValue False) noLoc
-defaultValue (Prim (Unsigned s)) = Literal (UnsignedValue (intValue s (0 :: Int))) noLoc
-defaultValue (Prim (Signed s)) = Literal (SignedValue (intValue s (0 :: Int))) noLoc
-defaultValue (Prim (FloatType s)) = Literal (FloatValue (floatValue s (0 :: Int))) noLoc
-defaultValue (SumT cs) = TupLit (defaultIndex : defaultClauses) noLoc
-  where defaultIndex   =  Literal (UnsignedValue (intValue Int8 (0 :: Int))) noLoc
-        defaultClauses = map defaultClause $ sortConstrs cs
-        defaultClause (_, ts) = TupLit (map defaultValue ts) noLoc
-defaultValue t@Array{} = ArrayLit [] (Info t) noLoc -- TODO: Does the shape need to be preserved?
-defaultValue (Record fs) = RecordLit (map f fs') noLoc
-  where fs' = sortFields fs
-        f (name, t) = RecordFieldExplicit name (defaultValue t) noLoc
-defaultValue TypeVar{} = error "Shouldn't happen."
-defaultValue t@(Arrow as _ t1 t2)   = Lambda [pat] e Nothing t' noLoc
-  where pat = Id (VName (nameFromString "x") 5000) (Info t1) noLoc
-        e   = defaultValue t2
-        t'  = Info (as, toStruct t)
 
 transformCase :: Case -> MonoM Case
 transformCase (CasePat p e loc) = do
@@ -452,8 +436,8 @@ expandRecordPattern (PatternAscription pat td loc) = do
   (pat', rr) <- expandRecordPattern pat
   return (PatternAscription pat' td loc, rr)
 expandRecordPattern (PatternLit e t loc) = return (PatternLit e t loc, mempty)
-expandRecordPattern (PatternConstr name (Info t@(SumT cs)) ps loc) =
-  case constrIndex name t of
+expandRecordPattern (PatternConstr name (Info (SumT cs)) ps loc) =
+  case constrIndex name cs of
     Nothing -> error "Malformed Constr value."
     Just n  -> do
       (ps', rrs) <- unzip <$> mapM expandRecordPattern ps

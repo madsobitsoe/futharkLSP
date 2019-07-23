@@ -791,7 +791,8 @@ intrinsics = M.fromList $ zipWith namify [10..] $
                IntrinsicPolyFun [tp_a, tp_b] [t_b `arr` (t_b `arr` t_b), Prim (Signed Int32) `arr` (arr_a `arr` t_b), arr_a] t_b),
 
               ("trace", IntrinsicPolyFun [tp_a] [t_a] t_a),
-              ("break", IntrinsicPolyFun [tp_a] [t_a] t_a)]
+              ("break", IntrinsicPolyFun [tp_a] [t_a] t_a),
+              ("arbitrary", IntrinsicPolyFun [tp_a] [Record mempty] t_a)]
 
   where tv_a = VName (nameFromString "a") 0
         tv_a' = typeName tv_a
