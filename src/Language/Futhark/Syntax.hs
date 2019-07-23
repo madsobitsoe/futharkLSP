@@ -33,6 +33,7 @@ module Language.Futhark.Syntax
   , ArrayElemTypeBase(..)
   , PatternType
   , StructType
+  , ValueType
   , Diet(..)
   , TypeDeclBase (..)
 
@@ -402,6 +403,9 @@ type PatternType = TypeBase (DimDecl VName) Aliasing
 -- information, used for declarations.
 type StructType = TypeBase (DimDecl VName) ()
 
+-- | A type describing values, which are obviously fully known.
+type ValueType = TypeBase Int32 ()
+
 -- | An unstructured type with type variables and possibly shape
 -- declarations - this is what the user types in the source program.
 data TypeExp vn = TEVar (QualName vn) SrcLoc
@@ -468,7 +472,7 @@ data Diet = RecordDiet (M.Map Name Diet) -- ^ Consumes these fields in the recor
 -- | Simple Futhark values.  Values are fully evaluated and their type
 -- is always unambiguous.
 data Value = PrimValue !PrimValue
-           | ArrayValue !(Array Int Value) (TypeBase () ())
+           | ArrayValue !(Array Int Value) ValueType
              -- ^ It is assumed that the array is 0-indexed.  The type
              -- is the full type.
              deriving (Eq, Show)
@@ -640,13 +644,13 @@ data ExpBase f vn =
               (Maybe (TypeExp vn)) (f (Aliasing, StructType)) SrcLoc
 
             | OpSection (QualName vn) (f PatternType) SrcLoc
-              -- ^ @+@; first two types are operands, third is result.
+              -- ^ @(+)@; type is type of operator.
             | OpSectionLeft (QualName vn) (f PatternType)
               (ExpBase f vn) (f StructType, f StructType) (f PatternType) SrcLoc
-              -- ^ @2+@; first type is operand, second is result.
+              -- ^ @(2+)@; first type is operand, second is result.
             | OpSectionRight (QualName vn) (f PatternType)
               (ExpBase f vn) (f StructType, f StructType) (f PatternType) SrcLoc
-              -- ^ @+2@; first type is operand, second is result.
+              -- ^ @(+2)@; first type is operand, second is result.
             | ProjectSection [Name] (f PatternType) SrcLoc
               -- ^ Field projection as a section: @(.x.y.z)@.
             | IndexSection [DimIndexBase f vn] (f PatternType) SrcLoc

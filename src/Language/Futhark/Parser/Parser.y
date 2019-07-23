@@ -24,6 +24,7 @@ import Control.Monad.Reader
 import Control.Monad.Trans.State
 import Control.Arrow
 import Data.Array
+import Data.List (genericLength)
 import qualified Data.Text as T
 import Codec.Binary.UTF8.String (encode)
 import Data.Char (ord)
@@ -899,8 +900,10 @@ FloatValue :: { Value }
          | '-' FloatLit { PrimValue (FloatValue (floatNegate (fst $2))) }
 
 StringValue :: { Value }
-StringValue : stringlit  { let L pos (STRINGLIT s) = $1 in
-                           ArrayValue (arrayFromList $ map (PrimValue . UnsignedValue . Int8Value . fromIntegral) $ encode s) $ Prim $ Signed Int32 }
+StringValue : stringlit  { let L pos (STRINGLIT s) = $1;
+                               s' = encode s
+                           in ArrayValue (arrayFromList $ map (PrimValue . UnsignedValue . Int8Value . fromIntegral) s') $
+                              Array () Unique (ArrayPrimElem $ Signed Int32) (ShapeDecl [genericLength s']) }
 
 BoolValue :: { Value }
 BoolValue : true           { PrimValue $ BoolValue True }
@@ -935,15 +938,18 @@ FloatLit :: { (FloatValue, SrcLoc) }
 
 ArrayValue :: { Value }
 ArrayValue :  '[' Value ']'
-             {% return $ ArrayValue (arrayFromList [$2]) $ toStruct $ valueType $2
+             {% return $ ArrayValue (arrayFromList [$2]) $
+                fromJust $ arrayOf (valueType $2) (ShapeDecl [1]) Unique
              }
            |  '[' Value ',' Values ']'
              {% case combArrayElements $2 $4 of
                   Left e -> throwError e
-                  Right v -> return $ ArrayValue (arrayFromList $ $2:$4) $ valueType v
+                  Right v -> return $ ArrayValue (arrayFromList $ $2:$4) $
+                             fromJust $ arrayOf (valueType $2) (ShapeDecl [genericLength $4 + 1]) Unique
              }
            | id '(' PrimType ')'
-             {% ($1 `mustBe` "empty") >> return (ArrayValue (listArray (0,-1) []) (Prim $3)) }
+             {% ($1 `mustBe` "empty") >> return (ArrayValue (listArray (0,-1) []) $
+                                         Array () Unique (ArrayPrimElem $3) (ShapeDecl [0])) }
            | id '(' RowType ')'
              {% ($1 `mustBe` "empty") >> return (ArrayValue (listArray (0,-1) []) $3) }
 
@@ -951,9 +957,9 @@ ArrayValue :  '[' Value ']'
            | '[' ']'
              {% emptyArrayError $1 }
 
-RowType :: { TypeBase () () }
-RowType : '[' ']' RowType   { fromJust $ arrayOf $3 (rank 1) Nonunique }
-        | '[' ']' PrimType  { fromJust $ arrayOf (Prim $3) (rank 1) Nonunique }
+RowType :: { ValueType }
+RowType : '[' ']' RowType   { fromJust $ arrayOf $3 (ShapeDecl [0]) Nonunique }
+        | '[' ']' PrimType  { fromJust $ arrayOf (Prim $3) (ShapeDecl [0]) Nonunique }
 
 Values :: { [Value] }
 Values : Value ',' Values { $1 : $3 }

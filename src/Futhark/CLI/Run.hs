@@ -54,12 +54,8 @@ interpret config fp = do
       Left err -> do
         hPutStrLn stderr $ "Error when reading input: " ++ show err
         exitFailure
-      Right vs
-        | Just vs' <- mapM convertValue vs ->
-            return vs'
-        | otherwise -> do
-            hPutStrLn stderr "Error when reading input: irregular array."
-            exitFailure
+      Right vs ->
+        return $ map convertValue vs
 
   (fname, ret) <-
     case M.lookup (T.Term, entry) $ T.envNameMap tenv of
@@ -84,9 +80,9 @@ putValue v t
       putStrLn $ "empty(" ++ pretty (stripArray 1 t) ++ ")"
   | otherwise = putStrLn $ pretty v
 
-convertValue :: Value -> Maybe I.Value
-convertValue (PrimValue p) = Just $ I.ValuePrim p
-convertValue (ArrayValue arr _) = I.mkArray =<< mapM convertValue (elems arr)
+convertValue :: Value -> I.Value
+convertValue (PrimValue p) = I.ValuePrim p
+convertValue (ArrayValue arr _) = I.toArray $ map convertValue $ elems arr
 
 data InterpreterConfig =
   InterpreterConfig { interpreterEntryPoint :: Name

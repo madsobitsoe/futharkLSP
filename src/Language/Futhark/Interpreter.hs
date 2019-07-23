@@ -12,7 +12,7 @@ module Language.Futhark.Interpreter
   , ExtOp(..)
   , typeEnv
   , Value (ValuePrim, ValueArray, ValueRecord)
-  , mkArray
+  , toArray
   , fromTuple
   , isEmptyArray
   ) where
@@ -84,7 +84,7 @@ lookupImport f = asks $ M.lookup f . snd
 data Value = ValuePrim !PrimValue
            | ValueArray !(Array Int Value)
            | ValueRecord (M.Map Name Value)
-           | ValueFun (Value -> EvalM Value)
+           | ValueFun (StructType -> Value -> EvalM Value)
            | ValueSum Name [Value]
 
 instance Eq Value where
@@ -115,14 +115,6 @@ instance Pretty Value where
   ppr (ValueRecord m) = prettyRecord m
   ppr ValueFun{} = text "#<fun>"
   ppr (ValueSum n vs) = text "#" <> ppr n <+> sep (map ppr vs)
-
--- | Create an array value; failing if that would result in an
--- irregular array.
-mkArray :: [Value] -> Maybe Value
-mkArray vs =
-  case vs of [] -> Just $ toArray' vs
-             v:_ | all ((==valueShape v) . valueShape) vs -> Just $ toArray' vs
-                 | otherwise -> Nothing
 
 -- | A shape is a tree to accomodate the case of records.
 data Shape = ShapeDim Int32 Shape
@@ -278,20 +270,19 @@ fromArray :: Value -> [Value]
 fromArray (ValueArray as) = elems as
 fromArray v = error $ "Expected array value, but found: " ++ pretty v
 
--- | This is where we enforce the regularity constraint for arrays.
-toArray :: [Value] -> EvalM Value
-toArray = maybe (bad noLoc mempty "irregular array") return . mkArray
+toArray :: [Value] -> Value
+toArray vs = ValueArray (listArray (0, length vs - 1) vs)
 
-toArray' :: [Value] -> Value
-toArray' vs = ValueArray (listArray (0, length vs - 1) vs)
+apply :: SrcLoc -> Env -> Value -> StructType -> Value -> EvalM Value
+apply loc env (ValueFun f) t v = stacking loc env $ f t v
+apply _ _ f _ _ = error $ "Cannot apply non-function: " ++ pretty f
 
-apply :: SrcLoc -> Env -> Value -> Value -> EvalM Value
-apply loc env (ValueFun f) v = stacking loc env $ f v
-apply _ _ f _ = error $ "Cannot apply non-function: " ++ pretty f
-
-apply2 :: SrcLoc -> Env -> Value -> Value -> Value -> EvalM Value
-apply2 loc env f x y = stacking loc env $ do f' <- apply noLoc mempty f x
-                                             apply noLoc mempty f' y
+apply2 :: SrcLoc -> Env -> Value
+       -> StructType -> Value
+       -> StructType -> Value -> EvalM Value
+apply2 loc env f xt x yt y =
+  stacking loc env $ do f' <- apply noLoc mempty f xt x
+                        apply noLoc mempty f' yt y
 
 matchPattern :: Env -> Pattern -> Value -> EvalM Env
 matchPattern env p v = do
@@ -462,7 +453,7 @@ indexArray (IndexingFix i:is) (ValueArray arr)
   where n = arrayLength arr
 indexArray (IndexingSlice start end stride:is) (ValueArray arr) = do
   js <- indexesFor start end stride arr
-  toArray' <$> mapM (indexArray is . (arr!)) js
+  toArray <$> mapM (indexArray is . (arr!)) js
 indexArray _ v = Just v
 
 updateArray :: [Indexing] -> Value -> Value -> Maybe Value
@@ -498,8 +489,8 @@ evalIndex loc env is arr = do
             pretty (valueShape arr) <> "."
   maybe oob return $ indexArray is arr
 
-evalTermVar :: Env -> QualName VName -> EvalM Value
-evalTermVar env qv =
+evalTermVar :: Env -> QualName VName -> StructType -> EvalM Value
+evalTermVar env qv t =
   case lookupVar qv env of
     Just (TermValue _ v) -> return v
     _ -> error $ "`" <> pretty qv <> "` is not bound to a value."
@@ -542,39 +533,26 @@ evalType env t@(TypeVar () _ tn args) =
         matchPtoA _ _ = mempty
 evalType env (SumT cs) = SumT $ (fmap . fmap) (evalType env) cs
 
-evalFunction :: Env -> [TypeParam] -> [Pattern] -> Exp
-             -> (Aliasing, StructType) -> SrcLoc -> EvalM Value
+evalFunction :: Env -> [TypeParam] -> [Pattern] -> Exp -> EvalM Value
 
 -- We treat zero-parameter lambdas as simply an expression to
 -- evaluate immediately.  Note that this is *not* the same as a lambda
 -- that takes an empty tuple '()' as argument!  Zero-parameter lambdas
 -- can never occur in a well-formed Futhark program, but they are
 -- convenient in the interpreter.
-evalFunction env tparams [] body (_, t) loc = do
+evalFunction env tparams [] body = do
   -- All remaining size parameters that have not yet been assigned a
   -- value (because they were inner dimensions of empty arrays) are
   -- now assigned a zero.
   let unbound_dims = bindToZero $ map typeParamName $ filter isDimParam tparams
-  v <- eval (env <> unbound_dims) body
-  case (t, v) of
-    (Arrow _ _ _ rt, ValueFun f) ->
-      return $ ValueFun $ \arg -> do r <- f arg
-                                     match (evalType env rt) r
-    _ -> match t v
-  where match vt v =
-          case matchValueToType env vt v of
-            Right _ -> return v
-            Left err ->
-              bad loc env $ "Value `" <> pretty v <>
-              "` cannot match type `" <> pretty vt <> "`: " ++ err
-
-        isDimParam TypeParamDim{} = True
+  eval (env <> unbound_dims) body
+  where isDimParam TypeParamDim{} = True
         isDimParam _ = False
 
-evalFunction env tparams (p:ps) body (als, ret) loc =
-  return $ ValueFun $ \v -> do
+evalFunction env tparams (p:ps) body =
+  return $ ValueFun $ \vt v -> do
     env' <- matchPattern env p v
-    evalFunction env' tparams ps body (als, ret) loc
+    evalFunction env' tparams ps body
 
 eval :: Env -> Exp -> EvalM Value
 
@@ -595,7 +573,7 @@ eval env (RecordLit fields _) =
           v <- eval env $ Var (qualName k) t loc
           return (baseName k, v)
 
-eval env (ArrayLit vs _ _) = toArray =<< mapM (eval env) vs
+eval env (ArrayLit vs _ _) = toArray <$> mapM (eval env) vs
 
 eval env (Range start maybe_second end (Info t) _) = do
   start' <- asInteger <$> eval env start
@@ -608,8 +586,8 @@ eval env (Range start maybe_second end (Info t) _) = do
 
   let second = fromMaybe (start' + dir) maybe_second'
       step = second - start'
-  if step == 0 || dir /= signum step then toArray []
-    else toArray $ map toInt [start',second..end']
+  return $ if step == 0 || dir /= signum step then toArray []
+           else toArray $ map toInt [start',second..end']
 
   where toInt =
           case stripArray 1 t of
@@ -619,7 +597,7 @@ eval env (Range start maybe_second end (Info t) _) = do
               ValuePrim . UnsignedValue . intValue t'
             _ -> error $ "Nonsensical range type: " ++ show t
 
-eval env (Var qv _ _) = evalTermVar env qv
+eval env (Var qv (Info t) _) = evalTermVar env qv $ toStruct t
 
 eval env (Ascript e td _ loc) = do
   v <- eval env e
@@ -634,8 +612,8 @@ eval env (LetPat p e body _ _) = do
   env' <- matchPattern env p v
   eval env' body
 
-eval env (LetFun f (tparams, pats, _, Info ret, fbody) body loc) = do
-  v <- evalFunction env tparams pats fbody (mempty, ret) loc
+eval env (LetFun f (tparams, pats, _, Info ret, fbody) body _) = do
+  v <- evalFunction env tparams pats fbody
   let ftype = T.BoundV [] $ foldr (uncurry (Arrow ()) . patternParam) ret pats
   eval (valEnv (M.singleton f (Just ftype, v)) <> env) body
 
@@ -655,7 +633,7 @@ eval _ (FloatLit v (Info t) _) =
       return $ ValuePrim $ FloatValue $ floatValue ft v
     _ -> error $ "eval: nonsensical type for float literal: " ++ pretty t
 
-eval env (BinOp op op_t (x, _) (y, _) _ loc)
+eval env (BinOp op op_t (x, Info xt) (y, Info yt) _ loc)
   | baseString (qualLeaf op) == "&&" = do
       x' <- asBool <$> eval env x
       if x'
@@ -670,7 +648,9 @@ eval env (BinOp op op_t (x, _) (y, _) _ loc)
       op' <- eval env $ Var op op_t loc
       x' <- eval env x
       y' <- eval env y
-      apply2 loc env op' x' y'
+      apply2 loc env op'
+        (evalType env $ toStruct xt) x'
+        (evalType env $ toStruct yt) y'
 
 eval env (If cond e1 e2 _ _) = do
   cond' <- asBool <$> eval env cond
@@ -679,7 +659,7 @@ eval env (If cond e1 e2 _ _) = do
 eval env (Apply f x _ _ loc) = do
   f' <- eval env f
   x' <- eval env x
-  apply loc env f' x'
+  apply loc env f' (evalType env $ toStruct $ typeOf x) x'
 
 eval env (Negate e _) = do
   ev <- eval env e
@@ -714,12 +694,12 @@ eval env (RecordUpdate src all_fs v _ _) =
               ValueRecord $ M.insert f (update f_v fs v') src'
         update _ _ _ = error "eval RecordUpdate: invalid value."
 
-eval env (LetWith dest src is v body _ loc) = do
+eval env (LetWith dest src is v body (Info t) loc) = do
   dest' <- maybe oob return =<<
     updateArray <$> mapM (evalDimIndex env) is <*>
-    evalTermVar env (qualName $ identName src) <*> eval env v
-  let t = T.BoundV [] $ toStruct $ unInfo $ identType dest
-  eval (valEnv (M.singleton (identName dest) (Just t, dest')) <> env) body
+    evalTermVar env (qualName $ identName src) (toStruct t) <*> eval env v
+  let bound = T.BoundV [] $ toStruct t
+  eval (valEnv (M.singleton (identName dest) (Just bound, dest')) <> env) body
   where oob = bad loc env "Bad update"
 
 -- We treat zero-parameter lambdas as simply an expression to
@@ -727,24 +707,27 @@ eval env (LetWith dest src is v body _ loc) = do
 -- that takes an empty tuple '()' as argument!  Zero-parameter lambdas
 -- can never occur in a well-formed Futhark program, but they are
 -- convenient in the interpreter.
-eval env (Lambda ps body _ (Info (als, ret)) loc) =
-  evalFunction env [] ps body (als, ret) loc
+eval env (Lambda ps body _ _ _) =
+  evalFunction env [] ps body
 
-eval env (OpSection qv _  _) = evalTermVar env qv
+eval env (OpSection qv (Info t) _) = evalTermVar env qv $ toStruct t
 
-eval env (OpSectionLeft qv _ e _ _ loc) =
-  join $ apply loc env <$> evalTermVar env qv <*> eval env e
+eval env (OpSectionLeft qv (Info t) e (Info xt, _) _ loc) =
+  join $ apply loc env <$> evalTermVar env qv (toStruct t) <*>
+  pure (evalType env xt) <*> eval env e
 
-eval env (OpSectionRight qv _ e _ _ loc) = do
-  f <- evalTermVar env qv
+eval env (OpSectionRight qv (Info t) e (Info yt, _) _ loc) = do
+  f <- evalTermVar env qv $ toStruct t
   y <- eval env e
-  return $ ValueFun $ \x -> join $ apply loc env <$> apply loc env f x <*> pure y
+  return $ ValueFun $ \xt x ->
+    join $ apply loc env <$> apply loc env f xt x <*>
+    pure (evalType env yt) <*> pure y
 
 eval env (IndexSection is _ loc) = do
   is' <- mapM (evalDimIndex env) is
-  return $ ValueFun $ evalIndex loc env is'
+  return $ ValueFun $ const $ evalIndex loc env is'
 
-eval _ (ProjectSection ks _ _) = return $ ValueFun $ flip (foldM walk) ks
+eval _ (ProjectSection ks _ _) = return $ ValueFun $ const $ flip (foldM walk) ks
   where walk (ValueRecord fs) f
           | Just v' <- M.lookup f fs = return v'
         walk _ _ = fail "Value does not have expected field."
@@ -883,10 +866,10 @@ evalModExp env (ModApply f e (Info psubst) (Info rsubst) _) = do
 
 evalDec :: Env -> Dec -> EvalM Env
 
-evalDec env (ValDec (ValBind _ v _ (Info t) tps ps def _ loc)) = do
+evalDec env (ValDec (ValBind _ v _ (Info t) tps ps def _ _)) = do
   let t' = evalType env t
       ftype = T.BoundV [] $ foldr (uncurry (Arrow ()) . patternParam) t' ps
-  val <- evalFunction env tps ps def (mempty, t') loc
+  val <- evalFunction env tps ps def
   return $ valEnv (M.singleton v (Just ftype, val)) <> env
 
 evalDec env (OpenDec me _) = do
@@ -980,24 +963,27 @@ initialCtx =
     getB _             = Nothing
 
     fun1 f =
-      TermValue Nothing $ ValueFun $ \x -> f x
+      TermValue Nothing $ ValueFun $ curry f
     fun2 f =
-      TermValue Nothing $ ValueFun $ \x -> return $ ValueFun $ \y -> f x y
+      TermValue Nothing $ ValueFun $ curry $ return . ValueFun . curry . f
     fun2t f =
-      TermValue Nothing $ ValueFun $ \v ->
-      case fromTuple v of Just [x,y] -> f x y
-                          _ -> error $ "Expected pair; got: " ++ pretty v
+      TermValue Nothing $ ValueFun $ \vt v ->
+      case (isTupleRecord vt, fromTuple v) of
+        (Just [xt, yt], Just [x,y]) -> f (xt, x) (yt, y)
+        _ -> error $ "Expected pair; got: " ++ pretty v
     fun3t f =
-      TermValue Nothing $ ValueFun $ \v ->
-      case fromTuple v of Just [x,y,z] -> f x y z
-                          _ -> error $ "Expected triple; got: " ++ pretty v
+      TermValue Nothing $ ValueFun $ \vt v ->
+      case (isTupleRecord vt, fromTuple v) of
+        (Just [xt, yt, zt], Just [x,y,z]) -> f (xt, x) (yt, y) (zt, z)
+        _ -> error $ "Expected triple; got: " ++ pretty v
 
     fun5t f =
-      TermValue Nothing $ ValueFun $ \v ->
-      case fromTuple v of Just [x,y,z,a,b] -> f x y z a b
-                          _ -> error $ "Expected quintuple; got: " ++ pretty v
+      TermValue Nothing $ ValueFun $ \vt v ->
+      case (isTupleRecord vt, fromTuple v) of
+        (Just [xt,yt,zt,at,bt], Just [x,y,z,a,b]) -> f (xt, x) (yt, y) (zt, z) (at, a) (bt, b)
+        _ -> error $ "Expected quintuple; got: " ++ pretty v
 
-    bopDef fs = fun2 $ \x y ->
+    bopDef fs = fun2 $ \(_, x) (_, y) ->
       case (x, y) of
         (ValuePrim x', ValuePrim y')
           | Just z <- msum $ map (`bopDef'` (x', y')) fs ->
@@ -1010,9 +996,9 @@ initialCtx =
               y' <- valf y
               retf =<< op x' y'
 
-    unopDef fs = fun1 $ \x ->
+    unopDef fs = fun1 $ \(_, x) ->
       case x of
-        (ValuePrim x')
+        ValuePrim x'
           | Just r <- msum $ map (`unopDef'` x') fs ->
               return $ ValuePrim r
         _ ->
@@ -1030,7 +1016,7 @@ initialCtx =
                              , (getU, putU, P.doUnOp $ P.Complement Int16)
                              , (getU, putU, P.doUnOp $ P.Complement Int32)
                              , (getU, putU, P.doUnOp $ P.Complement Int64)]
-    def "!" = Just $ fun1 $ return . ValuePrim . BoolValue . not . asBool
+    def "!" = Just $ fun1 $ return . ValuePrim . BoolValue . not . asBool . snd
 
     def "+" = arithOp P.Add P.FAdd
     def "-" = arithOp P.Sub P.FSub
@@ -1046,14 +1032,14 @@ initialCtx =
     def ">>" = Just $ bopDef $ sintOp P.AShr ++ uintOp P.LShr
     def "<<" = Just $ bopDef $ intOp P.Shl
     def ">>>" = Just $ bopDef $ sintOp P.LShr ++ uintOp P.LShr
-    def "==" = Just $ fun2 $ \xs ys -> return $ ValuePrim $ BoolValue $ xs == ys
-    def "!=" = Just $ fun2 $ \xs ys -> return $ ValuePrim $ BoolValue $ xs /= ys
+    def "==" = Just $ fun2 $ \(_, xs) (_, ys) -> return $ ValuePrim $ BoolValue $ xs == ys
+    def "!=" = Just $ fun2 $ \(_, xs) (_, ys) -> return $ ValuePrim $ BoolValue $ xs /= ys
 
     -- The short-circuiting is handled directly in 'eval'; these cases
     -- are only used when partially applying and such.
-    def "&&" = Just $ fun2 $ \x y ->
+    def "&&" = Just $ fun2 $ \(_, x) (_, y) ->
       return $ ValuePrim $ BoolValue $ asBool x && asBool y
-    def "||" = Just $ fun2 $ \x y ->
+    def "||" = Just $ fun2 $ \(_, x) (_, y) ->
       return $ ValuePrim $ BoolValue $ asBool x || asBool y
 
     def "<" = Just $ bopDef $
@@ -1085,28 +1071,29 @@ initialCtx =
             _ -> Just $ bopDef [(getV, Just . putV, \x y -> f [x,y])]
 
       | "sign_" `isPrefixOf` s =
-          Just $ fun1 $ \x ->
+          Just $ fun1 $ \(_, x) ->
           case x of (ValuePrim (UnsignedValue x')) ->
                       return $ ValuePrim $ SignedValue x'
                     _ -> error $ "Cannot sign: " ++ pretty x
       | "unsign_" `isPrefixOf` s =
-          Just $ fun1 $ \x ->
+          Just $ fun1 $ \(_, x) ->
           case x of (ValuePrim (SignedValue x')) ->
                       return $ ValuePrim $ UnsignedValue x'
                     _ -> error $ "Cannot unsign: " ++ pretty x
       where bool = Just . BoolValue
 
-    def "map" = Just $ fun2t $ \f xs ->
-      toArray =<< mapM (apply noLoc mempty f) (fromArray xs)
+    def "map" = Just $ fun2t $ \(_, f) (xs_t, xs) -> do
+      let rowt = stripArray 1 xs_t
+      toArray <$> mapM (apply noLoc mempty f rowt) (fromArray xs)
 
-    def s | "reduce" `isPrefixOf` s = Just $ fun3t $ \f ne xs ->
-      foldM (apply2 noLoc mempty f) ne $ fromArray xs
+    def s | "reduce" `isPrefixOf` s = Just $ fun3t $ \(_, f) (ne_t, ne) (_, xs) ->
+      foldM (\acc -> apply2 noLoc mempty f ne_t acc ne_t) ne $ fromArray xs
 
-    def "scan" = Just $ fun3t $ \f ne xs -> do
+    def "scan" = Just $ fun3t $ \(_, f) (ne_t, ne) (_, xs) -> do
       let next (out, acc) x = do
-            x' <- apply2 noLoc mempty f acc x
+            x' <- apply2 noLoc mempty f ne_t acc ne_t x
             return (x':out, x')
-      toArray . reverse . fst =<< foldM next ([], ne) (fromArray xs)
+      toArray . reverse . fst <$> foldM next ([], ne) (fromArray xs)
 
     def s | "stream_map" `isPrefixOf` s =
               Just $ fun2t stream
@@ -1114,7 +1101,7 @@ initialCtx =
     def s | "stream_red" `isPrefixOf` s =
               Just $ fun3t $ \_ f arg -> stream f arg
 
-    def "scatter" = Just $ fun3t $ \arr is vs ->
+    def "scatter" = Just $ fun3t $ \(_, arr) (_, is) (_, vs) ->
       case arr of
         ValueArray arr' ->
           return $ ValueArray $ foldl' update arr'
@@ -1125,30 +1112,34 @@ initialCtx =
               if i >= 0 && i < arrayLength arr'
               then arr' // [(i, v)] else arr'
 
-    def "gen_reduce" = Just $ fun5t $ \arr fun _ is vs ->
+    def "gen_reduce" = Just $ fun5t $ \(_, arr) (_, fun) (ne_t, _) (_, is) (_, vs) -> do
+      let update arr' (i, v) =
+            if i >= 0 && i < arrayLength arr'
+            then do
+              v' <- apply2 noLoc mempty fun ne_t (arr' ! i) ne_t v
+              return $ arr' // [(i, v')]
+            else return arr'
       case arr of
         ValueArray arr' ->
-          ValueArray <$> foldM (update fun) arr'
+          ValueArray <$> foldM update arr'
           (zip (map asInt $ fromArray is) (fromArray vs))
         _ ->
           error $ "gen_reduce expects array, but got: " ++ pretty arr
-      where update fun arr' (i, v) =
-              if i >= 0 && i < arrayLength arr'
-              then do
-                v' <- apply2 noLoc mempty fun (arr' ! i) v
-                return $ arr' // [(i, v')]
-              else return arr'
 
-    def "partition" = Just $ fun3t $ \k f xs ->
-      let next outs x = do
-            i <- asInt <$> apply noLoc mempty f x
+    def "partition" = Just $ fun3t $ \(_, k) (_, f) (xs_t, xs) -> do
+      let rowt = stripArray 1 xs_t
+
+          next outs x = do
+            i <- asInt <$> apply noLoc mempty f rowt x
             return $ insertAt i x outs
+
           pack parts =
-            toTuple [toArray' $ concat parts,
-                     toArray' $
+            toTuple [toArray $ concat parts,
+                     toArray $
                      map (ValuePrim . SignedValue . Int32Value . genericLength) parts]
-      in pack . map reverse <$>
-         foldM next (replicate (asInt k) []) (fromArray xs)
+
+      pack . map reverse <$>
+        foldM next (replicate (asInt k) []) (fromArray xs)
       where insertAt 0 x (l:ls) = (x:l):ls
             insertAt i x (l:ls) = l:insertAt (i-1) x ls
             insertAt _ _ ls = ls
@@ -1156,42 +1147,41 @@ initialCtx =
     def "cmp_threshold" = Just $ fun2t $ \_ _ ->
       return $ ValuePrim $ BoolValue True
 
-    def "unzip" = Just $ fun1 $ \x ->
-      toTuple <$> listPair (unzip $ map (fromPair . fromTuple) $ fromArray x)
+    def "unzip" = Just $ fun1 $ \(_, x) ->
+      return $ toTuple $ listPair $ unzip $ map (fromPair . fromTuple) $ fromArray x
       where fromPair (Just [x,y]) = (x,y)
             fromPair l = error $ "Not a pair: " ++ pretty l
-            listPair (xs, ys) = do
-              xs' <- toArray xs
-              ys' <- toArray ys
-              return [xs', ys']
+            listPair (xs, ys) = [toArray xs, toArray ys]
 
-    def "zip" = Just $ fun2t $ \xs ys ->
-      toArray $ map toTuple $ transpose [fromArray xs, fromArray ys]
+    def "zip" = Just $ fun2t $ \(_, xs) (_, ys) ->
+      return $ toArray $ map toTuple $ transpose [fromArray xs, fromArray ys]
 
-    def "concat" = Just $ fun2t $ \xs ys ->
-      toArray $ fromArray xs ++ fromArray ys
+    def "concat" = Just $ fun2t $ \(_, xs) (_, ys) ->
+      return $ toArray $ fromArray xs ++ fromArray ys
 
     def "transpose" = Just $ fun1 $
-      (toArray <=< mapM toArray) . transpose . map fromArray . fromArray
+      return . toArray . map toArray . transpose . map fromArray . fromArray . snd
 
-    def "rotate" = Just $ fun2t $ \i xs ->
+    def "rotate" = Just $ fun2t $ \(_, i) (_, xs) ->
       if asInt i > 0
       then let (bef, aft) = splitAt (asInt i) $ fromArray xs
-           in toArray $ aft ++ bef
+           in return $ toArray $ aft ++ bef
       else let (bef, aft) = splitFromEnd (-asInt i) $ fromArray xs
-           in toArray $ aft ++ bef
+           in return $ toArray $ aft ++ bef
 
     def "flatten" = Just $ fun1 $
-      toArray . concatMap fromArray . fromArray
+      return . toArray . concatMap fromArray . fromArray . snd
 
-    def "unflatten" = Just $ fun3t $ \_ m xs ->
-      toArray =<< mapM toArray (chunk (asInt m) $ fromArray xs)
+    def "unflatten" = Just $ fun3t $ \_ (_, m) (_, xs) ->
+      return $ toArray $ map toArray $ chunk (asInt m) $ fromArray xs
 
-    def "opaque" = Just $ fun1 return
+    def "opaque" = Just $ fun1 $ return . snd
 
-    def "trace" = Just $ fun1 $ \v -> trace v >> return v
+    def "trace" = Just $ fun1 $ \(_, v) -> do
+      trace v
+      return v
 
-    def "break" = Just $ fun1 $ \v -> do
+    def "break" = Just $ fun1 $ \(_, v) -> do
       break
       return v
 
@@ -1203,10 +1193,10 @@ initialCtx =
       t <- nameFromString s `M.lookup` namesToPrimTypes
       return $ T.TypeAbbr Unlifted [] $ Prim t
 
-    stream f arg@(ValueArray xs) =
+    stream (_, f) (xs_t, arg@(ValueArray xs)) =
       let n = ValuePrim $ SignedValue $ Int32Value $ arrayLength xs
-      in apply2 noLoc mempty f n arg
-    stream _ arg = error $ "Cannot stream: " ++ pretty arg
+      in apply2 noLoc mempty f (Prim $ Signed Int32) n xs_t arg
+    stream _ (_, arg) = error $ "Cannot stream: " ++ pretty arg
 
 
 interpretExp :: Ctx -> Exp -> F ExtOp Value
@@ -1226,5 +1216,6 @@ interpretImport ctx (fp, prog) = do
 -- horribly if these are ill-typed.
 interpretFunction :: Ctx -> VName -> [Value] -> F ExtOp Value
 interpretFunction ctx fname vs = runEvalM (ctxImports ctx) $ do
-  f <- evalTermVar (ctxEnv ctx) $ qualName fname
-  foldM (apply noLoc mempty) f vs
+  f <- evalTermVar (ctxEnv ctx) (qualName fname) $ Prim $ Signed Int32
+  let vs_ts = undefined
+  foldM (uncurry . apply noLoc mempty) f $ zip vs_ts vs

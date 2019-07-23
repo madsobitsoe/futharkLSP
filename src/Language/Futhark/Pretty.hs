@@ -101,6 +101,8 @@ instance IsName vn => Pretty (DimDecl vn) where
   ppr (NamedDim v) = ppr v
   ppr (ConstDim n) = ppr n
 
+instance Pretty (ShapeDecl Int32) where
+  ppr (ShapeDecl ds) = mconcat (map (brackets . ppr) ds)
 
 instance IsName vn => Pretty (ShapeDecl (DimDecl vn)) where
   ppr (ShapeDecl ds) = mconcat (map (brackets . ppr) ds)
