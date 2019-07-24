@@ -336,6 +336,10 @@ transformExp (Constr name es (Info (SumT cs)) loc) =
               | name == name' = TupLit <$> mapM transformExp es <*> pure loc
               | otherwise     = return $ TupLit (map defaultPayload ts) noLoc
 
+            -- "arbitrary" is a magical intrinsic that the
+            -- internaliser will know how to handle.  We use it to
+            -- construct a value of some type, but with the value
+            -- unspecified, because we know it will not matter.
             defaultPayload t = Apply (Var (qualName (VName (nameFromString "arbitrary") (-1)))
                                      (Info $ Arrow mempty Nothing (Record mempty) t) loc)
                                (TupLit [] mempty) (Info Observe) (Info t) loc

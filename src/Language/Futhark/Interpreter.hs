@@ -1196,7 +1196,8 @@ initialCtx =
       return v
 
     def "arbitrary" = Just $ fun1 $ \_ ->
-      error "`arbitrary` does not exist in the interpreter."
+      bad noLoc (ctxEnv initialCtx)
+      "`arbitrary` does not work in the interpreter."
 
     def s | nameFromString s `M.member` namesToPrimTypes = Nothing
 
