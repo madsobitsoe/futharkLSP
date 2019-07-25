@@ -234,7 +234,7 @@ instance MonadUnify TermTypeM where
     i <- incCounter
     dim <- newID $ mkTypeVarName name i
     case rigidity of
-      Rigid -> modifyConstraints $ M.insert dim $ RigidSize loc
+      Rigid -> modifyConstraints $ M.insert dim $ UnknowableSize loc
       Nonrigid -> modifyConstraints $ M.insert dim $ Size Nothing $ mkUsage' loc
     return dim
 
@@ -1871,7 +1871,7 @@ checkFunBody body maybe_rettype loc = do
       let msg = unlines ["return-unifying",
                          pretty rettype_withdims,
                          pretty body_t]
-      unify (mkUsage (srclocOf body) "return type annotation") rettype_withdims $ toStruct body_t
+      unify (mkUsage (srclocOf body) "return type annotation") rettype $ toStruct body_t
 
       -- We also have to make sure that uniqueness matches.  This is done
       -- explicitly, because uniqueness is ignored by unification.
@@ -2124,9 +2124,9 @@ closeOverTypes defname defloc tparams t substs =
           return $ Just $ TypeParamDim k $ srclocOf usage
         closeOver (k, ParamType l loc) =
           return $ Just $ TypeParamType l k loc
-        closeOver (k, RigidSize sloc) =
+        closeOver (k, UnknowableSize sloc) =
           typeError defloc $
-          unlines [ "Statically unpredictable size " ++ quote (prettyName k) ++
+          unlines [ "Unknowable size " ++ quote (prettyName k) ++
                     " produced at " ++ locStr sloc
                   , "imposes constraint on type of " ++ quote (prettyName defname) ++
                     ", which is inferred as:"

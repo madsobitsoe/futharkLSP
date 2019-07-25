@@ -77,7 +77,7 @@ data Constraint = NoConstraint (Maybe Liftedness) Usage
                 | Size (Maybe (DimDecl VName)) Usage
                   -- ^ Is not actually a type, but a term-level size,
                   -- possibly already set to something specific.
-                | RigidSize SrcLoc
+                | UnknowableSize SrcLoc
                   -- ^ A size that does not unify with anything -
                   -- created from the result of applying a function
                   -- whose return size is existential.
@@ -92,7 +92,7 @@ instance Located Constraint where
   locOf (Equality usage) = locOf usage
   locOf (HasConstrs _ usage) = locOf usage
   locOf (Size _ usage) = locOf usage
-  locOf (RigidSize usage) = locOf usage
+  locOf (UnknowableSize usage) = locOf usage
 
 lookupSubst :: VName -> Constraints -> Maybe (Subst StructType)
 lookupSubst v constraints = case M.lookup v constraints of
@@ -175,7 +175,7 @@ isRigid :: VName -> Constraints -> Bool
 isRigid v constraints = case M.lookup v constraints of
                           Nothing -> True
                           Just ParamType{} -> True
-                          Just RigidSize{} -> True
+                          Just UnknowableSize{} -> True
                           _ -> False
 
 -- | Unifies two types.
@@ -196,7 +196,8 @@ unify usage orig_t1 orig_t2 = do
             typeError usage $ "Couldn't match expected type `" ++
             pretty t1' ++ "' with actual type `" ++ pretty t2' ++ "'."
 
-          unifyDims' d1 d2 | isJust $ unifyDims d1 d2 = return ()
+          unifyDims' d1 d2
+            | isJust $ unifyDims d1 d2 = return ()
           unifyDims' (NamedDim (QualName _ d1)) d2
             | not $ isRigid' d1 =
                 linkVarToDim usage d1 d2
@@ -295,7 +296,7 @@ applySubstInConstraint vn subst (HasConstrs cs loc) =
 applySubstInConstraint vn (SizeSubst v') (Size (Just (NamedDim v)) loc)
   | vn == qualLeaf v = Size (Just v') loc
 applySubstInConstraint _ _ (Size v loc) = Size v loc
-applySubstInConstraint _ _ (RigidSize loc) = RigidSize loc
+applySubstInConstraint _ _ (UnknowableSize loc) = UnknowableSize loc
 
 linkVarToType :: MonadUnify m => Usage -> VName -> StructType -> m ()
 linkVarToType usage vn tp = do
@@ -306,10 +307,13 @@ linkVarToType usage vn tp = do
     else do modifyConstraints $ M.insert vn $ Constraint tp' usage
             modifyConstraints $ M.map $ applySubstInConstraint vn $ Subst tp'
             case M.lookup vn constraints of
+
               Just (NoConstraint (Just Unlifted) unlift_usage) ->
                 zeroOrderType usage (show unlift_usage) tp'
+
               Just (Equality _) ->
                 equalityType usage tp'
+
               Just (Overloaded ts old_usage)
                 | tp `notElem` map Prim ts ->
                     case tp' of
@@ -320,6 +324,7 @@ linkVarToType usage vn tp = do
                           pretty tp ++ "' (`" ++ prettyName vn ++
                           "` must be one of " ++ intercalate ", " (map pretty ts) ++
                           " due to " ++ show old_usage ++ ")."
+
               Just (HasFields required_fields old_usage) ->
                 case tp of
                   Record tp_fields
@@ -339,6 +344,7 @@ linkVarToType usage vn tp = do
                        pretty tp ++ "' (must be a record with fields {" ++
                        required_fields' ++
                        "} due to " ++ show old_usage ++ ")."
+
               Just (HasConstrs required_cs old_usage) ->
                 case tp of
                   SumT ts
@@ -600,7 +606,7 @@ instance MonadUnify UnifyM where
   newDimVar loc rigidity name = do
     dim <- newVar name
     case rigidity of
-      Rigid -> modifyConstraints $ M.insert dim $ RigidSize loc
+      Rigid -> modifyConstraints $ M.insert dim $ UnknowableSize loc
       Nonrigid -> modifyConstraints $ M.insert dim $ Size Nothing $ Usage Nothing loc
     return dim
 
