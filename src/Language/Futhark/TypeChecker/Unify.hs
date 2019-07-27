@@ -32,7 +32,7 @@ where
 import Debug.Trace
 import Control.Monad.Except
 import Control.Monad.State
-import Control.Monad.Writer
+import Control.Monad.Writer hiding (Sum)
 import Data.Bitraversable
 import Data.List
 import Data.Loc
@@ -125,22 +125,26 @@ traverseDims :: forall m als1 . Monad m =>
                 (Position -> DimDecl VName -> m (DimDecl VName))
              -> TypeBase (DimDecl VName) als1
              -> m (TypeBase (DimDecl VName) als1)
-traverseDims onDim (Arrow als p t1 t2) =
-  Arrow als p <$> onParam t1 <*> traverseDims onDim t2
+traverseDims onDim (Scalar (Arrow als p t1 t2)) =
+  Scalar <$> (Arrow als p <$> onParam t1 <*> traverseDims onDim t2)
   where onParam :: forall als2 .
                    TypeBase (DimDecl VName) als2
                 -> m (TypeBase (DimDecl VName) als2)
-        onParam t@Arrow{} = bitraverse (onDim Negative) pure t
+        onParam t@(Scalar Arrow{}) = bitraverse (onDim Negative) pure t
         onParam t@Array{} = bitraverse (onDim Positive) pure t
-        onParam (Record fs) = Record <$> traverse onParam fs
-        onParam (TypeVar as u tn targs) = TypeVar as u tn <$> mapM onTypeArg targs
-        onParam (SumT cs) = SumT <$> traverse (mapM onParam) cs
-        onParam (Prim t) = return $ Prim t
+        onParam (Scalar (Record fs)) =
+          Scalar . Record <$> traverse onParam fs
+        onParam (Scalar (TypeVar as u tn targs)) =
+          Scalar . TypeVar as u tn <$> mapM onTypeArg targs
+        onParam (Scalar (Sum cs)) =
+          Scalar . Sum <$> traverse (mapM onParam) cs
+        onParam (Scalar (Prim t)) = return $ Scalar $ Prim t
         onTypeArg (TypeArgDim d loc) =
           TypeArgDim <$> onDim Positive d <*> pure loc
         onTypeArg (TypeArgType t loc) =
           TypeArgType <$> onParam t <*> pure loc
-traverseDims onDim (Record fs) = Record <$> traverse (traverseDims onDim) fs
+traverseDims onDim (Scalar (Record fs)) =
+  Scalar . Record <$> traverse (traverseDims onDim) fs
 traverseDims onDim t = bitraverse (onDim Negative) pure t
 
 -- | Synthesize nonrigid dimension names for 'AnyDim'
@@ -161,7 +165,7 @@ instantiateEmptyArrayDims :: MonadUnify f =>
                           -> f (TypeBase (DimDecl VName) als, [VName])
 instantiateEmptyArrayDims loc r = runWriterT . instantiate
   where instantiate t@Array{} = bitraverse onDim pure t
-        instantiate (Record fs) = Record <$> traverse instantiate fs
+        instantiate (Scalar (Record fs)) = Scalar . Record <$> traverse instantiate fs
         instantiate t = return t
 
         onDim AnyDim = do v <- lift $ newDimVar loc r "impl_dim"
@@ -211,34 +215,34 @@ unify usage orig_t1 orig_t2 = do
       case (t1', t2') of
         _ | t1' == t2' -> return ()
 
-        (Record fs,
-         Record arg_fs)
+        (Scalar (Record fs),
+         Scalar (Record arg_fs))
           | M.keys fs == M.keys arg_fs ->
               forM_ (M.toList $ M.intersectionWith (,) fs arg_fs) $ \(k, (k_t1, k_t2)) ->
               breadCrumb (MatchingFields k) $ subunify k_t1 k_t2
 
-        (TypeVar _ _ (TypeName _ tn) targs,
-         TypeVar _ _ (TypeName _ arg_tn) arg_targs)
+        (Scalar (TypeVar _ _ (TypeName _ tn) targs),
+         Scalar (TypeVar _ _ (TypeName _ arg_tn) arg_targs))
           | tn == arg_tn, length targs == length arg_targs ->
               zipWithM_ unifyTypeArg targs arg_targs
 
-        (TypeVar _ _ (TypeName [] v1) [],
-         TypeVar _ _ (TypeName [] v2) []) ->
+        (Scalar (TypeVar _ _ (TypeName [] v1) []),
+         Scalar (TypeVar _ _ (TypeName [] v2) [])) ->
           case (isRigid' v1, isRigid' v2) of
             (True, True) -> failure
             (True, False) -> linkVarToType usage v2 t1'
             (False, True) -> linkVarToType usage v1 t2'
             (False, False) -> linkVarToType usage v1 t2'
 
-        (TypeVar _ _ (TypeName [] v1) [], _)
+        (Scalar (TypeVar _ _ (TypeName [] v1) []), _)
           | not $ isRigid' v1 ->
               linkVarToType usage v1 t2'
-        (_, TypeVar _ _ (TypeName [] v2) [])
+        (_, Scalar (TypeVar _ _ (TypeName [] v2) []))
           | not $ isRigid' v2 ->
               linkVarToType usage v2 t1'
 
-        (Arrow _ p1 a1 b1,
-         Arrow _ p2 a2 b2) -> do
+        (Scalar (Arrow _ p1 a1 b1),
+         Scalar (Arrow _ p2 a2 b2)) -> do
           subunify a1 a2
           subunify b1' b2'
           where (b1', b2') =
@@ -267,8 +271,8 @@ unify usage orig_t1 orig_t2 = do
               unifyDims' t1_d t2_d
               subunify t1'' t2''
 
-        (SumT cs,
-         SumT arg_cs)
+        (Scalar (Sum cs),
+         Scalar (Sum arg_cs))
           | M.keys cs == M.keys arg_cs ->
               forM_ (M.toList $ M.intersectionWith (,) cs arg_cs) $ \(_, (f1, f2)) ->
               if length f1 == length f2
@@ -315,9 +319,9 @@ linkVarToType usage vn tp = do
                 equalityType usage tp'
 
               Just (Overloaded ts old_usage)
-                | tp `notElem` map Prim ts ->
+                | tp `notElem` map (Scalar . Prim) ts ->
                     case tp' of
-                      TypeVar _ _ (TypeName [] v) []
+                      Scalar (TypeVar _ _ (TypeName [] v) [])
                         | not $ isRigid v constraints -> linkVarToTypes usage v ts
                       _ ->
                         typeError usage $ "Cannot unify `" ++ prettyName vn ++ "' with type `" ++
@@ -327,11 +331,11 @@ linkVarToType usage vn tp = do
 
               Just (HasFields required_fields old_usage) ->
                 case tp of
-                  Record tp_fields
+                  Scalar (Record tp_fields)
                     | all (`M.member` tp_fields) $ M.keys required_fields ->
                         mapM_ (uncurry $ unify usage) $ M.elems $
                         M.intersectionWith (,) required_fields tp_fields
-                  TypeVar _ _ (TypeName [] v) []
+                  Scalar (TypeVar _ _ (TypeName [] v) [])
                     | not $ isRigid v constraints ->
                         modifyConstraints $ M.insert v $
                         HasFields required_fields old_usage
@@ -347,11 +351,11 @@ linkVarToType usage vn tp = do
 
               Just (HasConstrs required_cs old_usage) ->
                 case tp of
-                  SumT ts
+                  Scalar (Sum ts)
                     | all (`M.member` ts) $ M.keys required_cs ->
                         mapM_ (uncurry (zipWithM_ (unify usage))) $ M.elems $
                           M.intersectionWith (,) required_cs ts
-                  TypeVar _ _ (TypeName [] v) []
+                  Scalar (TypeVar _ _ (TypeName [] v) [])
                     | not $ isRigid v constraints ->
                         modifyConstraints $ M.insertWith combineConstrs v $
                         HasConstrs required_cs old_usage
@@ -368,26 +372,26 @@ linkVarToDim usage vn1 dim = do
   modifyConstraints $ M.map $ applySubstInConstraint vn1 $ SizeSubst dim
 
 removeUniqueness :: TypeBase dim as -> TypeBase dim as
-removeUniqueness (Record ets) =
-  Record $ fmap removeUniqueness ets
-removeUniqueness (Arrow als p t1 t2) =
-  Arrow als p (removeUniqueness t1) (removeUniqueness t2)
-removeUniqueness (SumT cs) =
-  SumT $ (fmap . fmap) removeUniqueness cs
+removeUniqueness (Scalar (Record ets)) =
+  Scalar $ Record $ fmap removeUniqueness ets
+removeUniqueness (Scalar (Arrow als p t1 t2)) =
+  Scalar $ Arrow als p (removeUniqueness t1) (removeUniqueness t2)
+removeUniqueness (Scalar (Sum cs)) =
+  Scalar $ Sum $ (fmap . fmap) removeUniqueness cs
 removeUniqueness t = t `setUniqueness` Nonunique
 
 mustBeOneOf :: MonadUnify m => [PrimType] -> Usage -> StructType -> m ()
-mustBeOneOf [req_t] usage t = unify usage (Prim req_t) t
+mustBeOneOf [req_t] usage t = unify usage (Scalar (Prim req_t)) t
 mustBeOneOf ts usage t = do
   constraints <- getConstraints
   let t' = applySubst (`lookupSubst` constraints) t
       isRigid' v = isRigid v constraints
 
   case t' of
-    TypeVar _ _ (TypeName [] v) []
+    Scalar (TypeVar _ _ (TypeName [] v) [])
       | not $ isRigid' v -> linkVarToTypes usage v ts
 
-    Prim pt | pt `elem` ts -> return ()
+    Scalar (Prim pt) | pt `elem` ts -> return ()
 
     _ -> failure
 
@@ -417,7 +421,7 @@ equalityType usage t = do
   where mustBeEquality vn = do
           constraints <- getConstraints
           case M.lookup vn constraints of
-            Just (Constraint (TypeVar _ _ (TypeName [] vn') []) _) ->
+            Just (Constraint (Scalar (TypeVar _ _ (TypeName [] vn') [])) _) ->
               mustBeEquality vn'
             Just (Constraint vn_t cusage)
               | not $ orderZero vn_t ->
@@ -465,7 +469,7 @@ mustHaveConstr :: MonadUnify m =>
 mustHaveConstr usage c t fs = do
   constraints <- getConstraints
   case t of
-    TypeVar _ _ (TypeName _ tn) []
+    Scalar (TypeVar _ _ (TypeName _ tn) [])
       | Just NoConstraint{} <- M.lookup tn constraints ->
           modifyConstraints $ M.insert tn $ HasConstrs (M.singleton c fs) usage
       | Just (HasConstrs cs _) <- M.lookup tn constraints ->
@@ -476,7 +480,7 @@ mustHaveConstr usage c t fs = do
             | otherwise -> typeError usage $ "Different arity for constructor "
                            ++ quote (pretty c) ++ "."
 
-    SumT cs ->
+    Scalar (Sum cs) ->
       case M.lookup c cs of
         Nothing -> typeError usage $ "Constuctor " ++ quote (pretty c) ++ " not present in type."
         Just fs'
@@ -484,7 +488,7 @@ mustHaveConstr usage c t fs = do
             | otherwise -> typeError usage $ "Different arity for constructor " ++
                            quote (pretty c) ++ "."
 
-    _ -> do unify usage t $ SumT $ M.singleton c fs
+    _ -> do unify usage t $ Scalar $ Sum $ M.singleton c fs
             return ()
 
 mustHaveField :: MonadUnify m =>
@@ -494,7 +498,7 @@ mustHaveField usage l t = do
   l_type <- newTypeVar (srclocOf usage) "t"
   let l_type' = toStruct l_type
   case t of
-    TypeVar _ _ (TypeName _ tn) []
+    Scalar (TypeVar _ _ (TypeName _ tn) [])
       | Just NoConstraint{} <- M.lookup tn constraints -> do
           modifyConstraints $ M.insert tn $ HasFields (M.singleton l l_type') usage
           return l_type
@@ -504,7 +508,7 @@ mustHaveField usage l t = do
             Nothing -> modifyConstraints $ M.insert tn $
                        HasFields (M.insert l l_type' fields) usage
           return l_type
-    Record fields
+    Scalar (Record fields)
       | Just t' <- M.lookup l fields -> do
           unify usage l_type' $ toStruct t'
           return t'
@@ -512,7 +516,7 @@ mustHaveField usage l t = do
           typeError usage $
           "Attempt to access field '" ++ pretty l ++ "' of value of type " ++
           pretty (toStructural t) ++ "."
-    _ -> do unify usage (toStruct t) $ Record $ M.singleton l l_type'
+    _ -> do unify usage (toStruct t) $ Scalar $ Record $ M.singleton l l_type'
             return l_type
 
 matchDims :: (Monoid as, Monad m) =>
@@ -522,31 +526,18 @@ matchDims :: (Monoid as, Monad m) =>
 matchDims onDims t1 t2 =
   case (t1, t2) of
     (Array als1 u1 et1 shape1, Array als2 u2 et2 shape2) ->
-      Array (als1<>als2) (min u1 u2) <$>
-      matchArrayElems et1 et2 <*> onShapes shape1 shape2
-    (Record f1, Record f2) ->
-      Record <$> traverse (uncurry (matchDims onDims)) (M.intersectionWith (,) f1 f2)
-    (TypeVar als1 u v targs1, TypeVar als2 _ _ targs2) ->
-      TypeVar (als1 <> als2) u v <$> zipWithM matchTypeArg targs1 targs2
+      flip setAliases (als1<>als2) <$>
+      (arrayOf <$>
+       matchDims onDims (Scalar et1) (Scalar et2) <*>
+       onShapes shape1 shape2 <*> pure (min u1 u2))
+    (Scalar (Record f1), Scalar (Record f2)) ->
+      Scalar . Record <$> traverse (uncurry (matchDims onDims)) (M.intersectionWith (,) f1 f2)
+    (Scalar (TypeVar als1 u v targs1),
+     Scalar (TypeVar als2 _ _ targs2)) ->
+      Scalar . TypeVar (als1 <> als2) u v <$> zipWithM matchTypeArg targs1 targs2
     _ -> return t1
 
-  where matchArrayElems (ArrayPrimElem pt1) (ArrayPrimElem _) =
-          return $ ArrayPrimElem pt1
-        matchArrayElems (ArrayPolyElem v targs1) (ArrayPolyElem _ _targs2) =
-          return $ ArrayPolyElem v targs1
-        matchArrayElems (ArrayRecordElem fields1) (ArrayRecordElem fields2) =
-          ArrayRecordElem <$> traverse (uncurry matchRecordArray)
-          (M.intersectionWith (,) fields1 fields2)
-        matchArrayElems x _ = return x
-
-        matchRecordArray (RecordArrayElem at1) (RecordArrayElem at2) =
-          RecordArrayElem <$> matchArrayElems at1 at2
-        matchRecordArray (RecordArrayArrayElem at1 shape1) (RecordArrayArrayElem at2 shape2) =
-          RecordArrayArrayElem <$> matchArrayElems at1 at2 <*> onShapes shape1 shape2
-        matchRecordArray x _ =
-          return x
-
-        matchTypeArg ta@TypeArgType{} _ = return ta
+  where matchTypeArg ta@TypeArgType{} _ = return ta
         matchTypeArg a _ = return a
 
         onShapes shape1 shape2 =
@@ -601,7 +592,7 @@ instance MonadUnify UnifyM where
   newTypeVar loc name = do
     v <- newVar name
     modifyConstraints $ M.insert v $ NoConstraint Nothing $ Usage Nothing loc
-    return $ TypeVar mempty Nonunique (typeName v) []
+    return $ Scalar $ TypeVar mempty Nonunique (typeName v) []
 
   newDimVar loc rigidity name = do
     dim <- newVar name

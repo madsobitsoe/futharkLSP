@@ -7,7 +7,7 @@ module Language.Futhark.TypeChecker.Modules
   ) where
 import Debug.Trace
 import Control.Monad.Except
-import Control.Monad.Writer
+import Control.Monad.Writer hiding (Sum)
 import Data.List
 import Data.Loc
 import Data.Maybe
@@ -123,33 +123,19 @@ newNamesForMTy orig_mty = do
           TypeParamType l (substitute p) loc
 
         substituteInType :: StructType -> StructType
-        substituteInType (TypeVar () u (TypeName qs v) targs) =
-          TypeVar () u (TypeName (map substitute qs) $ substitute v) $ map substituteInTypeArg targs
-        substituteInType (Prim t) =
-          Prim t
-        substituteInType (Record ts) =
-          Record $ fmap substituteInType ts
-        substituteInType (SumT cs) =
-          SumT $ fmap (map substituteInType) cs
-        substituteInType (Array () u (ArrayPrimElem t) shape) =
-          Array () u (ArrayPrimElem t) (substituteInShape shape)
-        substituteInType (Array () u (ArrayPolyElem (TypeName qs v) targs) shape) =
-          Array () u (ArrayPolyElem
-                      (TypeName (map substitute qs) $ substitute v)
-                      (map substituteInTypeArg targs))
-                     (substituteInShape shape)
-        substituteInType (Array () u (ArrayRecordElem ts) shape) =
-          let ts' = fmap (substituteInType . recordArrayElemToType) ts
-          in case arrayOf (Record ts') (substituteInShape shape) u of
-            Just t' -> t'
-            _ -> error "substituteInType: Cannot create record array after substitution."
-        substituteInType (Array () u (ArraySumElem cs) shape) =
-          let ts' = fmap (map $ substituteInType . recordArrayElemToType) cs
-          in case arrayOf (SumT ts') (substituteInShape shape) u of
-            Just t' -> t'
-            _ -> error "substituteInType: Cannot create sum type array after substitution."
-        substituteInType (Arrow als v t1 t2) =
-          Arrow als v (substituteInType t1) (substituteInType t2)
+        substituteInType (Scalar (TypeVar () u (TypeName qs v) targs)) =
+          Scalar $ TypeVar () u (TypeName (map substitute qs) $ substitute v) $
+          map substituteInTypeArg targs
+        substituteInType (Scalar (Prim t)) =
+          Scalar $ Prim t
+        substituteInType (Scalar (Record ts)) =
+          Scalar $ Record $ fmap substituteInType ts
+        substituteInType (Scalar (Sum cs)) =
+          Scalar $ Sum $ fmap (map substituteInType) cs
+        substituteInType (Scalar (Arrow als v t1 t2)) =
+          Scalar $ Arrow als v (substituteInType t1) (substituteInType t2)
+        substituteInType (Array () u t shape) =
+          arrayOf (substituteInType (Scalar t)) (substituteInShape shape) u
 
         substituteInShape (ShapeDecl ds) =
           ShapeDecl $ map substituteInDim ds
@@ -184,7 +170,7 @@ envTypeAbbrs env =
 refineEnv :: SrcLoc -> TySet -> Env -> QualName Name -> [TypeParam] -> StructType
           -> TypeM (QualName VName, TySet, Env)
 refineEnv loc tset env tname ps t
-  | Just (tname', TypeAbbr l cur_ps (TypeVar () _ (TypeName qs v) _)) <-
+  | Just (tname', TypeAbbr l cur_ps (Scalar (TypeVar () _ (TypeName qs v) _))) <-
       findTypeDef tname (ModEnv env),
     QualName (qualQuals tname') v `M.member` tset =
       if paramsMatch cur_ps ps then
@@ -322,7 +308,7 @@ ppTypeAbbr :: Pretty a => [VName] -> a -> ([TypeParam], StructType) -> String
 ppTypeAbbr abs name (ps, t) =
   "type " ++ unwords (pretty name : map pretty ps) ++ t'
   where t' = case t of
-               TypeVar () _ tn args
+               Scalar (TypeVar () _ tn args)
                  | typeLeaf tn `elem` abs,
                    map typeParamToArg ps == args -> ""
                _ -> " = " ++ pretty t
@@ -438,10 +424,10 @@ matchMTys orig_mty orig_mty_sig =
                 pure $ M.singleton x $ DimSub $ NamedDim $ qualName y
               matchTypeParam (TypeParamType Unlifted x _) (TypeParamType Unlifted y _) =
                 pure $ M.singleton x $ TypeSub $ TypeAbbr Unlifted [] $
-                TypeVar () Nonunique (typeName y) []
+                Scalar $ TypeVar () Nonunique (typeName y) []
               matchTypeParam (TypeParamType _ x _) (TypeParamType Lifted y _) =
                 pure $ M.singleton x $ TypeSub $ TypeAbbr Lifted [] $
-                TypeVar () Nonunique (typeName y) []
+                Scalar $ TypeVar () Nonunique (typeName y) []
               matchTypeParam _ _ =
                 nomatch
 

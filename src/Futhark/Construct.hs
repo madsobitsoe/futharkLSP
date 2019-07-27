@@ -27,7 +27,6 @@ module Futhark.Construct
   , eDivRoundingUp
   , eRoundToMultipleOf
   , eSliceArray
-  , eSplitArray
   , eBlank
 
   , eOutOfBounds
@@ -54,9 +53,6 @@ module Futhark.Construct
   -- * Result types
   , instantiateShapes
   , instantiateShapes'
-  , instantiateShapesFromIdentList
-  , instantiateExtTypes
-  , instantiateIdents
   , removeExistentials
 
   -- * Convenience
@@ -76,7 +72,6 @@ import Control.Monad.Writer
 import Futhark.Representation.AST
 import Futhark.MonadFreshNames
 import Futhark.Binder
-import Futhark.Util
 
 letSubExp :: MonadBinder m =>
              String -> Exp (Lore m) -> m SubExp
@@ -275,18 +270,6 @@ eSliceArray d arr i n = do
   return $ BasicOp $ Index arr $ fullSlice arr_t $ skips ++ [slice i' n']
   where slice j m = DimSlice j m (constant (1::Int32))
 
--- | Construct an 'Index' expressions that splits an array in different parts along the outer dimension.
-eSplitArray :: MonadBinder m =>
-               VName -> [m (Exp (Lore m))] -> m [Exp (Lore m)]
-eSplitArray arr sizes = do
-  sizes' <- mapM (letSubExp "split_size") =<< sequence sizes
-  -- Compute the starting offset for each slice.
-  (_, offsets) <- mapAccumLM increase (intConst Int32 0) sizes'
-  zipWithM (eSliceArray 0 arr) (map eSubExp offsets) (map eSubExp sizes')
-  where increase offset size = do
-          offset' <- letSubExp "offset" $ BasicOp $ BinOp (Add Int32) offset size
-          return (offset', offset)
-
 -- | Are these indexes out-of-bounds for the array?
 eOutOfBounds :: MonadBinder m =>
                 VName -> [m (Exp (Lore m))] -> m (Exp (Lore m))
@@ -481,41 +464,6 @@ instantiateShapes' ts =
   where instantiate _ = do v <- lift $ newIdent "size" $ Prim int32
                            tell [v]
                            return $ Var $ identName v
-
-instantiateShapesFromIdentList :: [Ident] -> [ExtType] -> [Type]
-instantiateShapesFromIdentList idents ts =
-  evalState (instantiateShapes instantiate ts) idents
-  where instantiate _ = do
-          idents' <- get
-          case idents' of
-            [] -> fail "instantiateShapesFromIdentList: insufficiently sized context"
-            ident:idents'' -> do put idents''
-                                 return $ Var $ identName ident
-
-instantiateExtTypes :: [VName] -> [ExtType] -> [Ident]
-instantiateExtTypes names rt =
-  let (shapenames,valnames) = splitAt (shapeContextSize rt) names
-      shapes = [ Ident name (Prim int32) | name <- shapenames ]
-      valts  = instantiateShapesFromIdentList shapes rt
-      vals   = [ Ident name t | (name,t) <- zip valnames valts ]
-  in shapes ++ vals
-
-instantiateIdents :: [VName] -> [ExtType]
-                  -> Maybe ([Ident], [Ident])
-instantiateIdents names ts
-  | let n = shapeContextSize ts,
-    n + length ts == length names = do
-    let (context, vals) = splitAt n names
-        nextShape _ = do
-          (context', remaining) <- get
-          case remaining of []   -> lift Nothing
-                            x:xs -> do let ident = Ident x (Prim int32)
-                                       put (context'++[ident], xs)
-                                       return $ Var x
-    (ts', (context', _)) <-
-      runStateT (instantiateShapes nextShape ts) ([],context)
-    return (context', zipWith Ident vals ts')
-  | otherwise = Nothing
 
 removeExistentials :: ExtType -> Type -> Type
 removeExistentials t1 t2 =

@@ -16,7 +16,7 @@ module Language.Futhark.TypeChecker
   where
 
 import Control.Monad.Except
-import Control.Monad.Writer
+import Control.Monad.Writer hiding (Sum)
 import Data.List
 import Data.Loc
 import Data.Maybe
@@ -114,7 +114,7 @@ initialEnv = intrinsicsModule
         intrinsicsModule = Env mempty initialTypeTable mempty mempty intrinsicsNameMap
 
         addIntrinsicT (name, IntrinsicType t) =
-          Just (name, TypeAbbr Unlifted [] $ Prim t)
+          Just (name, TypeAbbr Unlifted [] $ Scalar $ Prim t)
         addIntrinsicT _ =
           Nothing
 
@@ -162,10 +162,11 @@ bindingTypeParams tparams = localEnv env
 
         typeParamEnv (TypeParamDim v _) =
           mempty { envVtable =
-                     M.singleton v $ BoundV [] (Prim (Signed Int32)) }
+                     M.singleton v $ BoundV [] (Scalar $ Prim $ Signed Int32) }
         typeParamEnv (TypeParamType l v _) =
           mempty { envTypeTable =
-                     M.singleton v $ TypeAbbr l [] $ TypeVar () Nonunique (typeName v) [] }
+                     M.singleton v $ TypeAbbr l [] $
+                     Scalar $ TypeVar () Nonunique (typeName v) [] }
 
 -- In this function, after the recursion, we add the Env of the
 -- current Spec *after* the one that is returned from the recursive
@@ -212,7 +213,8 @@ checkSpecs (TypeSpec l name ps doc loc : specs) =
                    M.singleton (Type, name) $ qualName name'
                , envTypeTable =
                    M.singleton name' $ TypeAbbr l ps' $
-                   TypeVar () Nonunique (typeName name') $ map typeParamToArg ps'
+                   Scalar $ TypeVar () Nonunique (typeName name') $
+                   map typeParamToArg ps'
                }
     (abstypes, env, specs') <- localEnv tenv $ checkSpecs specs
     return (M.insert (qualName name') l abstypes,
@@ -476,21 +478,22 @@ checkValBind (ValBind entry fname maybe_tdecl NoInfo tparams params body doc loc
 
     _ -> return ()
 
+  let arrow (xp, xt) yt = Scalar $ Arrow () xp xt yt
   return (mempty { envVtable =
                      M.singleton fname' $
-                     BoundV tparams' $ foldr (uncurry (Arrow ()) . patternParam) rettype params'
+                     BoundV tparams' $ foldr (arrow . patternParam) rettype params'
                  , envNameMap =
                      M.singleton (Term, fname) $ qualName fname'
                  },
            ValBind entry' fname' maybe_tdecl' (Info rettype) tparams' params' body' doc loc)
 
 nastyType :: Monoid als => TypeBase dim als -> Bool
-nastyType Prim{} = False
+nastyType (Scalar Prim{}) = False
 nastyType t@Array{} = nastyType $ stripArray 1 t
 nastyType _ = True
 
 nastyReturnType :: Monoid als => Maybe (TypeExp VName) -> TypeBase dim als -> Bool
-nastyReturnType _ (Arrow _ _ t1 t2) =
+nastyReturnType _ (Scalar (Arrow _ _ t1 t2)) =
   nastyType t1 || nastyReturnType Nothing t2
 nastyReturnType (Just te) _
   | niceTypeExp te = False
