@@ -256,7 +256,7 @@ unify usage orig_t1 orig_t2 = do
                   -- references to the parameter.  XXX: is this
                   -- sensible?
                   case (p1, p2) of
-                    (Just p1', Just p2') ->
+                    (Named p1', Named p2') ->
                       let f v | v == p2' = Just $ SizeSubst $ NamedDim $ qualName p1'
                               | otherwise = Nothing
                       in (b1, applySubst f b2)

@@ -341,7 +341,7 @@ transformExp (Constr name es (Info (Scalar (Sum cs))) loc) =
             -- construct a value of some type, but with the value
             -- unspecified, because we know it will not matter.
             defaultPayload t = Apply (Var (qualName (VName (nameFromString "arbitrary") (-1)))
-                                     (Info $ Scalar $ Arrow mempty Nothing (Scalar $ Record mempty) t) loc)
+                                     (Info $ Scalar $ Arrow mempty Unnamed (Scalar $ Record mempty) t) loc)
                                (TupLit [] mempty) (Info Observe) (Info t) loc
 
 transformExp Constr{} = error "transformExp: invalid constructor type."

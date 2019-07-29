@@ -261,7 +261,7 @@ initialTermScope = TermScope initialVtable mempty topLevelNameMap mempty
   where initialVtable = M.fromList $ mapMaybe addIntrinsicF $ M.toList intrinsics
 
         funF ts t = foldr (arrow . Scalar . Prim) (Scalar $ Prim t) ts
-        arrow x y = Scalar $ Arrow mempty Nothing x y
+        arrow x y = Scalar $ Arrow mempty Unnamed x y
 
         addIntrinsicF (name, IntrinsicMonoFun ts t) =
           Just (name, BoundV Global [] $ funF ts t)
@@ -270,7 +270,7 @@ initialTermScope = TermScope initialVtable mempty topLevelNameMap mempty
         addIntrinsicF (name, IntrinsicPolyFun tvs pts rt) =
           Just (name, BoundV Global tvs $
                       fromStruct $ vacuousShapeAnnotations $
-                      Scalar $ Arrow mempty Nothing pts' rt)
+                      Scalar $ Arrow mempty Unnamed pts' rt)
           where pts' = case pts of [pt] -> pt
                                    _    -> tupleRecord pts
         addIntrinsicF (name, IntrinsicEquality) =
@@ -334,20 +334,20 @@ instance MonadTypeChecker TermTypeM where
 
       Just OpaqueF -> do
         argtype <- newTypeVar loc "t"
-        return $ Scalar $ Arrow mempty Nothing argtype argtype
+        return $ Scalar $ Arrow mempty Unnamed argtype argtype
 
       Just EqualityF -> do
         argtype <- newTypeVar loc "t"
         equalityType usage argtype
         return $
-          Scalar $ Arrow mempty Nothing argtype $
-          Scalar $ Arrow mempty Nothing argtype $ Scalar $ Prim Bool
+          Scalar $ Arrow mempty Unnamed argtype $
+          Scalar $ Arrow mempty Unnamed argtype $ Scalar $ Prim Bool
 
       Just (OverloadedF ts pts rt) -> do
         argtype <- newTypeVar loc "t"
         mustBeOneOf ts usage argtype
         let (pts', rt') = instOverloaded argtype pts rt
-            arrow xt yt = Scalar $ Arrow mempty Nothing xt yt
+            arrow xt yt = Scalar $ Arrow mempty Unnamed xt yt
         return $ fromStruct $ foldr arrow rt' pts'
 
     observe $ Ident name (Info t) loc
@@ -750,8 +750,7 @@ patternDims (PatternAscription p (TypeDecl _ (Info t)) _) =
         dimIdent _ NamedDim{}        = Nothing
 patternDims _ = []
 
-sliceShape :: Monoid as =>
-              SrcLoc -> [DimIndex] -> TypeBase (DimDecl VName) as
+sliceShape :: SrcLoc -> [DimIndex] -> TypeBase (DimDecl VName) as
            -> TermTypeM (TypeBase (DimDecl VName) as)
 sliceShape loc slice t@(Array als u et (ShapeDecl orig_dims)) =
   setDims <$> adjustDims slice orig_dims
@@ -1162,13 +1161,13 @@ checkExp (ProjectSection fields NoInfo loc) = do
   a <- newTypeVar loc "a"
   let usage = mkUsage loc "projection at"
   b <- foldM (flip $ mustHaveField usage) a fields
-  return $ ProjectSection fields (Info $ Scalar $ Arrow mempty Nothing a b) loc
+  return $ ProjectSection fields (Info $ Scalar $ Arrow mempty Unnamed a b) loc
 
 checkExp (IndexSection idxes NoInfo loc) = do
   (t, _) <- newArrayType loc "e" (length idxes)
   idxes' <- mapM checkDimIndex idxes
   let t' = stripArray (length $ filter isFix idxes) t
-  return $ IndexSection idxes' (Info $ fromStruct $ Scalar $ Arrow mempty Nothing t t') loc
+  return $ IndexSection idxes' (Info $ fromStruct $ Scalar $ Arrow mempty Unnamed t t') loc
   where isFix DimFix{} = True
         isFix _        = False
 
@@ -1678,7 +1677,7 @@ checkApply loc (Scalar funt@(Arrow as pname tp1 tp2)) (argexp, argtype, dflow, a
 
   occur $ dflow `seqOccurences` occurs
   parsubst <- case pname of
-                Just pname' ->
+                Named pname' ->
                   flip M.lookup . M.singleton pname' .
                   SizeSubst <$> sizeSubst tp1' argexp
                 _ -> return $ const Nothing
@@ -1695,7 +1694,7 @@ checkApply loc (Scalar funt@(Arrow as pname tp1 tp2)) (argexp, argtype, dflow, a
 checkApply loc tfun@(Scalar TypeVar{}) arg = do
   tv <- newTypeVar loc "b"
   unify (mkUsage loc "use as function") (toStruct tfun) $
-    Scalar $ Arrow mempty Nothing (toStruct (argType arg)) tv
+    Scalar $ Arrow mempty Unnamed (toStruct (argType arg)) tv
   constraints <- getConstraints
   checkApply loc (applySubst (`lookupSubst` constraints) tfun) arg
 
@@ -2097,8 +2096,10 @@ verifyFunctionParams params declared_rettype rettype =
                                 , "Consider ascribing an explicit type that does not reference "
                                   ++ quote (prettyName d) ++ "."]
       | otherwise = verifyParams forbidden' ps
-      where forbidden' = maybe forbidden ((forbidden `S.difference`) . S.singleton) $
-                         fst $ patternParam p
+      where forbidden' =
+              case patternParam p of
+                (Named v, _) -> forbidden `S.difference` S.singleton v
+                _            -> forbidden
 
     verifyParams forbidden [] = do
       rettype' <- updateTypes rettype

@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
   * Manually specified type parameters need no longer be exhaustive.
 
+  * Mapped `rotate` is now simplified better.  This can be
+    particularly helpful for stencils with wraparound.
+
 ### Removed
 
 ### Changed
@@ -32,6 +35,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
   * The legacy `futhark -t` option (which did the same as `futhark
     check`) has been removed.
+
+  * Lambdas now bind less tightly than type ascription.
 
 ### Fixed
 
