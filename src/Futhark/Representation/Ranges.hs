@@ -34,7 +34,6 @@ where
 
 import Control.Monad.Identity
 import Control.Monad.Reader
-import qualified Data.Set as S
 import Data.Monoid ((<>))
 import Data.Foldable
 
@@ -167,18 +166,15 @@ mkPatternRanges pat e =
 mkBodyRanges :: Stms lore -> Result -> [Range]
 mkBodyRanges bnds = map $ removeUnknownBounds . rangeOf
   where boundInBnds =
-          fold $ fmap (S.fromList . patternNames . stmPattern) bnds
+          fold $ fmap (namesFromList . patternNames . stmPattern) bnds
         removeUnknownBounds (lower,upper) =
           (removeUnknownBound lower,
            removeUnknownBound upper)
         removeUnknownBound (Just bound)
-          | freeIn bound `intersects` boundInBnds = Nothing
-          | otherwise                             = Just bound
+          | freeIn bound `namesIntersect` boundInBnds = Nothing
+          | otherwise                                 = Just bound
         removeUnknownBound Nothing =
           Nothing
-
-intersects :: Ord a => S.Set a -> S.Set a -> Bool
-intersects a b = not $ S.null $ a `S.intersection` b
 
 mkRangedLetStm :: (Attributes lore, CanBeRanged (Op lore)) =>
                   Pattern lore

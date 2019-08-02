@@ -33,7 +33,6 @@ import Control.Monad.Except
 import Control.Monad.Reader
 import Data.Maybe
 import qualified Data.Map.Strict as M
-import qualified Data.Set as S
 import Data.List
 import Data.Loc
 
@@ -46,7 +45,7 @@ import Futhark.Representation.ExplicitMemory
 import qualified Futhark.CodeGen.ImpCode.Kernels as Imp
 import Futhark.CodeGen.ImpCode.Kernels (elements)
 import Futhark.CodeGen.ImpGen
-import Futhark.Util.IntegralExp (quotRoundingUp, quot)
+import Futhark.Util.IntegralExp (quotRoundingUp, quot, rem)
 import Futhark.Util (chunks, maybeNth)
 
 type CallKernelGen = ImpM ExplicitMemory Imp.HostOp
@@ -171,10 +170,10 @@ compileGroupExp constants (Pattern _ [dest]) (BasicOp (Copy arr)) = do
 compileGroupExp constants (Pattern _ [dest]) (BasicOp (Manifest _ arr)) = do
   groupCopy constants (patElemName dest) [] (Var arr) []
   sOp Imp.LocalBarrier
-compileGroupExp constants (Pattern _ [dest]) (BasicOp (Replicate _ se)) = do
-  ds <- mapM toExp . arrayDims $ patElemType dest
-  groupCoverSpace constants ds $ \is ->
-    copyDWIM (patElemName dest) is se (drop 1 is)
+compileGroupExp constants (Pattern _ [dest]) (BasicOp (Replicate ds se)) = do
+  ds' <- mapM toExp $ shapeDims ds
+  groupCoverSpace constants ds' $ \is ->
+    copyDWIM (patElemName dest) is se (drop (shapeRank ds) is)
 compileGroupExp constants (Pattern _ [dest]) (BasicOp (Iota n e s _)) = do
   n' <- toExp n
   e' <- toExp e
@@ -202,16 +201,6 @@ compileGroupSpace constants lvl space = do
 
   dPrimV_ (segFlat space) $ kernelLocalThreadId constants
 
-prepareRedOrScan :: KernelConstants -> SegLevel -> SegSpace
-                 -> InKernelGen Imp.Exp
-prepareRedOrScan constants lvl space = do
-  compileGroupSpace constants lvl space
-
-  case unSegSpace space of
-    [(_, dim)] -> toExp dim
-    _ -> compilerLimitationS $
-         "Intra-group segmented operation: " ++ pretty space
-
 compileGroupOp :: KernelConstants -> OpCompiler ExplicitMemory Imp.KernelOp
 
 compileGroupOp constants pat (Alloc size space) =
@@ -231,8 +220,9 @@ compileGroupOp constants pat (Inner (SegOp (SegMap lvl space _ body))) = do
   sOp Imp.LocalBarrier
 
 compileGroupOp constants pat (Inner (SegOp (SegScan lvl space scan_op _ _ body))) = do
-  w <- prepareRedOrScan constants lvl space
-  let (ltids, _) = unzip $ unSegSpace space
+  compileGroupSpace constants lvl space
+  let (ltids, dims) = unzip $ unSegSpace space
+  dims' <- mapM toExp dims
 
   sWhen (isActive $ unSegSpace space) $
     compileStms mempty (kernelBodyStms body) $
@@ -243,16 +233,24 @@ compileGroupOp constants pat (Inner (SegOp (SegScan lvl space scan_op _ _ body))
 
   sOp Imp.LocalBarrier
 
-  groupScan constants Nothing w scan_op $ patternNames pat
+  let segment_size = last dims'
+      crossesSegment from to = (to-from) .>. (to `rem` segment_size)
+  groupScan constants (Just crossesSegment) (product dims') scan_op $
+    patternNames pat
 
 compileGroupOp constants pat (Inner (SegOp (SegRed lvl space ops _ body))) = do
-  w <- prepareRedOrScan constants lvl space
+  compileGroupSpace constants lvl space
+
   let (ltids, dims) = unzip $ unSegSpace space
-      (red_pes, map_pes) = splitAt (segRedResults ops) $ patternElements pat
+      (red_pes, map_pes) =
+        splitAt (segRedResults ops) $ patternElements pat
+
+  dims' <- mapM toExp dims
 
   let mkTempArr t =
         sAllocArray "red_arr" (elemType t) (Shape dims <> arrayShape t) $ Space "local"
-  tmp_arrs <- mapM (mkTempArr . patElemType) red_pes
+  tmp_arrs <- mapM mkTempArr $ concatMap (lambdaReturnType . segRedLambda) ops
+  let tmps_for_ops = chunks (map (length . segRedNeutral) ops) tmp_arrs
 
   sWhen (isActive $ unSegSpace space) $
     compileStms mempty (kernelBodyStms body) $ do
@@ -264,14 +262,29 @@ compileGroupOp constants pat (Inner (SegOp (SegRed lvl space ops _ body))) = do
 
   sOp Imp.LocalBarrier
 
-  let tmps_for_ops = chunks (map (length . segRedNeutral) ops) tmp_arrs
-  forM_ (zip ops tmps_for_ops) $ \(op, tmps) ->
-    groupReduce constants w (segRedLambda op) tmps
+  case dims' of
+    [dim'] -> do
+      forM_ (zip ops tmps_for_ops) $ \(op, tmps) ->
+        groupReduce constants dim' (segRedLambda op) tmps
 
-  sOp Imp.LocalBarrier
+      sOp Imp.LocalBarrier
 
-  forM_ (zip red_pes tmp_arrs) $ \(pe, arr) ->
-    copyDWIM (patElemName pe) [] (Var arr) [0]
+      forM_ (zip red_pes tmp_arrs) $ \(pe, arr) ->
+        copyDWIM (patElemName pe) [] (Var arr) [0]
+
+    _ -> do
+      let segment_size = last dims'
+          crossesSegment from to = (to-from) .>. (to `rem` segment_size)
+
+      forM_ (zip ops tmps_for_ops) $ \(op, tmps) ->
+        groupScan constants (Just crossesSegment) (product dims') (segRedLambda op) tmps
+
+      sOp Imp.LocalBarrier
+
+      let segment_is = map Imp.vi32 $ init ltids
+      forM_ (zip red_pes tmp_arrs) $ \(pe, arr) ->
+        copyDWIM (patElemName pe) segment_is (Var arr) (segment_is ++ [last dims'-1])
+
 
 compileGroupOp _ pat _ =
   compilerBugS $ "compileGroupOp: cannot compile rhs of binding " ++ pretty pat
@@ -475,14 +488,14 @@ computeKernelUses :: FreeIn a =>
                      a -> [VName]
                   -> CallKernelGen [Imp.KernelUse]
 computeKernelUses kernel_body bound_in_kernel = do
-  let actually_free = freeIn kernel_body `S.difference` S.fromList bound_in_kernel
+  let actually_free = freeIn kernel_body `namesSubtract` namesFromList bound_in_kernel
   -- Compute the variables that we need to pass to the kernel.
   nub <$> readsFromSet actually_free
 
 readsFromSet :: Names -> CallKernelGen [Imp.KernelUse]
 readsFromSet free =
   fmap catMaybes $
-  forM (S.toList free) $ \var -> do
+  forM (namesToList free) $ \var -> do
     t <- lookupType var
     vtable <- getVTable
     case t of

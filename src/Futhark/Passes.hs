@@ -1,5 +1,4 @@
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE OverloadedStrings #-}
 -- | Optimisation pipelines.
 module Futhark.Passes
   ( standardPipeline
@@ -30,13 +29,11 @@ import Futhark.Pipeline
 import Futhark.Representation.ExplicitMemory (ExplicitMemory)
 import Futhark.Representation.Kernels (Kernels)
 import Futhark.Representation.SOACS (SOACS)
-import Futhark.Util
 
 standardPipeline :: Pipeline SOACS SOACS
 standardPipeline =
   passes [ simplifySOACS
          , inlineAndRemoveDeadFunctions
-         , simplifySOACS
          , performCSE True
          , simplifySOACS
            -- We run fusion twice
@@ -50,47 +47,31 @@ standardPipeline =
          , removeDeadFunctions
          ]
 
--- Do we use in-place lowering?  Currently enabled by default.  Disable by
--- setting the environment variable IN_PLACE_LOWERING=0.
-usesInPlaceLowering :: Bool
-usesInPlaceLowering =
-  isEnvVarSet "IN_PLACE_LOWERING" True
-
-inPlaceLoweringMaybe :: Pipeline Kernels Kernels
-inPlaceLoweringMaybe =
-  if usesInPlaceLowering
-  then onePass inPlaceLowering
-  else passes []
-
 kernelsPipeline :: Pipeline SOACS Kernels
 kernelsPipeline =
   standardPipeline >>>
   onePass extractKernels >>>
   passes [ simplifyKernels
          , babysitKernels
-         , simplifyKernels
          , tileLoops
          , unstream
          , simplifyKernels
-         , performCSE True
-         , simplifyKernels
-         ] >>>
-  inPlaceLoweringMaybe
+         , inPlaceLowering
+         ]
 
 sequentialPipeline :: Pipeline SOACS Kernels
 sequentialPipeline =
   standardPipeline >>>
   onePass firstOrderTransform >>>
   passes [ simplifyKernels
-         ] >>>
-  inPlaceLoweringMaybe
+         , inPlaceLowering
+         ]
 
 sequentialCpuPipeline :: Pipeline SOACS ExplicitMemory
 sequentialCpuPipeline =
   sequentialPipeline >>>
   onePass explicitAllocations >>>
-  passes [ simplifyExplicitMemory
-         , performCSE False
+  passes [ performCSE False
          , simplifyExplicitMemory
          , doubleBuffer
          , simplifyExplicitMemory

@@ -2,6 +2,7 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 -- | This module provides facilities for transforming Futhark programs such
 -- that names are unique, via the 'renameProg' function.
 -- Additionally, the module also supports adding integral \"tags\" to
@@ -36,19 +37,19 @@ module Futhark.Transform.Rename
 import Control.Monad.State
 import Control.Monad.Reader
 import qualified Data.Map.Strict as M
-import qualified Data.Set as S
 import Data.Maybe
 
 import Futhark.Representation.AST.Syntax
 import Futhark.Representation.AST.Traversals
+import Futhark.Representation.AST.Attributes.Names
 import Futhark.Representation.AST.Attributes.Patterns
-import Futhark.FreshNames
-import Futhark.MonadFreshNames (MonadFreshNames(..), modifyNameSource)
+import Futhark.FreshNames hiding (newName)
+import Futhark.MonadFreshNames (MonadFreshNames(..), modifyNameSource, newName)
 import Futhark.Transform.Substitute
 
 runRenamer :: RenameM a -> VNameSource -> (a, VNameSource)
-runRenamer m src = runReader (runStateT m src) env
-  where env = RenameEnv M.empty newName
+runRenamer (RenameM m) src = runReader (runStateT m src) env
+  where env = RenameEnv M.empty
 
 -- | Rename variables such that each is unique.  The semantics of the
 -- program are unaffected, under the assumption that the program was
@@ -107,18 +108,17 @@ renamePattern :: (Rename attr, MonadFreshNames m) =>
 renamePattern = modifyNameSource . runRenamer . rename'
   where rename' pat = bind (patternNames pat) $ rename pat
 
-data RenameEnv = RenameEnv {
-    envNameMap :: M.Map VName VName
-  , envNameFn  :: VNameSource -> VName -> (VName, VNameSource)
-  }
+newtype RenameEnv = RenameEnv { envNameMap :: M.Map VName VName }
 
 -- | The monad in which renaming is performed.
-type RenameM = StateT VNameSource (Reader RenameEnv)
+newtype RenameM a = RenameM (StateT VNameSource (Reader RenameEnv) a)
+  deriving (Functor, Applicative, Monad,
+            MonadFreshNames, MonadReader RenameEnv)
 
 -- | Produce a map of the substitutions that should be performed by
 -- the renamer.
 renamerSubstitutions :: RenameM Substitutions
-renamerSubstitutions = lift $ asks envNameMap
+renamerSubstitutions = asks envNameMap
 
 -- | Perform a renaming using the 'Substitute' instance.  This only
 -- works if the argument does not itself perform any name binding, but
@@ -127,13 +127,6 @@ substituteRename :: Substitute a => a -> RenameM a
 substituteRename x = do
   substs <- renamerSubstitutions
   return $ substituteNames substs x
-
--- | Return a fresh, unique name.  The @VName@ is prepended to the
--- name.
-new :: VName -> RenameM VName
-new k = do (k', src') <- asks envNameFn <*> get <*> pure k
-           put src'
-           return k'
 
 -- | Members of class 'Rename' can be uniquely renamed.
 class Rename a where
@@ -177,7 +170,7 @@ bindingForRename = bind
 
 bind :: [VName] -> RenameM a -> RenameM a
 bind vars body = do
-  vars' <- mapM new vars
+  vars' <- mapM newName vars
   -- This works because map union prefers elements from left
   -- operand.
   local (bind' vars') body
@@ -292,7 +285,7 @@ instance Renameable lore => Rename (Lambda lore) where
       return $ Lambda params' body' ret'
 
 instance Rename Names where
-  rename = fmap S.fromList . mapM rename . S.toList
+  rename = fmap namesFromList . mapM rename . namesToList
 
 instance Rename Rank where
   rename = return

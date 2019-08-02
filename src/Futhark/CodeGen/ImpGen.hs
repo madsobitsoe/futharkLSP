@@ -533,8 +533,8 @@ defCompileStms alive_after_stms all_stms m =
 
           e_code <- collect $ compileExp pat e
           (live_after, bs_code) <- collect' $ compileStms' (patternAllocs pat <> allocs) bs
-          let dies_here v = not (v `S.member` live_after) &&
-                            v `S.member` freeIn e_code
+          let dies_here v = not (v `nameIn` live_after) &&
+                            v `nameIn` freeIn e_code
               to_free = S.filter (dies_here . fst) allocs
 
           emit e_code
@@ -1105,12 +1105,11 @@ copyDWIMDest dest dest_is (Var src) src_is = do
 
     (_, ScalarVar _ (ScalarEntry _)) | not $ null src_is ->
       compilerBugS $
-      unwords ["copyDWIMDest: prim-typed source", pretty src, "with nonzero indices."]
-
+      unwords ["copyDWIMDest: prim-typed source", pretty src, "with nonzero indices", pretty src_is]
 
     (ScalarDestination name, _) | not $ null dest_is ->
       compilerBugS $
-      unwords ["copyDWIMDest: prim-typed target", pretty name, "with nonzero indices."]
+      unwords ["copyDWIMDest: prim-typed target", pretty name, "with nonzero indices", pretty dest_is]
 
     (ScalarDestination name, ScalarVar _ (ScalarEntry pt)) ->
       emit $ Imp.SetScalar name $ Imp.var src pt
