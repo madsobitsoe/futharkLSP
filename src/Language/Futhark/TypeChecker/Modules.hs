@@ -130,12 +130,12 @@ newNamesForMTy orig_mty = do
           Scalar $ Prim t
         substituteInType (Scalar (Record ts)) =
           Scalar $ Record $ fmap substituteInType ts
-        substituteInType (Scalar (Sum cs)) =
-          Scalar $ Sum $ fmap (map substituteInType) cs
+        substituteInType (Scalar (Sum ts)) =
+          Scalar $ Sum $ (fmap . fmap) substituteInType ts
+        substituteInType (Array () u t shape) =
+          arrayOf (substituteInType $ Scalar t) (substituteInShape shape) u
         substituteInType (Scalar (Arrow als v t1 t2)) =
           Scalar $ Arrow als v (substituteInType t1) (substituteInType t2)
-        substituteInType (Array () u t shape) =
-          arrayOf (substituteInType (Scalar t)) (substituteInShape shape) u
 
         substituteInShape (ShapeDecl ds) =
           ShapeDecl $ map substituteInDim ds
