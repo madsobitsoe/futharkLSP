@@ -16,6 +16,7 @@ import Data.Bitraversable
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.List
+import qualified Data.List.NonEmpty as NE
 import Data.Loc
 import Data.Char (chr)
 import Data.Maybe
@@ -280,7 +281,7 @@ internaliseExp desc (E.Index e idxs _ loc) = do
 internaliseExp desc (E.TupLit es _) = concat <$> mapM (internaliseExp desc) es
 
 internaliseExp desc (E.RecordLit orig_fields _) =
-  concatMap snd . sortFields . M.unions . reverse <$> mapM internaliseField orig_fields
+  concatMap snd . sortFields . M.unions <$> mapM internaliseField orig_fields
   where internaliseField (E.RecordFieldExplicit name e _) =
           M.singleton name <$> internaliseExp desc e
         internaliseField (E.RecordFieldImplicit name t loc) =
@@ -669,17 +670,17 @@ internaliseExp desc (E.Assert e1 e2 (Info check) loc) = do
 internaliseExp _ e@E.Constr{} =
   fail $ "internaliseExp: unexpected constructor at " ++ locStr (srclocOf e)
 
-internaliseExp desc (E.Match  e cs _ loc) =
-  case cs of
-    [CasePat pCase eCase locCase] -> internalisePat desc pCase e eCase locCase (internaliseExp desc)
-    (c:cs') -> do
-      bFalse <- bFalseM
+internaliseExp desc (E.Match  e cs _ _) =
+  case NE.uncons cs of
+    (CasePat pCase eCase locCase, Nothing) ->
+      internalisePat desc pCase e eCase locCase (internaliseExp desc)
+    (c, Just cs') -> do
+      let CasePat pLast eLast locLast = NE.last cs'
+      bFalse <- do
+        eLast' <- internalisePat desc pLast e eLast locLast internaliseBody
+        foldM (\bf c' -> eBody $ return $ generateCaseIf desc e c' bf) eLast' $
+          reverse $ NE.init cs'
       letTupExp' desc =<< generateCaseIf desc e c bFalse
-      where bFalseM = do
-              eLast' <- internalisePat desc pLast e eLast locLast internaliseBody
-              foldM (\bf c' -> eBody $ return $ generateCaseIf desc e c' bf) eLast' (reverse $ init cs')
-            CasePat pLast eLast locLast = last cs'
-    [] -> fail $ "internaliseExp: match with no cases at: " ++ locStr loc
 
 -- The "interesting" cases are over, now it's mostly boilerplate.
 

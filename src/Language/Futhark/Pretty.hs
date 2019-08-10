@@ -19,6 +19,7 @@ import           Data.Array
 import           Data.Functor
 import qualified Data.Map.Strict       as M
 import           Data.List
+import qualified Data.List.NonEmpty    as NE
 import           Data.Maybe
 import           Data.Monoid           hiding (Sum)
 import           Data.Ord
@@ -286,14 +287,14 @@ instance (Eq vn, IsName vn, Annot f) => Pretty (ExpBase f vn) where
     equals <+> ppr initexp <+> ppr form <+> text "do" </>
     indent 2 (ppr loopbody)
   pprPrec _ (Constr n cs _ _) = text "#" <> ppr n <+> sep (map ppr cs)
-  pprPrec _ (Match e cs _ _) = text "match" <+> ppr e </> (stack . map ppr) cs
+  pprPrec _ (Match e cs _ _) = text "match" <+> ppr e </> (stack . map ppr) (NE.toList cs)
 
 instance (Eq vn, IsName vn, Annot f) => Pretty (FieldBase f vn) where
   ppr (RecordFieldExplicit name e _) = ppr name <> equals <> ppr e
   ppr (RecordFieldImplicit name _ _) = pprName name
 
 instance (Eq vn, IsName vn, Annot f) => Pretty (CaseBase f vn) where
-  ppr (CasePat p e _) = text "case" <+> ppr p <+> text "->" <+> ppr e
+  ppr (CasePat p e _) = text "case" <+> ppr p <+> text "->" </> indent 2 (ppr e)
 
 instance (Eq vn, IsName vn, Annot f) => Pretty (LoopFormBase f vn) where
   ppr (For i ubound) =

@@ -27,6 +27,7 @@ module Language.Futhark.Traversals
   ) where
 
 import qualified Data.Set                as S
+import qualified Data.List.NonEmpty               as NE
 
 import           Language.Futhark.Syntax
 
@@ -290,6 +291,9 @@ instance ASTMappable a => ASTMappable (Info a) where
 instance ASTMappable a => ASTMappable [a] where
   astMap tv = traverse $ astMap tv
 
+instance ASTMappable a => ASTMappable (NE.NonEmpty a) where
+  astMap tv = traverse $ astMap tv
+
 instance (ASTMappable a, ASTMappable b) => ASTMappable (a,b) where
   astMap tv (x,y) = (,) <$> astMap tv x <*> astMap tv y
 
@@ -394,4 +398,4 @@ bareExp (DoLoop mergepat mergeexp form loopbody loc) =
 bareExp (Constr name es _ loc) =
   Constr name (map bareExp es) NoInfo loc
 bareExp (Match e cases _ loc) =
-  Match (bareExp e) (map bareCase cases) NoInfo loc
+  Match (bareExp e) (fmap bareCase cases) NoInfo loc
