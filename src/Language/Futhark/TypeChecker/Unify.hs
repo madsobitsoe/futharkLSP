@@ -196,6 +196,9 @@ unifySharedConstructors usage cs1 cs2 =
           | otherwise = typeError usage $ "Cannot unify constructor " ++
                         quote (prettyName c) ++ "."
 
+indent :: String -> String
+indent = intercalate "\n" . map ("  "++) . lines
+
 -- | Unifies two types.
 unify :: MonadUnify m => Usage -> StructType -> StructType -> m ()
 unify usage orig_t1 orig_t2 = do
@@ -210,9 +213,14 @@ unify usage orig_t1 orig_t2 = do
           t1' = applySubst (`lookupSubst` constraints) t1
           t2' = applySubst (`lookupSubst` constraints) t2
 
-          failure =
-            typeError usage $ "Couldn't match expected type `" ++
-            pretty t1' ++ "' with actual type `" ++ pretty t2' ++ "'."
+          failure
+            -- This case is to avoid repeating the types that are also
+            -- shown in the breadcrumb.
+            | t1 == orig_t1, t2 == orig_t2 =
+                typeError (srclocOf usage) "Types do not match."
+            | otherwise =
+                typeError (srclocOf usage) $ "Couldn't match expected type\n" ++
+                indent (pretty t1') ++ "\nwith actual type\n" ++ indent (pretty t2')
 
           unifyDims' d1 d2
             | isJust $ unifyDims d1 d2 = return ()
@@ -335,10 +343,11 @@ linkVarToType usage vn tp = do
                       Scalar (TypeVar _ _ (TypeName [] v) [])
                         | not $ isRigid v constraints -> linkVarToTypes usage v ts
                       _ ->
-                        typeError usage $ "Cannot unify `" ++ prettyName vn ++ "' with type `" ++
-                          pretty tp ++ "' (`" ++ prettyName vn ++
-                          "` must be one of " ++ intercalate ", " (map pretty ts) ++
-                          " due to " ++ show old_usage ++ ")."
+                        typeError usage $ "Cannot unify " ++ quote (prettyName vn) ++
+                        "' with type\n" ++ indent (pretty tp) ++ "\nas " ++
+                        quote (prettyName vn) ++ " must be one of " ++
+                        intercalate ", " (map pretty ts) ++
+                        " due to " ++ show old_usage ++ ")."
 
               Just (HasFields required_fields old_usage) ->
                 case tp of
@@ -351,14 +360,12 @@ linkVarToType usage vn tp = do
                         modifyConstraints $ M.insert v $
                         HasFields required_fields old_usage
                   _ ->
-                    let required_fields' =
-                          intercalate ", " $ map field $ M.toList required_fields
-                        field (l, t) = pretty l ++ ": " ++ pretty t
-                    in typeError usage $
-                       "Cannot unify `" ++ prettyName vn ++ "' with type `" ++
-                       pretty tp ++ "' (must be a record with fields {" ++
-                       required_fields' ++
-                       "} due to " ++ show old_usage ++ ")."
+                    typeError usage $
+                    "Cannot unify " ++ quote (prettyName vn) ++ " with type\n" ++
+                    indent (pretty tp) ++ "\nas " ++ quote (prettyName vn) ++
+                    " must be a record with fields\n" ++
+                    pretty (Record required_fields) ++
+                    "\ndue to " ++ show old_usage ++ "."
 
               Just (HasConstrs required_cs old_usage) ->
                 case tp of

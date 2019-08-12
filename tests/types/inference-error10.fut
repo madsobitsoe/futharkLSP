@@ -1,6 +1,6 @@
 -- Lambda-binding freezes an otherwise general function.
 -- ==
--- error: Couldn't match
+-- error: Types do not match
 
 let main (x: i32) (y: bool) =
   let f x y = (y,x)
