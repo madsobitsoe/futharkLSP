@@ -1292,10 +1292,7 @@ isOverloadedFunction qname args ret loc = do
     handle [x] "unsign_i32" = Just $ toUnsigned I.Int32 x
     handle [x] "unsign_i64" = Just $ toUnsigned I.Int64 x
 
-    handle [x] "sgn" = Just $ signumF x
-    handle [x] "abs" = Just $ absF x
-    handle [x] "!" = Just $ notF x
-    handle [x] "~" = Just $ complementF x
+    handle [x] "!" = Just $ complementF x
 
     handle [x] "opaque" = Just $ \desc ->
       mapM (letSubExp desc . BasicOp . Opaque) =<< internaliseExp "opaque_arg" x
@@ -1493,16 +1490,16 @@ isOverloadedFunction qname args ret loc = do
       where reduce w scan_lam nes arrs =
               I.Screma w <$> I.scanSOAC scan_lam nes <*> pure arrs
 
-    handle [TupLit [op, f, arr] _] "stream_red" = Just $ \desc ->
+    handle [TupLit [op, f, arr] _] "reduce_stream" = Just $ \desc ->
       internaliseStreamRed desc InOrder Noncommutative op f arr
 
-    handle [TupLit [op, f, arr] _] "stream_red_per" = Just $ \desc ->
+    handle [TupLit [op, f, arr] _] "reduce_stream_per" = Just $ \desc ->
       internaliseStreamRed desc Disorder Commutative op f arr
 
-    handle [TupLit [f, arr] _] "stream_map" = Just $ \desc ->
+    handle [TupLit [f, arr] _] "map_stream" = Just $ \desc ->
       internaliseStreamMap desc InOrder f arr
 
-    handle [TupLit [f, arr] _] "stream_map_per" = Just $ \desc ->
+    handle [TupLit [f, arr] _] "map_stream_per" = Just $ \desc ->
       internaliseStreamMap desc Disorder f arr
 
     handle [TupLit [dest, op, ne, buckets, img] _] "gen_reduce" = Just $ \desc ->
@@ -1551,37 +1548,15 @@ isOverloadedFunction qname args ret loc = do
           letTupExp' desc $ I.BasicOp $ I.ConvOp (I.FPToUI float_from int_to) e'
         _ -> fail "Futhark.Internalise.internaliseExp: non-numeric type in ToUnsigned"
 
-    signumF e desc = do
-      e' <- internaliseExp1 "signum_arg" e
-      case E.typeOf e of
-        E.Scalar (E.Prim (E.Signed t)) ->
-          letTupExp' desc $ I.BasicOp $ I.UnOp (I.SSignum t) e'
-        E.Scalar (E.Prim (E.Unsigned t)) ->
-          letTupExp' desc $ I.BasicOp $ I.UnOp (I.USignum t) e'
-        _ -> fail "Futhark.Internalise.internaliseExp: non-integer type in Signum"
-
-    absF e desc = do
-      e' <- internaliseExp1 "abs_arg" e
-      case E.typeOf e of
-        E.Scalar (E.Prim (E.Signed t)) ->
-          letTupExp' desc $ I.BasicOp $ I.UnOp (I.Abs t) e'
-        E.Scalar (E.Prim (E.Unsigned _)) ->
-          return [e']
-        E.Scalar (E.Prim (E.FloatType t)) ->
-          letTupExp' desc $ I.BasicOp $ I.UnOp (I.FAbs t) e'
-        _ -> fail "Futhark.Internalise.internaliseExp: non-integer type in Abs"
-
-    notF e desc = do
-      e' <- internaliseExp1 "not_arg" e
-      letTupExp' desc $ I.BasicOp $ I.UnOp I.Not e'
-
     complementF e desc = do
       e' <- internaliseExp1 "complement_arg" e
       et <- subExpType e'
       case et of I.Prim (I.IntType t) ->
                    letTupExp' desc $ I.BasicOp $ I.UnOp (I.Complement t) e'
+                 I.Prim I.Bool ->
+                   letTupExp' desc $ I.BasicOp $ I.UnOp I.Not e'
                  _ ->
-                   fail "Futhark.Internalise.internaliseExp: non-integer type in Complement"
+                   fail "Futhark.Internalise.internaliseExp: non-int/bool type in Complement"
 
     scatterF a si v desc = do
       si' <- letExp "write_si" . BasicOp . SubExp =<< internaliseExp1 "write_arg_i" si

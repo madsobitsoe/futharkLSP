@@ -5,11 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
-## [0.12.0]
+## [0.13.0]
 
 ### Added
 
-  * The internal representation of parallel constructs have been
+### Removed
+
+### Changed
+
+### Fixed
+
+## [0.12.1]
+
+### Added
+
+  * The internal representation of parallel constructs has been
     overhauled and many optimisations rewritten.  The overall
     performance impact should be neutral on aggregate, but there may
     be changes for some programs (please report if so).
@@ -28,6 +38,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ### Removed
 
+  * The `~` prefix operator has been removed.  `!` has been extended
+    to perform bitwise negation when applied to integers.
+
 ### Changed
 
   * The `--futhark` option for `futhark bench` and `futhark test` now
@@ -37,6 +50,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
     check`) has been removed.
 
   * Lambdas now bind less tightly than type ascription.
+
+  * `stream_map` is now `map_stream` and `stream_red` is now
+    `reduce_stream`.
 
 ### Fixed
 

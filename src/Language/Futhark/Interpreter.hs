@@ -180,7 +180,7 @@ asInt32 = fromIntegral . asInteger
 
 asBool :: Value -> Bool
 asBool (ValuePrim (BoolValue x)) = x
-asBool v = error $ "Unexpectedly not an integer: " ++ pretty v
+asBool v = error $ "Unexpectedly not a boolean: " ++ pretty v
 
 lookupInEnv :: (Env -> M.Map VName x)
             -> QualName VName -> Env -> Maybe x
@@ -980,6 +980,8 @@ initialCtx =
 
     getB (BoolValue x) = Just $ P.BoolValue x
     getB _             = Nothing
+    putB (P.BoolValue x) = Just $ BoolValue x
+    putB _               = Nothing
 
     fun1 f =
       TermValue Nothing $ ValueFun $ \x -> f x
@@ -1024,15 +1026,15 @@ initialCtx =
               x' <- valf x
               retf =<< op x'
 
-    def "~" = Just $ unopDef [ (getS, putS, P.doUnOp $ P.Complement Int8)
+    def "!" = Just $ unopDef [ (getS, putS, P.doUnOp $ P.Complement Int8)
                              , (getS, putS, P.doUnOp $ P.Complement Int16)
                              , (getS, putS, P.doUnOp $ P.Complement Int32)
                              , (getS, putS, P.doUnOp $ P.Complement Int64)
                              , (getU, putU, P.doUnOp $ P.Complement Int8)
                              , (getU, putU, P.doUnOp $ P.Complement Int16)
                              , (getU, putU, P.doUnOp $ P.Complement Int32)
-                             , (getU, putU, P.doUnOp $ P.Complement Int64)]
-    def "!" = Just $ fun1 $ return . ValuePrim . BoolValue . not . asBool
+                             , (getU, putU, P.doUnOp $ P.Complement Int64)
+                             , (getB, putB, P.doUnOp P.Not) ]
 
     def "+" = arithOp P.Add P.FAdd
     def "-" = arithOp P.Sub P.FSub
@@ -1098,6 +1100,12 @@ initialCtx =
                     _ -> error $ "Cannot unsign: " ++ pretty x
       where bool = Just . BoolValue
 
+    def s | "map_stream" `isPrefixOf` s =
+              Just $ fun2t stream
+
+    def s | "reduce_stream" `isPrefixOf` s =
+              Just $ fun3t $ \_ f arg -> stream f arg
+
     def "map" = Just $ fun2t $ \f xs ->
       toArray =<< mapM (apply noLoc mempty f) (fromArray xs)
 
@@ -1109,12 +1117,6 @@ initialCtx =
             x' <- apply2 noLoc mempty f acc x
             return (x':out, x')
       toArray . reverse . fst =<< foldM next ([], ne) (fromArray xs)
-
-    def s | "stream_map" `isPrefixOf` s =
-              Just $ fun2t stream
-
-    def s | "stream_red" `isPrefixOf` s =
-              Just $ fun3t $ \_ f arg -> stream f arg
 
     def "scatter" = Just $ fun3t $ \arr is vs ->
       case arr of

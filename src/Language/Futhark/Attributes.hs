@@ -570,12 +570,6 @@ intrinsics = M.fromList $ zipWith namify [10..] $
 
              map primFun (M.toList Primitive.primFuns) ++
 
-             [ ("~", IntrinsicOverloadedFun
-                     (map Signed [minBound..maxBound] ++
-                      map Unsigned [minBound..maxBound])
-                     [Nothing] Nothing)
-             , ("!", IntrinsicMonoFun [Bool] Bool)] ++
-
              [("opaque", IntrinsicOpaque)] ++
 
              map unOpFun Primitive.allUnOps ++
@@ -594,6 +588,13 @@ intrinsics = M.fromList $ zipWith namify [10..] $
                                 map Unsigned [minBound..maxBound] ++
                                 map FloatType [minBound..maxBound] ++
                                 [Bool]) ++
+
+             -- This overrides the ! from Primitive.
+             [ ("!", IntrinsicOverloadedFun
+                     (map Signed [minBound..maxBound] ++
+                      map Unsigned [minBound..maxBound] ++
+                     [Bool])
+                     [Nothing] Nothing) ] ++
 
              -- The reason for the loop formulation is to ensure that we
              -- get a missing case warning if we forget a case.
@@ -655,24 +656,24 @@ intrinsics = M.fromList $ zipWith namify [10..] $
                 Scalar t_a `arr` Scalar (Prim $ Signed Int32), arr_a] $
                tupleRecord [uarr_a, Array () Unique (Prim $ Signed Int32) (rank 1)]),
 
-              ("stream_map",
+              ("map_stream",
                IntrinsicPolyFun [tp_a, tp_b]
                 [Scalar (Prim $ Signed Int32) `arr` (arr_a `arr` arr_b), arr_a]
                 uarr_b),
 
-              ("stream_map_per",
+              ("map_stream_per",
                IntrinsicPolyFun [tp_a, tp_b]
                 [Scalar (Prim $ Signed Int32) `arr` (arr_a `arr` arr_b), arr_a]
                 uarr_b),
 
-              ("stream_red",
+              ("reduce_stream",
                IntrinsicPolyFun [tp_a, tp_b]
                 [Scalar t_b `arr` (Scalar t_b `arr` Scalar t_b),
                  Scalar (Prim $ Signed Int32) `arr` (arr_a `arr` Scalar t_b),
                  arr_a] $
                 Scalar t_b),
 
-              ("stream_red_per",
+              ("reduce_stream_per",
                IntrinsicPolyFun [tp_a, tp_b]
                 [Scalar t_b `arr` (Scalar t_b `arr` Scalar t_b),
                  Scalar (Prim $ Signed Int32) `arr` (arr_a `arr` Scalar t_b),
