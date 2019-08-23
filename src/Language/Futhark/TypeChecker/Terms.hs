@@ -1092,8 +1092,10 @@ checkExp (RecordUpdate src fields ve NoInfo loc) = do
   a <- expType src'
   let usage = mkUsage loc "record update"
   r <- foldM (flip $ mustHaveField usage) a fields
-  unify usage (toStruct r) . toStruct =<< expType ve'
-  return $ RecordUpdate src' fields ve' (Info a) loc
+  ve_t <- expType ve'
+  unify usage (toStruct r) (toStruct ve_t)
+  a' <- onRecordField (`setAliases` aliases ve_t) fields <$> expType src'
+  return $ RecordUpdate src' fields ve' (Info a') loc
 
 checkExp (Index e idxes NoInfo loc) = do
   (t, _) <- newArrayType (srclocOf e) "e" $ length idxes
