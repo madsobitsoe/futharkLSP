@@ -204,9 +204,9 @@ unify :: MonadUnify m => Usage -> StructType -> StructType -> m ()
 unify usage orig_t1 orig_t2 = do
   orig_t1' <- normaliseType orig_t1
   orig_t2' <- normaliseType orig_t2
-  breadCrumb (MatchingTypes orig_t1' orig_t2') $ subunify orig_t1 orig_t2
+  breadCrumb (MatchingTypes orig_t1' orig_t2') $ subunify mempty orig_t1 orig_t2
   where
-    subunify t1 t2 = do
+    subunify bound t1 t2 = do
       constraints <- getConstraints
 
       let isRigid' v = isRigid v constraints
@@ -234,6 +234,11 @@ unify usage orig_t1 orig_t2 = do
             typeError usage $ "Dimensions " ++ quote (pretty d1) ++
             " and " ++ quote (pretty d2) ++ " do not match."
 
+          link v t
+            | Just d <- find (`elem` bound) $ S.toList $ typeDimNames t =
+                typeError usage $ "Dimension " ++ quote (prettyName d) ++ " bound in type."
+            | otherwise = linkVarToType usage v t
+
       case (t1', t2') of
         _ | t1' == t2' -> return ()
 
@@ -241,7 +246,7 @@ unify usage orig_t1 orig_t2 = do
          Scalar (Record arg_fs))
           | M.keys fs == M.keys arg_fs ->
               forM_ (M.toList $ M.intersectionWith (,) fs arg_fs) $ \(k, (k_t1, k_t2)) ->
-              breadCrumb (MatchingFields k) $ subunify k_t1 k_t2
+              breadCrumb (MatchingFields k) $ subunify bound k_t1 k_t2
 
         (Scalar (TypeVar _ _ (TypeName _ tn) targs),
          Scalar (TypeVar _ _ (TypeName _ arg_tn) arg_targs))
@@ -252,31 +257,26 @@ unify usage orig_t1 orig_t2 = do
          Scalar (TypeVar _ _ (TypeName [] v2) [])) ->
           case (isRigid' v1, isRigid' v2) of
             (True, True) -> failure
-            (True, False) -> linkVarToType usage v2 t1'
-            (False, True) -> linkVarToType usage v1 t2'
-            (False, False) -> linkVarToType usage v1 t2'
+            (True, False) -> link v2 t1'
+            (False, True) -> link v1 t2'
+            (False, False) -> link v1 t2'
 
         (Scalar (TypeVar _ _ (TypeName [] v1) []), _)
           | not $ isRigid' v1 ->
-              linkVarToType usage v1 t2'
+              link v1 t2'
         (_, Scalar (TypeVar _ _ (TypeName [] v2) []))
           | not $ isRigid' v2 ->
-              linkVarToType usage v2 t1'
+              link v2 t1'
 
         (Scalar (Arrow _ p1 a1 b1),
          Scalar (Arrow _ p2 a2 b2)) -> do
-          subunify a1 a2
-          subunify b1' b2'
+          subunify bound a1 a2
+          subunify bound' b1' b2'
           where (b1', b2') =
                   -- Replace one parameter name with the other in the
                   -- return type, in case of dependent types.  I.e.,
                   -- we want type '(n: i32) -> [n]i32' to unify with
                   -- type '(x: i32) -> [x]i32'.
-                  --
-                  -- In case only one of the functions has a named
-                  -- parameter, we weaken that type by removing all
-                  -- references to the parameter.  XXX: is this
-                  -- sensible?
                   case (p1, p2) of
                     (Named p1', Named p2') ->
                       let f v | v == p2' = Just $ SizeSubst $ NamedDim $ qualName p1'
@@ -285,13 +285,17 @@ unify usage orig_t1 orig_t2 = do
                     _ ->
                       (b1, b2)
 
+                bound' = bound <> mapMaybe pname [p1, p2]
+                pname (Named x) = Just x
+                pname Unnamed = Nothing
+
         (Array{}, Array{})
           | ShapeDecl (t1_d : _) <- arrayShape t1',
             ShapeDecl (t2_d : _) <- arrayShape t2',
             Just t1'' <- peelArray 1 t1',
             Just t2'' <- peelArray 1 t2' -> do
               unifyDims' t1_d t2_d
-              subunify t1'' t2''
+              subunify bound t1'' t2''
 
         (Scalar (Sum cs),
          Scalar (Sum arg_cs))
@@ -301,7 +305,7 @@ unify usage orig_t1 orig_t2 = do
 
       where unifyTypeArg TypeArgDim{} TypeArgDim{} = return ()
             unifyTypeArg (TypeArgType t _) (TypeArgType arg_t _) =
-              subunify t arg_t
+              subunify bound t arg_t
             unifyTypeArg _ _ = typeError usage
               "Cannot unify a type argument with a dimension argument (or vice versa)."
 
