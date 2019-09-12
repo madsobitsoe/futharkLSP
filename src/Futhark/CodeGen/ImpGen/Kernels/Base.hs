@@ -25,7 +25,8 @@ module Futhark.CodeGen.ImpGen.Kernels.Base
   , atomicUpdate
   , atomicUpdateLocking
   , Locking(..)
-  , AtomicUpdate
+  , AtomicUpdate(..)
+  , DoAtomicUpdate
   )
   where
 
@@ -42,11 +43,12 @@ import Futhark.Error
 import Futhark.MonadFreshNames
 import Futhark.Transform.Rename
 import Futhark.Representation.ExplicitMemory
+import qualified Futhark.Representation.ExplicitMemory.IndexFunction as IxFun
 import qualified Futhark.CodeGen.ImpCode.Kernels as Imp
 import Futhark.CodeGen.ImpCode.Kernels (elements)
 import Futhark.CodeGen.ImpGen
 import Futhark.Util.IntegralExp (quotRoundingUp, quot, rem)
-import Futhark.Util (chunks, maybeNth)
+import Futhark.Util (chunks, maybeNth, mapAccumLM, takeLast)
 
 type CallKernelGen = ImpM ExplicitMemory Imp.HostOp
 type InKernelGen = ImpM ExplicitMemory Imp.KernelOp
@@ -174,6 +176,7 @@ compileGroupExp constants (Pattern _ [dest]) (BasicOp (Replicate ds se)) = do
   ds' <- mapM toExp $ shapeDims ds
   groupCoverSpace constants ds' $ \is ->
     copyDWIM (patElemName dest) is se (drop (shapeRank ds) is)
+  sOp Imp.LocalBarrier
 compileGroupExp constants (Pattern _ [dest]) (BasicOp (Iota n e s _)) = do
   n' <- toExp n
   e' <- toExp e
@@ -181,6 +184,7 @@ compileGroupExp constants (Pattern _ [dest]) (BasicOp (Iota n e s _)) = do
   groupLoop constants n' $ \i' -> do
     x <- dPrimV "x" $ e' + i' * s'
     copyDWIM (patElemName dest) [i'] (Var x) []
+  sOp Imp.LocalBarrier
 
 compileGroupExp _ dest e =
   defCompileExp dest e
@@ -200,6 +204,43 @@ compileGroupSpace constants lvl space = do
   zipWithM_ dPrimV_ ltids $ unflattenIndex dims' $ kernelLocalThreadId constants
 
   dPrimV_ (segFlat space) $ kernelLocalThreadId constants
+
+-- Construct the necessary lock arrays for an intra-group histogram.
+prepareIntraGroupSegGenRed :: KernelConstants
+                           -> Count GroupSize SubExp
+                           -> [GenReduceOp ExplicitMemory]
+                           -> InKernelGen [[Imp.Exp] -> InKernelGen ()]
+prepareIntraGroupSegGenRed constants group_size =
+  fmap snd . mapAccumLM onOp Nothing
+  where
+    onOp l op = do
+
+      let local_subhistos = genReduceDest op
+
+      case (l, atomicUpdateLocking $ genReduceOp op) of
+        (_, AtomicPrim f) -> return (l, f (Space "local") local_subhistos)
+        (_, AtomicCAS f) -> return (l, f (Space "local") local_subhistos)
+        (Just l', AtomicLocking f) -> return (l, f l' (Space "local") local_subhistos)
+        (Nothing, AtomicLocking f) -> do
+          locks <- newVName "locks"
+          num_locks <- toExp $ unCount group_size
+
+          let dims = map (toExp' int32) $
+                     shapeDims (genReduceShape op) ++
+                     [genReduceWidth op]
+              l' = Locking locks 0 1 0 ((`rem` num_locks) . flattenIndex dims)
+              locks_t = Array int32 (Shape [unCount group_size]) NoUniqueness
+
+          locks_mem <- sAlloc "locks_mem" (typeSize locks_t) $ Space "local"
+          dArray locks int32 (arrayShape locks_t) $
+            ArrayIn locks_mem $ IxFun.iota $
+            map (primExpFromSubExp int32) $ arrayDims locks_t
+
+          sComment "All locks start out unlocked" $
+            groupCoverSpace constants [kernelGroupSize constants] $ \is ->
+            copyDWIM locks is (intConst Int32 0) []
+
+          return (Just l', f l' (Space "local") local_subhistos)
 
 compileGroupOp :: KernelConstants -> OpCompiler ExplicitMemory Imp.KernelOp
 
@@ -263,6 +304,8 @@ compileGroupOp constants pat (Inner (SegOp (SegRed lvl space ops _ body))) = do
   sOp Imp.LocalBarrier
 
   case dims' of
+    -- Nonsegmented case (or rather, a single segment) - this we can
+    -- handle directly with a group-level reduction.
     [dim'] -> do
       forM_ (zip ops tmps_for_ops) $ \(op, tmps) ->
         groupReduce constants dim' (segRedLambda op) tmps
@@ -273,6 +316,9 @@ compileGroupOp constants pat (Inner (SegOp (SegRed lvl space ops _ body))) = do
         copyDWIM (patElemName pe) [] (Var arr) [0]
 
     _ -> do
+      -- Segmented intra-group reductions are turned into (regular)
+      -- segmented scans.  It is possible that this can be done
+      -- better, but at least this approach is simple.
       let segment_size = last dims'
           crossesSegment from to = (to-from) .>. (to `rem` segment_size)
 
@@ -285,6 +331,47 @@ compileGroupOp constants pat (Inner (SegOp (SegRed lvl space ops _ body))) = do
       forM_ (zip red_pes tmp_arrs) $ \(pe, arr) ->
         copyDWIM (patElemName pe) segment_is (Var arr) (segment_is ++ [last dims'-1])
 
+compileGroupOp constants pat (Inner (SegOp (SegGenRed lvl space ops _ kbody))) = do
+  compileGroupSpace constants lvl space
+  let ltids = map fst $ unSegSpace space
+
+  -- We don't need the red_pes, because it is guaranteed by our type
+  -- rules that they occupy the same memory as the destinations for
+  -- the ops.
+  let num_red_res = length ops + sum (map (length . genReduceNeutral) ops)
+      (_red_pes, map_pes) =
+        splitAt num_red_res $ patternElements pat
+
+  ops' <- prepareIntraGroupSegGenRed constants (segGroupSize lvl) ops
+
+  -- Ensure that all locks have been initialised.
+  sOp Imp.LocalBarrier
+
+  sWhen (isActive $ unSegSpace space) $
+    compileStms mempty (kernelBodyStms kbody) $ do
+    let (red_res, map_res) = splitAt num_red_res $ kernelBodyResult kbody
+        (red_is, red_vs) = splitAt (length ops) $ map kernelResultSubExp red_res
+    zipWithM_ (compileThreadResult space constants) map_pes map_res
+
+    let vs_per_op = chunks (map (length . genReduceDest) ops) red_vs
+
+    forM_ (zip4 red_is vs_per_op ops' ops) $
+      \(bin, op_vs, do_op, GenReduceOp dest_w _ _ shape lam) -> do
+        let bin' = toExp' int32 bin
+            dest_w' = toExp' int32 dest_w
+            bin_in_bounds = 0 .<=. bin' .&&. bin' .<. dest_w'
+            bin_is = map (`Imp.var` int32) (init ltids) ++ [bin']
+            vs_params = takeLast (length op_vs) $ lambdaParams lam
+
+        sComment "perform atomic updates" $
+          sWhen bin_in_bounds $ do
+          dLParams $ lambdaParams lam
+          sLoopNest shape $ \is -> do
+            forM_ (zip vs_params op_vs) $ \(p, v) ->
+              copyDWIM (paramName p) [] v is
+            do_op (bin_is ++ is)
+
+  sOp Imp.LocalBarrier
 
 compileGroupOp _ pat _ =
   compilerBugS $ "compileGroupOp: cannot compile rhs of binding " ++ pretty pat
@@ -315,26 +402,37 @@ data Locking =
 
 -- | A function for generating code for an atomic update.  Assumes
 -- that the bucket is in-bounds.
-type AtomicUpdate lore =
+type DoAtomicUpdate lore =
   Space -> [VName] -> [Imp.Exp] -> ImpM lore Imp.KernelOp ()
+
+-- | The mechanism that will be used for performing the atomic update.
+-- Approximates how efficient it will be.  Ordered from most to least
+-- efficient.
+data AtomicUpdate lore
+  = AtomicPrim (DoAtomicUpdate lore)
+    -- ^ Supported directly by primitive.
+  | AtomicCAS (DoAtomicUpdate lore)
+    -- ^ Can be done by efficient swaps.
+  | AtomicLocking (Locking -> DoAtomicUpdate lore)
+    -- ^ Requires explicit locking.
 
 atomicUpdate :: ExplicitMemorish lore =>
                 Space -> [VName] -> [Imp.Exp] -> Lambda lore -> Locking
              -> ImpM lore Imp.KernelOp ()
 atomicUpdate space arrs bucket lam locking =
   case atomicUpdateLocking lam of
-    Left f -> f space arrs bucket
-    Right f -> f locking space arrs bucket
+    AtomicPrim f -> f space arrs bucket
+    AtomicCAS f -> f space arrs bucket
+    AtomicLocking f -> f locking space arrs bucket
 
 -- | 'atomicUpdate', but where it is explicitly visible whether a
 -- locking strategy is necessary.
 atomicUpdateLocking :: ExplicitMemorish lore =>
-                       Lambda lore
-                    -> Either (AtomicUpdate lore) (Locking -> AtomicUpdate lore)
+                       Lambda lore -> AtomicUpdate lore
 
 atomicUpdateLocking lam
   | Just ops_and_ts <- splitOp lam,
-    all (\(_, t, _, _) -> primBitSize t == 32) ops_and_ts = Left $ \space arrs bucket ->
+    all (\(_, t, _, _) -> primBitSize t == 32) ops_and_ts = AtomicPrim $ \space arrs bucket ->
   -- If the operator is a vectorised binary operator on 32-bit values,
   -- we can use a particularly efficient implementation. If the
   -- operator has an atomic implementation we use that, otherwise it
@@ -362,12 +460,12 @@ atomicUpdateLocking lam
 atomicUpdateLocking op
   | [Prim t] <- lambdaReturnType op,
     [xp, _] <- lambdaParams op,
-    primBitSize t == 32 = Left $ \space [arr] bucket -> do
+    primBitSize t == 32 = AtomicCAS $ \space [arr] bucket -> do
       old <- dPrim "old" t
       atomicUpdateCAS space t arr old bucket (paramName xp) $
         compileBody' [xp] $ lambdaBody op
 
-atomicUpdateLocking op = Right $ \locking space arrs bucket -> do
+atomicUpdateLocking op = AtomicLocking $ \locking space arrs bucket -> do
   old <- dPrim "old" int32
   continue <- dPrimV "continue" true
 
