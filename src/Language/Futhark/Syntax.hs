@@ -225,6 +225,8 @@ instance Traversable DimDecl where
   traverse _ (ConstDim x) = pure $ ConstDim x
   traverse _ AnyDim = pure AnyDim
 
+-- Note that the notion of unifyDims here is intentionally not what we
+-- use when we do real type unification in the type checker.
 instance ArrayDim (DimDecl VName) where
   unifyDims AnyDim y = Just y
   unifyDims x AnyDim = Just x

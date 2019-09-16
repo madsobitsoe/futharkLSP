@@ -1232,7 +1232,7 @@ checkExp (DoLoop mergepat mergeexp form loopbody loc) =
         pat_t <- normaliseType $ patternType mergepat'
         -- We are ignoring the dimensions here, because any mismatches
         -- should be turned into fresh size variables.
-        unify (mkUsage loc "matching loop body to loop pattern")
+        unify (mkUsage (srclocOf loopbody) "matching loop body to loop pattern")
           (toStruct (anyDimShapeAnnotations pat_t))
           (toStruct (anyDimShapeAnnotations loopbody_t))
         pat_t' <- normaliseType pat_t
@@ -1330,8 +1330,9 @@ checkExp (DoLoop mergepat mergeexp form loopbody loc) =
   consumeMerge mergepat'' =<< expType mergeexp'
 
   -- dim handling (3)
-  unify (mkUsage loc "matching loop body to pattern")
-    (toStruct $ patternType mergepat'') . toStruct =<< expType mergeexp'
+  (merge_t', _) <- instantiateEmptyArrayDims loc Nonrigid $ toStruct $ patternType mergepat''
+  unify (mkUsage (srclocOf mergeexp') "matching initial loop values to pattern") merge_t' .
+    toStruct =<< expType mergeexp'
 
   return $ DoLoop mergepat'' mergeexp' form' loopbody' loc
 
@@ -2181,7 +2182,7 @@ checkFunBody body maybe_rettype loc = do
       let msg = unlines ["return-unifying",
                          pretty rettype_withdims,
                          pretty body_t]
-      unify (mkUsage (srclocOf body) "return type annotation") rettype $ toStruct body_t
+      unify (mkUsage (srclocOf body) "return type annotation") rettype_withdims $ toStruct body_t
 
       -- We also have to make sure that uniqueness matches.  This is done
       -- explicitly, because uniqueness is ignored by unification.
