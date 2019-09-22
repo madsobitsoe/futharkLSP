@@ -609,7 +609,7 @@ readsFromSet free =
 localMemSize :: VTable ExplicitMemory -> Imp.Count Imp.Bytes Imp.Exp
              -> ImpM lore op (Either (Imp.Count Imp.Bytes Imp.Exp) Imp.KernelConstExp)
 localMemSize vtable e = isConstExp vtable (Imp.unCount e) >>= \case
-  Just e' | isStaticExp e' -> return $ Right e'
+  Just e' | False, isStaticExp e' -> return $ Right e'
   _ -> return $ Left e
 
 isConstExp :: VTable ExplicitMemory -> Imp.Exp
