@@ -1929,7 +1929,6 @@ checkBinding (fname, maybe_retdecl, tparams, params, body, loc) = noUnique $ do
             return (Nothing,
                     cleanReturnType old_variables params'' $
                     inferReturnUniqueness params'' body_t)
-
     rettype' <- verifyFunctionParams params'' maybe_retdecl'' rettype
 
     (tparams'', params''', rettype'') <-
@@ -1938,6 +1937,10 @@ checkBinding (fname, maybe_retdecl, tparams, params, body, loc) = noUnique $ do
 
     checkGlobalAliases params'' body_t loc
 
+    let msg = unlines [pretty fname,
+                       pretty params'',
+                       pretty params''',
+                       pretty tparams'']
     return (tparams'', params''', maybe_retdecl'', rettype'', body')
 
   where -- | Check that unique return values do not alias a
@@ -2155,6 +2158,7 @@ letGeneralise defname defloc tparams params rettype then_substs = do
   let t = foldFunType (map patternStructType params) rettype
 
   let new_substs = M.filterWithKey (\k _ -> not (k `S.member` keep_type_variables)) now_substs
+
   tparams' <- closeOverTypes defname defloc tparams t new_substs
 
   let bound = typeParamNames tparams' <> mconcat (map patternNames params)
