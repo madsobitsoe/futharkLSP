@@ -37,7 +37,7 @@ let xorInds [num_bits] (n: i32) (dir_vs: [num_bits]i32): i32 =
                         ) (zip (dir_vs) (iota(num_bits)) ) in
     reduce (^) 0 (reldv_vals )
 
-let sobolIndI (dir_vs:  [][]i32, n: i32 ): []i32 =
+let sobolIndI [len] (dir_vs:  [len][]i32, n: i32 ): [len]i32 =
     map (xorInds(n)) (dir_vs )
 
 --------------------------------
@@ -53,14 +53,14 @@ let index_of_least_significant_0(num_bits: i32, n: i32): i32 =
     else      (false,k,   n   )
   in k
 
-let sobolRecI [num_bits] (sob_dir_vs: [][num_bits]i32, prev: []i32, n: i32): []i32 =
+let sobolRecI [len][num_bits] (sob_dir_vs: [len][num_bits]i32, prev: []i32, n: i32): [len]i32 =
   let bit = index_of_least_significant_0(num_bits,n) in
   map  (\(vct_prev: ([]i32,i32)): i32  ->
          let (vct_row, prev) = vct_prev in
          vct_row[bit] ^ prev
       ) (zip (sob_dir_vs) prev)
 
-let recM [num_bits] (sob_dirs:  [][num_bits]i32, i: i32 ): []i32 =
+let recM [len][num_bits] (sob_dirs:  [len][num_bits]i32, i: i32 ): [len]i32 =
   let bit= index_of_least_significant_0(num_bits,i) in
   map (\(row: []i32): i32 -> unsafe row[bit]) (sob_dirs )
 
@@ -68,15 +68,15 @@ let recM [num_bits] (sob_dirs:  [][num_bits]i32, i: i32 ): []i32 =
 let sobolChunk [len] [num_bits] (dir_vs: [len][num_bits]i32) (n: i32) (chunk: i32): [chunk][len]f64 =
   let sob_fact= 1.0 / r64(1 << num_bits)
   let sob_beg = sobolIndI(dir_vs, n+1)
-  let contrbs = map (\(k: i32): []i32  ->
+  let contrbs = map (\(k: i32) ->
                         let sob = k + n in
                         if(k==0) then sob_beg
                         else recM(dir_vs, k+n)
                    ) (iota(chunk) )
-  let vct_ints= scan (\(x: []i32) (y: []i32): []i32  ->
+  let vct_ints= scan (\(x: []i32) (y: []i32)  ->
                         map2 (^) x y
                     ) (replicate len 0) contrbs in
-  map (\(xs: []i32): []f64  ->
+  map (\(xs: []i32) ->
              map  (\(x: i32): f64  ->
                      r64(x) * sob_fact
                  ) xs
