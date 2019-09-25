@@ -1128,7 +1128,10 @@ checkExp (Assert e1 e2 NoInfo loc) = do
   return $ Assert e1' e2' (Info (pretty e1)) loc
 
 checkExp (Lambda params body rettype_te NoInfo loc) =
-  removeSeminullOccurences $
+  removeSeminullOccurences $ do
+
+  bef_variables <- S.fromList . M.keys <$> getConstraints
+
   bindingParams [] params $ \_ params' -> do
     rettype_checked <- traverse checkTypeExp rettype_te
     let declared_rettype =
@@ -1137,20 +1140,26 @@ checkExp (Lambda params body rettype_te NoInfo loc) =
     (body', closure) <-
       tapOccurences $ noUnique $ checkFunBody body declared_rettype loc
     body_t <- expType body'
+
+    aft_variables <- S.fromList . M.keys <$> getConstraints
+    let new_variables = aft_variables `S.difference` bef_variables
+
+    params'' <- mapM updateTypes params'
+
     (rettype', rettype_st) <-
       case rettype_checked of
-        Just (te, st, _) -> do
-          (st', _) <- instantiateEmptyArrayDims (srclocOf te) Nonrigid st
-          return (Just te, st')
+        Just (te, st, _) ->
+          return (Just te, st)
         Nothing ->
-          return (Nothing, inferReturnUniqueness params' body_t)
+          return (Nothing, cleanReturnType new_variables params'' $
+                           inferReturnUniqueness params' body_t)
 
     checkGlobalAliases params' body_t loc
 
     rettype_st' <- verifyFunctionParams params' rettype' rettype_st
 
-    closure' <- lexicalClosure params' closure
-    let msg = unlines [unwords ["lambda ", pretty params', pretty rettype_st']]
+    closure' <- lexicalClosure params'' closure
+    let msg = unlines [unwords ["lambda ", pretty params'', pretty rettype_st']]
 
     return $ Lambda params' body' rettype' (Info (closure', rettype_st')) loc
 

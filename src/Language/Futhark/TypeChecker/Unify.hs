@@ -223,7 +223,7 @@ unify usage orig_t1 orig_t2 = do
                 indent (pretty t1') ++ "\nwith actual type\n" ++ indent (pretty t2')
 
           unifyDims' d1 d2
-            | d1 == d2 = return ()
+            | isJust $ unifyDims d1 d2 = return ()
           unifyDims' (NamedDim (QualName _ d1)) d2
             | not $ isRigid' d1 =
                 linkVarToDim usage d1 d2
