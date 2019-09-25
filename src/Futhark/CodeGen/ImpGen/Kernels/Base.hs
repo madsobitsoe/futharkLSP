@@ -19,6 +19,8 @@ module Futhark.CodeGen.ImpGen.Kernels.Base
   , compileThreadResult
   , compileGroupResult
   , virtualiseGroups
+  , groupLoop
+  , groupCoverSpace
 
   , getSize
 
@@ -81,10 +83,8 @@ noAssert locs =
 
 
 allocLocal, allocPrivate :: AllocCompiler ExplicitMemory Imp.KernelOp
-allocLocal mem size = do
-  vtable <- getVTable
-  size' <- localMemSize vtable size
-  sOp $ Imp.LocalAlloc mem size'
+allocLocal mem size =
+  sOp $ Imp.LocalAlloc mem size
 allocPrivate mem size =
   sOp $ Imp.PrivateAlloc mem size
 
@@ -133,14 +133,14 @@ compileThreadExp dest e =
 groupLoop :: KernelConstants -> Imp.Exp
           -> (Imp.Exp -> InKernelGen ()) -> InKernelGen ()
 groupLoop constants n f = do
-  i <- newVName "i"
-
   -- Compute how many elements this thread is responsible for.
   -- Formula: (n - ltid) / group_size (rounded up).
   let ltid = kernelLocalThreadId constants
       elems_for_this = (n - ltid) `quotRoundingUp` kernelGroupSize constants
 
-  sFor i Int32 elems_for_this $ f $ Imp.vi32 i
+  sFor "i" elems_for_this $ \i -> f $
+    i * kernelGroupSize constants +
+    kernelLocalThreadId constants
 
 -- | Iterate collectively though a multidimensional space, such that
 -- all threads in the group participate.  The passed-in function is
@@ -148,11 +148,7 @@ groupLoop constants n f = do
 groupCoverSpace :: KernelConstants -> [Imp.Exp]
                 -> ([Imp.Exp] -> InKernelGen ()) -> InKernelGen ()
 groupCoverSpace constants ds f =
-  groupLoop constants (product ds) $ \i -> do
-    let is = unflattenIndex ds $
-             i * kernelGroupSize constants +
-             kernelLocalThreadId constants
-    f is
+  groupLoop constants (product ds) $ f . unflattenIndex ds
 
 groupCopy :: KernelConstants -> VName -> [Imp.Exp] -> SubExp -> [Imp.Exp] -> InKernelGen ()
 groupCopy constants to to_is from from_is = do
@@ -247,7 +243,7 @@ compileGroupOp :: KernelConstants -> OpCompiler ExplicitMemory Imp.KernelOp
 compileGroupOp constants pat (Alloc size space) =
   kernelAlloc constants pat size space
 
-compileGroupOp _ pat (Inner (SplitSpace o w i elems_per_thread)) =
+compileGroupOp _ pat (Inner (SizeOp (SplitSpace o w i elems_per_thread))) =
   splitSpace pat o w i elems_per_thread
 
 compileGroupOp constants pat (Inner (SegOp (SegMap lvl space _ body))) = do
@@ -379,7 +375,7 @@ compileGroupOp _ pat _ =
 compileThreadOp :: KernelConstants -> OpCompiler ExplicitMemory Imp.KernelOp
 compileThreadOp constants pat (Alloc size space) =
   kernelAlloc constants pat size space
-compileThreadOp _ pat (Inner (SplitSpace o w i elems_per_thread)) =
+compileThreadOp _ pat (Inner (SizeOp (SplitSpace o w i elems_per_thread))) =
   splitSpace pat o w i elems_per_thread
 compileThreadOp _ pat _ =
   compilerBugS $ "compileThreadOp: cannot compile rhs of binding " ++ pretty pat
@@ -606,12 +602,6 @@ readsFromSet free =
           Nothing | bt == Cert -> return Nothing
                   | otherwise  -> return $ Just $ Imp.ScalarUse var bt
 
-localMemSize :: VTable ExplicitMemory -> Imp.Count Imp.Bytes Imp.Exp
-             -> ImpM lore op (Either (Imp.Count Imp.Bytes Imp.Exp) Imp.KernelConstExp)
-localMemSize vtable e = isConstExp vtable (Imp.unCount e) >>= \case
-  Just e' | isStaticExp e' -> return $ Right e'
-  _ -> return $ Left e
-
 isConstExp :: VTable ExplicitMemory -> Imp.Exp
            -> ImpM lore op (Maybe Imp.KernelConstExp)
 isConstExp vtable size = do
@@ -621,27 +611,13 @@ isConstExp vtable size = do
       onLeaf Imp.Index{} _ = Nothing
       lookupConstExp name =
         constExp =<< hasExp =<< M.lookup name vtable
-      constExp (Op (Inner (GetSize key _))) =
+      constExp (Op (Inner (SizeOp (GetSize key _)))) =
         Just $ LeafExp (Imp.SizeConst $ keyWithEntryPoint fname key) int32
       constExp e = primExpFromExp lookupConstExp e
   return $ replaceInPrimExpM onLeaf size
   where hasExp (ArrayVar e _) = e
         hasExp (ScalarVar e _) = e
         hasExp (MemVar e _) = e
-
--- | Only some constant expressions qualify as *static* expressions,
--- which we can use for static memory allocation.  This is a bit of a
--- hack, as it is primarly motivated by what you can put as the size
--- when declaring an array in C.
-isStaticExp :: Imp.KernelConstExp -> Bool
-isStaticExp LeafExp{} = True
-isStaticExp ValueExp{} = True
-isStaticExp (ConvOpExp ZExt{} x) = isStaticExp x
-isStaticExp (ConvOpExp SExt{} x) = isStaticExp x
-isStaticExp (BinOpExp Add{} x y) = isStaticExp x && isStaticExp y
-isStaticExp (BinOpExp Sub{} x y) = isStaticExp x && isStaticExp y
-isStaticExp (BinOpExp Mul{} x y) = isStaticExp x && isStaticExp y
-isStaticExp _ = False
 
 computeThreadChunkSize :: SplitOrdering
                        -> Imp.Exp
@@ -1048,9 +1024,9 @@ virtualiseGroups constants SegVirt required_groups m = do
   sOp $ Imp.GetGroupId phys_group_id 0
   let iterations = (required_groups - Imp.vi32 phys_group_id) `quotRoundingUp`
                    kernelNumGroups constants
-  i <- newVName "i"
-  sFor i Int32 iterations $
-    m =<< dPrimV "virt_group_id" (Imp.vi32 phys_group_id + Imp.vi32 i * kernelNumGroups constants)
+
+  sFor "i" iterations $ \i ->
+    m =<< dPrimV "virt_group_id" (Imp.vi32 phys_group_id + i * kernelNumGroups constants)
 
 sKernelThread, sKernelGroup :: String
                             -> Count NumGroups Imp.Exp -> Count GroupSize Imp.Exp
@@ -1213,11 +1189,10 @@ compileGroupResult _ constants pe (TileReturns [(w,per_group_elems)] what) = do
   if toExp' int32 per_group_elems == kernelGroupSize constants
     then sWhen (offset + ltid .<. toExp' int32 w) $
          copyDWIMDest dest' [ltid] (Var what) [ltid]
-    else do
-    i <- newVName "i"
-    sFor i Int32 (n `quotRoundingUp` kernelGroupSize constants) $ do
+    else
+    sFor "i" (n `quotRoundingUp` kernelGroupSize constants) $ \i -> do
       j <- fmap Imp.vi32 $ dPrimV "j" $
-           kernelGroupSize constants * Imp.vi32 i + ltid
+           kernelGroupSize constants * i + ltid
       sWhen (j .<. n) $ copyDWIMDest dest' [j] (Var what) [j]
   where ltid = kernelLocalThreadId constants
         offset = toExp' int32 per_group_elems * kernelGroupId constants

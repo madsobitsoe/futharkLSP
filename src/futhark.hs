@@ -33,6 +33,7 @@ import qualified Futhark.CLI.Doc as Doc
 import qualified Futhark.CLI.REPL as REPL
 import qualified Futhark.CLI.Run as Run
 import qualified Futhark.CLI.Misc as Misc
+import qualified Futhark.CLI.Autotune as Autotune
 
 type Command = String -> [String] -> IO ()
 
@@ -58,12 +59,14 @@ commands = sortOn fst
 
            , ("dataset", (Dataset.main, "Generate random test data."))
            , ("datacmp", (Datacmp.main, "Compare Futhark data files for equality."))
+           , ("dataget", (Misc.mainDataget, "Extract test data."))
 
            , ("doc", (Doc.main, "Generate documentation for Futhark code."))
            , ("pkg", (Pkg.main, "Manage local packages."))
 
            , ("check", (Misc.mainCheck, "Type check a program."))
-           , ("imports", (Misc.mainImports, "Print all non-library imported Futhark files to standard out and exit."))
+           , ("imports", (Misc.mainImports, "Print all non-builtin imported Futhark files."))
+           , ("autotune", (Autotune.main, "Autotune threshold parameters."))
            ]
 
 msg :: String
