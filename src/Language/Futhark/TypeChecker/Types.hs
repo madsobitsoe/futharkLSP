@@ -40,7 +40,7 @@ import Language.Futhark
 import Language.Futhark.TypeChecker.Monad
 import Language.Futhark.Traversals
 
--- | @unifyTypes uf t2 t2@ attempts to unify @t1@ and @t2@.  If
+-- | @unifyTypes uf t1 t2@ attempts to unify @t1@ and @t2@.  If
 -- unification cannot happen, 'Nothing' is returned, otherwise a type
 -- that combines the aliasing of @t1@ and @t2@ is returned.
 -- Uniqueness is unified with @uf@.

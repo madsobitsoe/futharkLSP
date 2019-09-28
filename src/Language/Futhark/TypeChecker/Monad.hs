@@ -5,11 +5,13 @@ module Language.Futhark.TypeChecker.Monad
   ( TypeM
   , runTypeM
   , askEnv
-  , askRootEnv
   , askImportName
   , checkQualNameWithEnv
   , bindSpaced
   , qualifyTypeVars
+  , lookupMTy
+  , lookupImport
+  , localEnv
 
   , TypeError(..)
   , unexpectedType
@@ -125,7 +127,6 @@ instance Show TypeError where
 type ImportTable = M.Map String Env
 
 data Context = Context { contextEnv :: Env
-                       , contextRootEnv :: Env
                        , contextImportTable :: ImportTable
                        , contextImportName :: ImportName
                        }
@@ -147,16 +148,37 @@ runTypeM :: Env -> ImportTable -> ImportName -> VNameSource
          -> TypeM a
          -> Either TypeError (a, Warnings, VNameSource)
 runTypeM env imports fpath src (TypeM m) = do
-  (x, src', ws) <- runExcept $ runRWST m (Context env env imports fpath) src
+  (x, src', ws) <- runExcept $ runRWST m (Context env imports fpath) src
   return (x, ws, src')
 
-askEnv, askRootEnv :: TypeM Env
+askEnv :: TypeM Env
 askEnv = asks contextEnv
-askRootEnv = asks contextRootEnv
 
 -- | The name of the current file/import.
 askImportName :: TypeM ImportName
 askImportName = asks contextImportName
+
+lookupMTy :: SrcLoc -> QualName Name -> TypeM (QualName VName, MTy)
+lookupMTy loc qn = do
+  (scope, qn'@(QualName _ name)) <- checkQualNameWithEnv Signature qn loc
+  (qn',) <$> maybe explode return (M.lookup name $ envSigTable scope)
+  where explode = unknownVariableError Signature qn loc
+
+lookupImport :: SrcLoc -> FilePath -> TypeM (FilePath, Env)
+lookupImport loc file = do
+  imports <- asks contextImportTable
+  my_path <- asks contextImportName
+  let canonical_import = includeToString $ mkImportFrom my_path file loc
+  case M.lookup canonical_import imports of
+    Nothing    -> throwError $ TypeError loc $
+                  unlines ["Unknown import \"" ++ canonical_import ++ "\"",
+                           "Known: " ++ intercalate ", " (M.keys imports)]
+    Just scope -> return (canonical_import, scope)
+
+localEnv :: Env -> TypeM a -> TypeM a
+localEnv env = local $ \ctx ->
+  let env' = env <> contextEnv ctx
+  in ctx { contextEnv = env' }
 
 -- | A piece of information that describes what process the type
 -- checker currently performing.  This is used to give better error
@@ -198,15 +220,12 @@ class MonadError TypeError m => MonadTypeChecker m where
   newID :: Name -> m VName
 
   bindNameMap :: NameMap -> m a -> m a
-  localEnv :: Env -> m a -> m a
   bindVal :: VName -> BoundV -> m a -> m a
 
   checkQualName :: Namespace -> QualName Name -> SrcLoc -> m (QualName VName)
 
   lookupType :: SrcLoc -> QualName Name -> m (QualName VName, [TypeParam], StructType, Liftedness)
   lookupMod :: SrcLoc -> QualName Name -> m (QualName VName, Mod)
-  lookupMTy :: SrcLoc -> QualName Name -> m (QualName VName, MTy)
-  lookupImport :: SrcLoc -> FilePath -> m (FilePath, Env)
   lookupVar :: SrcLoc -> QualName Name -> m (QualName VName, PatternType)
 
   checkNamedDim :: SrcLoc -> QualName Name -> m (QualName VName)
@@ -240,16 +259,14 @@ instance MonadTypeChecker TypeM where
     let env = contextEnv ctx
     in ctx { contextEnv = env { envNameMap = m <> envNameMap env } }
 
-  localEnv env = local $ \ctx ->
-    let env' = env <> contextEnv ctx
-    in ctx { contextEnv = env', contextRootEnv = env' }
-
-  bindVal v t = localEnv $ mempty { envVtable = M.singleton v t }
+  bindVal v t = local $ \ctx ->
+    ctx { contextEnv = (contextEnv ctx)
+                       { envVtable = M.insert v t $ envVtable $ contextEnv ctx } }
 
   checkQualName space name loc = snd <$> checkQualNameWithEnv space name loc
 
   lookupType loc qn = do
-    outer_env <- askRootEnv
+    outer_env <- askEnv
     (scope, qn'@(QualName qs name)) <- checkQualNameWithEnv Type qn loc
     case M.lookup name $ envTypeTable scope of
       Nothing -> undefinedType loc qn
@@ -261,23 +278,8 @@ instance MonadTypeChecker TypeM where
       Nothing -> unknownVariableError Term qn loc
       Just m  -> return (qn', m)
 
-  lookupMTy loc qn = do
-    (scope, qn'@(QualName _ name)) <- checkQualNameWithEnv Signature qn loc
-    (qn',) <$> maybe explode return (M.lookup name $ envSigTable scope)
-    where explode = unknownVariableError Signature qn loc
-
-  lookupImport loc file = do
-    imports <- asks contextImportTable
-    my_path <- asks contextImportName
-    let canonical_import = includeToString $ mkImportFrom my_path file loc
-    case M.lookup canonical_import imports of
-      Nothing    -> throwError $ TypeError loc $
-                    unlines ["Unknown import \"" ++ canonical_import ++ "\"",
-                             "Known: " ++ intercalate ", " (M.keys imports)]
-      Just scope -> return (canonical_import, scope)
-
   lookupVar loc qn = do
-    outer_env <- askRootEnv
+    outer_env <- askEnv
     (env, qn'@(QualName qs name)) <- checkQualNameWithEnv Term qn loc
     case M.lookup name $ envVtable env of
       Nothing -> unknownVariableError Term qn loc
