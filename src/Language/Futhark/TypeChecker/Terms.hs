@@ -949,15 +949,15 @@ checkExp (Ascript e decl NoInfo loc) = do
   return $ Ascript e' decl' (Info (combineTypeShapes (anyDimShapeAnnotations t') $
                                    fromStruct decl_t)) loc
 
-checkExp (BinOp op NoInfo (e1,_) (e2,_) NoInfo loc) = do
-  (op', ftype) <- lookupVar loc op
+checkExp (BinOp (op, oploc) NoInfo (e1,_) (e2,_) NoInfo loc) = do
+  (op', ftype) <- lookupVar oploc op
   e1_arg <- checkArg e1
   e2_arg <- checkArg e2
 
   (p1_t, rt) <- checkApply loc ftype e1_arg
   (p2_t, rt') <- checkApply loc rt e2_arg
 
-  return $ BinOp op' (Info ftype)
+  return $ BinOp (op', oploc) (Info ftype)
     (argExp e1_arg, Info $ toStruct p1_t) (argExp e2_arg, Info $ toStruct p2_t)
     (Info rt') loc
 

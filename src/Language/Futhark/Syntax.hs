@@ -642,7 +642,7 @@ data ExpBase f vn =
               (ExpBase f vn) -- Loop body.
               SrcLoc
 
-            | BinOp (QualName vn) (f PatternType)
+            | BinOp (QualName vn, SrcLoc) (f PatternType)
               (ExpBase f vn, f StructType) (ExpBase f vn, f StructType)
               (f PatternType) SrcLoc
 
