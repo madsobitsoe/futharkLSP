@@ -28,6 +28,9 @@ import           Language.Haskell.LSP.VFS
 import           System.Exit
 import qualified System.Log.Logger                     as L
 import qualified Data.Rope.UTF16                       as Rope
+-- Mads adding imports
+import           Language.Futhark.Parser               as P
+--import           Language.Futhark.Attributes
 
 import           Futhark.Util.Options (mainWithOptions)
 
@@ -140,7 +143,7 @@ reactor lf inp = do
          }
         -}
         let
-          registration = J.Registration "lsp-hello-registered" J.WorkspaceExecuteCommand Nothing
+          registration = J.Registration "futhark lsp registered" J.WorkspaceExecuteCommand Nothing
         let registrations = J.RegistrationParams (J.List [registration])
         rid <- nextLspReqId
 
@@ -218,9 +221,18 @@ reactor lf inp = do
         let J.TextDocumentPositionParams _doc pos = req ^. J.params
             J.Position _l _c' = pos
 
+        -- Is this a good place to call the parser?
+        let madstest = P.parseFuthark "~/futtmp.err" $ T.pack ("let main (x: []i32) (y: []i32):i32 =\n  reduce (+) 0 (map2 (*) x y)")
+        let resu = case madstest of
+              Left pe -> "ParseError!\n"
+              Right up -> "Unchecked program!\n"
         let
           ht = Just $ J.Hover ms (Just range)
-          ms = J.HoverContents $ J.markedUpContent "lsp-hello" "TYPE INFO"
+          -- We assume ms is short for message or the like
+          -- We need to use <> for string concatenation, since T.Text values are not strings
+          -- T.pack has type string -> T.Text and can be used to convert a string
+          -- show can convert ints to strings
+          ms = J.HoverContents $ J.markedUpContent (resu <> "Line: " <> T.pack (show $ _l +1) <> "\tColumn: " <> T.pack (show $ _c') <> "\nlsp-hover-request") "TYPE INFO GOES HERE"   --"lsp-hello" "TYPE INFO"
           range = J.Range pos pos
         reactorSend $ RspHover $ Core.makeResponseMessage req ht
 
