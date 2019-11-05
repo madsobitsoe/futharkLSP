@@ -1,0 +1,65 @@
+* Arbejdsdag 
+<2019-10-29 Tue>
+** DONE Skriv mail til Troels
+*** Status
+Ja, vi har en smule at rapportere. 
+**** Bøvl
+Vi har brugt tid på at studere protokollen og læse op på/komme i gang med at skrive Haskell
+Vi var i gang med at skrive test (af protokollen), indtil vi satte det på pause
+
+Vi bøvler/har bøvlet med LSP-klienter. 
+Emacs -> Vi skal måske skifte fra eglot til emacs-lsp
+VSCode -> Vi har haft bøvl med at bygge det på linux og mangler at skrive en extension til lsp-klienten
+Bøvler med at oversætte/forstå VSCode LSP dokumentation -> Haskell-LSP dokumentation
+**** Progress
+Vi ved godt vi har travlt
+Vi har taget udgangspunkt i Hoverrequest og kan:
+- sende linje/kolonnenumre frem og tilbage mellem klient og server
+- parse et hardcoded program fra serveren og sende en besked tilbage til klienten afhængig af ParseError/UncheckedProg
+
+
+**** kortsigtet Plan
+Vi skal finde ud af hvordan vi, fra haskell/server, får adgang til det program klienten arbejder på. 
+Vi skal finde ud af hvordan vi typetjekker det program.
+
+Balder sendte, mads ikke cc
+
+** TODO Find ud af hvordan programmet bliver sendt fra klient til server
+** TODO Vi kan parse, men kan vi typetjekke? 
+
+** TODO Skriv Plugin til vscode
+
+* Arbejdsdag
+<2019-11-05 Tue>
+
+** TODO Skriv Plugin til vscode
+** TODO Find ud af hvordan vi åbner futhark-fil på serveren
+Det _burde_ være ezpz. Konverter J.uri til System.FilePath.Posix og kald readProgram
+** TODO Vi kan parse, men kan vi typetjekke? 
+Vi kan parse, og vi kan kalde typetjekkeren, men IKKE med den rigtige fil, så vi får TypeError uanset indhold.
+** Det vi gerne vil
+Ny restriction på vores projekt, pga. måden futhark håndterer filer.
+Vi har brug for en gemt fil vi kan åbne på serveren.
+Derfor virker hover requests ikke. 
+
+Det vi gør, er at vi starter med at implementere did-save
+Når editoren gemmer en fil, bliver en notifikation sendt til serveren.
+På serveren åbner vi filen, parser og typetjekker og sender "diagnostics tilbage"
+Step 1: Dummy diagnostics
+Step 2: Compile success? 
+Step 3: Profit
+
+** Spørgsmål til troels
+*** readProgram
+Hvordan skal vi bruge den? 
+Det her:
+        let readresult = readProgram "/home/mads/bachelor/lsp-test/test1.fut"
+giver os 
+ "Ambiguous type variable arising from a use of `readProgram` prevents the constraint (`Control.Monad.Error.Class.MonadError Futhark.Error.CompilerError m0)`from being solved.
+
+
+** Blokadeliste
+*** Mads kan ikke bygge vscode. 
+*** Vi kan ikke finde ud af at bruge readProgram
+*** VSCode extension kræver en "Textmate grammar". Kan vi bruge ST3 lang-def? 
+Worst case må vi selv skrive den.
