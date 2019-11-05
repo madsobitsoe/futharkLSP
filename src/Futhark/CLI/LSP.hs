@@ -30,8 +30,16 @@ import qualified System.Log.Logger                     as L
 import qualified Data.Rope.UTF16                       as Rope
 -- Mads adding imports
 import           Language.Futhark.Parser               as P
---import           Language.Futhark.Attributes
-
+import           Language.Futhark.TypeChecker          as TC
+import           Data.Loc
+import           Language.Futhark.Semantic
+import Control.Monad.State
+--import qualified          System.FilePath as Native
+import qualified Language.Futhark.Attributes          as FA
+import Language.Futhark.Core
+import Futhark.FreshNames
+import Futhark.Compiler
+--  Mads done importing stuff
 import           Futhark.Util.Options (mainWithOptions)
 
 main :: String -> [String] -> IO ()
@@ -223,9 +231,15 @@ reactor lf inp = do
 
         -- Is this a good place to call the parser?
         let madstest = P.parseFuthark "~/futtmp.err" $ T.pack ("let main (x: []i32) (y: []i32):i32 =\n  reduce (+) 0 (map2 (*) x y)")
+
         let resu = case madstest of
               Left pe -> "ParseError!\n"
-              Right up -> "Unchecked program!\n"
+              Right up ->
+                    let tp = TC.checkProg [] blankNameSource (mkInitialImport "lsptest-NAME") up in
+                    case tp of
+                        Left te -> "TypeError!\n"
+                        Right cp -> "Fuck yes!\n"
+--        let readresult = readProgram "/home/mads/bachelor/lsp-test/test1.fut"
         let
           ht = Just $ J.Hover ms (Just range)
           -- We assume ms is short for message or the like
