@@ -29,19 +29,10 @@ import           System.Exit
 import qualified System.Log.Logger                     as L
 import qualified Data.Rope.UTF16                       as Rope
 -- Mads adding imports
-import           Language.Futhark.Parser               as P
-import           Language.Futhark.TypeChecker          as TC
-import           Data.Loc
-import           Language.Futhark.Semantic
-import Control.Monad.State
---import qualified          System.FilePath as Native
-import qualified Language.Futhark.Attributes          as FA
-import Language.Futhark.Core
-import Futhark.FreshNames
-import Futhark.Compiler
-import Futhark.Error
-import System.IO
+import Futhark.Compiler (readProgram)
+import Futhark.Pipeline (runFutharkM, Verbosity(..))
 import Debug.Trace
+import System.IO
 --  Mads done importing stuff
 import           Futhark.Util.Options (mainWithOptions)
 
@@ -53,6 +44,29 @@ main = mainWithOptions () [] "" $ \args () -> do
     case status of
       0 -> exitSuccess
       c -> exitWith . ExitFailure $ c
+
+-- dump the warnings from the compiler
+
+dumpStatus :: Maybe String -> IO ()
+dumpStatus file = 
+  case file of
+    Nothing -> hPutStr stderr "No filename supplied\n"
+    Just filename -> do
+      res <- runFutharkM (readProgram filename) NotVerbose
+      case res of
+        Left _ -> hPutStr stderr "failure\n"
+        Right (w,_,_) -> hPutStr stderr $ (++) "Success!\n" $ show w
+
+getStatus :: Maybe String -> IO String
+getStatus file =
+    case file of
+    Nothing -> return ""
+    Just filename -> do
+      res <- runFutharkM (readProgram filename) NotVerbose
+      case res of
+        Left _ -> return $ "Failed to compile " ++ filename ++ "\n"
+        Right (w,_,_) -> return $ show w
+
 
 run :: IO () -> IO Int
 run dispatcherProc = flip E.catches handlers $ do
@@ -207,7 +221,10 @@ reactor lf inp = do
                                  . J.uri
             fileName = J.uriToFilePath doc
         liftIO $ U.logs $ "********* fileName=" ++ show fileName
-        sendDiagnostics (J.toNormalizedUri doc) Nothing
+        liftIO $ hPutStr stderr $ show fileName
+        liftIO $ dumpStatus fileName
+      
+        sendDiagnostics (J.toNormalizedUri doc) Nothing --(Just $ getStatus fileName)
 
       -- -------------------------------
 
@@ -232,39 +249,23 @@ reactor lf inp = do
         let J.TextDocumentPositionParams _doc pos = req ^. J.params
             J.Position _l _c' = pos
 
-        -- Is this a good place to call the parser?
-        let madstest = P.parseFuthark "~/futtmp.err" $ T.pack ("let main (x: []i32) (y: []i32):i32 =\n  reduce (+) 0 (map2 (*) x y)")
 
-        -- let resu = case madstest of
-        --       Left pe -> "ParseError!\n"
-        --       Right up ->
-        --             let tp = TC.checkProg [] blankNameSource (mkInitialImport "lsptest-NAME") up in
-        --             case tp of
-        --                 Left te -> "TypeError!\n"
-        --                 Right cp -> "Fuck yes!\n"
-        -- readresult :: String -> IO ()
-        -- let readresult file = check file where check file = do
-        --       (warnings, _, _) <- readProgram "/home/mads/bachelor/lsp-test/test1.fut"
-        --       liftIO $ show warnings
-        -- I think this defines a function or a monad, that is an instance of the IO Monad?
-        -- Problem is, how do we call it? 
-        let readAndPrintTest :: IO () =
---              do (w,_,_) <- readProgram "/home/mads/bachelor/lsp-test/test1.fut"
-                 liftIO $ hPutStr stderr "yay, we can print.\n"
-                                  
         let
           ht = Just $ J.Hover ms (Just range)
           -- We assume ms is short for message or the like
           -- We need to use <> for string concatenation, since T.Text values are not strings
           -- T.pack has type string -> T.Text and can be used to convert a string
           -- show can convert ints to strings
-
           -- Instead of using the IO monad to print values, we can use Trace.Debug. traceShowId is (almost) equivalent to show. 
           -- It calls show on our value, prints it as a sideffect, and passes that value on
           ms = J.HoverContents $ J.markedUpContent ("Line: " <> T.pack (show $ _l + 1) <> "\tColumn: " <> T.pack (show $ _c') <> "\nlsp-hover-request") "TYPE INFO GOES HERE"   --"lsp-hello" "TYPE INFO"
           range = J.Range pos pos
           -- Builds the response and sends it back to the client.
           -- traceShowId ht will debug-print all messages to stderr
+
+        -- dump compile status to stderr
+--        liftIO dumpStatus
+
         reactorSend $ RspHover $ Core.makeResponseMessage req $ traceShowId ht
 
       -- -------------------------------
