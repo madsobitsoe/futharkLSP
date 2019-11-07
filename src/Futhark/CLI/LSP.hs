@@ -39,6 +39,9 @@ import qualified Language.Futhark.Attributes          as FA
 import Language.Futhark.Core
 import Futhark.FreshNames
 import Futhark.Compiler
+import Futhark.Error
+import System.IO
+import Debug.Trace
 --  Mads done importing stuff
 import           Futhark.Util.Options (mainWithOptions)
 
@@ -232,23 +235,37 @@ reactor lf inp = do
         -- Is this a good place to call the parser?
         let madstest = P.parseFuthark "~/futtmp.err" $ T.pack ("let main (x: []i32) (y: []i32):i32 =\n  reduce (+) 0 (map2 (*) x y)")
 
-        let resu = case madstest of
-              Left pe -> "ParseError!\n"
-              Right up ->
-                    let tp = TC.checkProg [] blankNameSource (mkInitialImport "lsptest-NAME") up in
-                    case tp of
-                        Left te -> "TypeError!\n"
-                        Right cp -> "Fuck yes!\n"
---        let readresult = readProgram "/home/mads/bachelor/lsp-test/test1.fut"
+        -- let resu = case madstest of
+        --       Left pe -> "ParseError!\n"
+        --       Right up ->
+        --             let tp = TC.checkProg [] blankNameSource (mkInitialImport "lsptest-NAME") up in
+        --             case tp of
+        --                 Left te -> "TypeError!\n"
+        --                 Right cp -> "Fuck yes!\n"
+        -- readresult :: String -> IO ()
+        -- let readresult file = check file where check file = do
+        --       (warnings, _, _) <- readProgram "/home/mads/bachelor/lsp-test/test1.fut"
+        --       liftIO $ show warnings
+        -- I think this defines a function or a monad, that is an instance of the IO Monad?
+        -- Problem is, how do we call it? 
+        let readAndPrintTest :: IO () =
+--              do (w,_,_) <- readProgram "/home/mads/bachelor/lsp-test/test1.fut"
+                 liftIO $ hPutStr stderr "yay, we can print.\n"
+                                  
         let
           ht = Just $ J.Hover ms (Just range)
           -- We assume ms is short for message or the like
           -- We need to use <> for string concatenation, since T.Text values are not strings
           -- T.pack has type string -> T.Text and can be used to convert a string
           -- show can convert ints to strings
-          ms = J.HoverContents $ J.markedUpContent (resu <> "Line: " <> T.pack (show $ _l +1) <> "\tColumn: " <> T.pack (show $ _c') <> "\nlsp-hover-request") "TYPE INFO GOES HERE"   --"lsp-hello" "TYPE INFO"
+
+          -- Instead of using the IO monad to print values, we can use Trace.Debug. traceShowId is (almost) equivalent to show. 
+          -- It calls show on our value, prints it as a sideffect, and passes that value on
+          ms = J.HoverContents $ J.markedUpContent ("Line: " <> T.pack (show $ _l + 1) <> "\tColumn: " <> T.pack (show $ _c') <> "\nlsp-hover-request") "TYPE INFO GOES HERE"   --"lsp-hello" "TYPE INFO"
           range = J.Range pos pos
-        reactorSend $ RspHover $ Core.makeResponseMessage req ht
+          -- Builds the response and sends it back to the client.
+          -- traceShowId ht will debug-print all messages to stderr
+        reactorSend $ RspHover $ Core.makeResponseMessage req $ traceShowId ht
 
       -- -------------------------------
 
