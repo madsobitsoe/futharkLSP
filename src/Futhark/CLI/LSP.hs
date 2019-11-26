@@ -47,6 +47,9 @@ main = mainWithOptions () [] "" $ \args () -> do
 
 -- dump the warnings from the compiler
 
+dump :: String -> IO ()
+dump s = hPutStr stderr s
+
 dumpStatus :: Maybe String -> IO ()
 dumpStatus file = 
   case file of
@@ -57,15 +60,6 @@ dumpStatus file =
         Left _ -> hPutStr stderr "failure\n"
         Right (w,_,_) -> hPutStr stderr $ (++) "Success!\n" $ show w
 
-getStatus :: Maybe String -> IO String
-getStatus file =
-    case file of
-    Nothing -> return ""
-    Just filename -> do
-      res <- runFutharkM (readProgram filename) NotVerbose
-      case res of
-        Left _ -> return $ "Failed to compile " ++ filename ++ "\n"
-        Right (w,_,_) -> return $ show w
 
 
 run :: IO () -> IO Int
@@ -119,6 +113,7 @@ reactorSend msg = do
 
 publishDiagnostics :: Int -> J.NormalizedUri -> J.TextDocumentVersion -> DiagnosticsBySource -> R () ()
 publishDiagnostics maxToPublish uri v diags = do
+  -- lf should be set to a function that does IO (when publishing diagnostics)
   lf <- ask
   liftIO $ (Core.publishDiagnosticsFunc lf) maxToPublish uri v diags
 
@@ -223,8 +218,11 @@ reactor lf inp = do
         liftIO $ U.logs $ "********* fileName=" ++ show fileName
         liftIO $ hPutStr stderr $ show fileName
         liftIO $ dumpStatus fileName
-      
-        sendDiagnostics (J.toNormalizedUri doc) Nothing --(Just $ getStatus fileName)
+        -- Here we should have a call to a function that
+        -- gets warnings from the compiler and publishes them
+        lf <- ask
+        liftIO $ getAndPublishStatus (J.toNormalizedUri doc) Nothing fileName lf
+         
 
       -- -------------------------------
 
@@ -328,6 +326,20 @@ reactor lf inp = do
 toWorkspaceEdit :: t -> Maybe J.ApplyWorkspaceEditParams
 toWorkspaceEdit _ = Nothing
 
+  
+-- sendFutharkDiagnostics :: J.NormalizedUri -> Maybe Int -> [J.Diagnostic] -> R () ()
+-- sendFutharkDiagnostics fileUri version diags = do
+--   -- I am pretty sure lf is the servermethod, e.g. WindowShowMessage, WindowLogMessage, workspaceApplyEdit etc.
+--   -- it is injected into Core.publishDiagnosticsFunc, creating a new function
+--   -- that does IO and sends a message back to the server
+--   lf <- ask
+--   -- lift into IO, so we can get the warnings from the compiler and send them back
+--   -- so we need to write a function that gets the warnings, creates diags and then has the line below
+--   -- ideally, liftIO $ sendWarnings lf 100 fileUri version 
+-- --  lifIO $ (Core.publishDiagnosticsFunc lf) 100 fileUri version (partitionBySource diags)
+-- --  publishDiagnostics 100 fileUri version (partitionBySource diags)
+
+
 -- | Analyze the file and send any diagnostics to the client in a
 -- "textDocument/publishDiagnostics" notification
 sendDiagnostics :: J.NormalizedUri -> Maybe Int -> R () ()
@@ -343,6 +355,36 @@ sendDiagnostics fileUri version = do
             ]
   -- reactorSend $ J.NotificationMessage "2.0" "textDocument/publishDiagnostics" (Just r)
   publishDiagnostics 100 fileUri version (partitionBySource diags)
+
+getStatus :: Maybe String -> IO T.Text
+getStatus file =
+    case file of
+    Nothing -> return "" --()
+    Just filename -> do
+      res <- runFutharkM (readProgram filename) NotVerbose
+      case res of
+        Left _ -> return $ T.pack $ "Failed to compile " ++ filename ++ "\n"
+        Right (w,_,_) -> return $ T.pack $ show w
+
+getAndPublishStatus :: J.NormalizedUri -> Maybe Int -> Maybe String -> Core.LspFuncs () -> IO ()
+getAndPublishStatus uri version fileName lf =
+  do
+    dump "entered getAndPublishStatus"
+    -- dump the filename
+    case fileName of
+      Nothing -> dump "No file was supplied.."
+      Just filename -> 
+        dump $ "filename: " ++ filename
+        -- diags <- [J.Diagnostic
+        --            (J.Range (J.Position 0 1) (J.Position 0 5))
+        --            (Just J.DsWarning)  -- severity
+        --            Nothing  -- code
+        --            (Just "lsp-hello") -- source
+        --            "put some warnings in here!"
+        --            (Just (J.List []))
+        --          ]
+--        Core.publishDiagnosticsFunc lf 100 uri version (partitionBySource diags)
+    
 
 syncOptions :: J.TextDocumentSyncOptions
 syncOptions = J.TextDocumentSyncOptions
