@@ -373,17 +373,25 @@ getAndPublishStatus uri version fileName lf =
     -- dump the filename
     case fileName of
       Nothing -> dump "No file was supplied.."
-      Just filename -> 
+      Just filename -> do 
         dump $ "filename: " ++ filename
-        -- diags <- [J.Diagnostic
-        --            (J.Range (J.Position 0 1) (J.Position 0 5))
-        --            (Just J.DsWarning)  -- severity
-        --            Nothing  -- code
-        --            (Just "lsp-hello") -- source
-        --            "put some warnings in here!"
-        --            (Just (J.List []))
-        --          ]
---        Core.publishDiagnosticsFunc lf 100 uri version (partitionBySource diags)
+        res <- runFutharkM (readProgram filename) NotVerbose
+        case res of
+          Left _ -> dump "compilation failed.\n"
+          Right (w,_,_) -> do
+            dump $ show w
+            let diags =
+                  [J.Diagnostic
+                   (J.Range (J.Position 0 1) (J.Position 0 5))
+                   (Just J.DsWarning)  -- severity
+                   Nothing  -- code
+                   (Just "lsp-hello") -- source
+                   (T.pack $ show w)
+                   (Just (J.List []))
+                  ]
+
+            (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
+        --        Core.publishDiagnosticsFunc lf 100 uri version (partitionBySource diags)
     
 
 syncOptions :: J.TextDocumentSyncOptions
