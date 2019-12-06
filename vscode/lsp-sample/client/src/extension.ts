@@ -7,15 +7,12 @@ import * as vscode from 'vscode';
 import * as languageClient from 'vscode-languageclient';
 import * as path from 'path';
 
+// Futhark installs to /.local/bin by default (with 'stack install')
 const languageServerPath = path.join(require('os').homedir(), "/.local/bin/");
 
 function activateLanguageServer(context: vscode.ExtensionContext) {
-	// The server is implemented in node
 	let serverModule: string = languageServerPath;
-	// The debug options for the server
-	// --inspect=6009: runs the server in Node's Inspector mode so VS Code can attach to the server for debugging
-	//let debugOptions = { execArgv: ['--nolazy', '--inspect=6009'] };
-
+	
 	if(!serverModule) throw new URIError("Cannot find the language server module.");
 	let workPath = path.dirname(serverModule);
 	console.log(`Use ${serverModule} as server module.`);
@@ -23,6 +20,7 @@ function activateLanguageServer(context: vscode.ExtensionContext) {
 	
 	// If the extension is launched in debug mode then the debug server options are used
 	// Otherwise the run options are used
+	// Also there are no debug options, so it is irelevant
 	let serverOptions: languageClient.ServerOptions = {
 		run: { command: "futhark", args: ["lsp"], options: { cwd: workPath} },
 		debug: { command: "futhark", args: ["lsp"], options: { cwd: workPath} }
@@ -31,6 +29,7 @@ function activateLanguageServer(context: vscode.ExtensionContext) {
 	// Options to control the language client
 	let clientOptions: languageClient.LanguageClientOptions = {
 		// Register the server for plain text documents
+		// TODO: Futhark language extension
 		documentSelector: [{ scheme: 'file', language: 'plaintext' }],
 		synchronize: {
 			// Notify the server about file changes to '.clientrc files contained in the workspace
@@ -46,18 +45,22 @@ function activateLanguageServer(context: vscode.ExtensionContext) {
 		clientOptions
 	);
 
-	// Start the client. This will also launch the server
 	let disposable = client.start();
 	context.subscriptions.push(disposable);
 }
 
 export function activate(context: vscode.ExtensionContext) {
 	console.log("futhark test server is activated!");
+	// Activate the server
 	activateLanguageServer(context);
+
+	// Register a test-command
 	let disposable = vscode.commands.registerCommand("extension.sayHello", () => {
 		vscode.window.showInformationMessage("Hello, World!");
 	});
+
 	context.subscriptions.push(disposable);
 }
+
 export function deactivate() {
 }
