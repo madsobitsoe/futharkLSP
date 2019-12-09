@@ -110,11 +110,15 @@ instance IsName vn => Pretty (ShapeDecl (DimDecl vn)) where
 instance Pretty (ShapeDecl ()) where
   ppr (ShapeDecl ds) = mconcat $ replicate (length ds) $ text "[]"
 
+instance Pretty (ShapeDecl Int32) where
+  ppr (ShapeDecl ds) = mconcat (map (brackets . ppr) ds)
+
 instance Pretty (ShapeDecl dim) => Pretty (ScalarTypeBase dim as) where
   ppr = pprPrec 0
   pprPrec _ (Prim et) = ppr et
-  pprPrec _ (TypeVar _ u et targs) =
-    ppr u <> ppr (qualNameFromTypeName et) <+> spread (map ppr targs)
+  pprPrec p (TypeVar _ u et targs) =
+    parensIf (not (null targs) && p > 0) $
+    ppr u <> ppr (qualNameFromTypeName et) <+> spread (map (pprPrec 1) targs)
   pprPrec _ (Record fs)
     | Just ts <- areTupleFields fs =
         parens $ commasep $ map ppr ts
@@ -124,23 +128,26 @@ instance Pretty (ShapeDecl dim) => Pretty (ScalarTypeBase dim as) where
     where ppField (name, t) = text (nameToString name) <> colon <+> ppr t
           fs' = map ppField $ M.toList fs
   pprPrec p (Arrow _ (Named v) t1 t2) =
-    parensIf (p > 0) $
-    parens (pprName v <> colon <+> ppr t1) <+> text "->" <+> ppr t2
+    parensIf (p > 1) $
+    parens (pprName v <> colon <+> ppr t1) <+> text "->" <+> pprPrec 1 t2
   pprPrec p (Arrow _ Unnamed t1 t2) =
-    parensIf (p > 0) $ pprPrec 1 t1 <+> text "->" <+> ppr t2
-  pprPrec _ (Sum cs) =
+    parensIf (p > 1) $ pprPrec 2 t1 <+> text "->" <+> pprPrec 1 t2
+  pprPrec p (Sum cs) =
+    parensIf (p > 0) $
     oneLine (mconcat $ punctuate (text " | ") cs')
     <|> align (mconcat $ punctuate (text " |" <> line) cs')
-    where ppConstr (name, fs) = sep $ (text "#" <> ppr name) : map ppr fs
+    where ppConstr (name, fs) = sep $ (text "#" <> ppr name) : map (pprPrec 1) fs
           cs' = map ppConstr $ M.toList cs
 
 instance Pretty (ShapeDecl dim) => Pretty (TypeBase dim as) where
-  ppr (Array _ u at shape) = ppr u <> ppr shape <> ppr at
-  ppr (Scalar t) = ppr t
+  ppr = pprPrec 0
+  pprPrec _ (Array _ u at shape) = ppr u <> ppr shape <> pprPrec 1 at
+  pprPrec p (Scalar t) = pprPrec p t
 
 instance Pretty (ShapeDecl dim) => Pretty (TypeArg dim) where
-  ppr (TypeArgDim d _) = ppr $ ShapeDecl [d]
-  ppr (TypeArgType t _) = ppr t
+  ppr = pprPrec 0
+  pprPrec _ (TypeArgDim d _) = ppr $ ShapeDecl [d]
+  pprPrec p (TypeArgType t _) = pprPrec p t
 
 instance (Eq vn, IsName vn) => Pretty (TypeExp vn) where
   ppr (TEUnique t _) = text "*" <> ppr t
@@ -198,7 +205,8 @@ instance (Eq vn, IsName vn, Annot f) => Pretty (ExpBase f vn) where
   pprPrec _ (Var name _ _) = ppr name
   pprPrec _ (Parens e _) = align $ parens $ ppr e
   pprPrec _ (QualParens v e _) = ppr v <> text "." <> align (parens $ ppr e)
-  pprPrec _ (Ascript e t _ _) = pprPrec 0 e <> colon <+> pprPrec 0 t
+  pprPrec p (Ascript e t _ _) =
+    parensIf (p /= -1) $ pprPrec 0 e <+> colon <+> pprPrec 0 t
   pprPrec _ (Literal v _) = ppr v
   pprPrec _ (IntLit v _ _) = ppr v
   pprPrec _ (FloatLit v _ _) = ppr v

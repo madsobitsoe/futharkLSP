@@ -23,6 +23,7 @@ static const int bad = 1;
 
 struct opencl_config {
   int debugging;
+  int profiling;
   int logging;
   int preferred_device_num;
   const char *preferred_platform;
@@ -49,14 +50,15 @@ struct opencl_config {
   const char **size_classes;
 };
 
-void opencl_config_init(struct opencl_config *cfg,
-                        int num_sizes,
-                        const char *size_names[],
-                        const char *size_vars[],
-                        size_t *size_values,
-                        const char *size_classes[]) {
+static void opencl_config_init(struct opencl_config *cfg,
+                               int num_sizes,
+                               const char *size_names[],
+                               const char *size_vars[],
+                               size_t *size_values,
+                               const char *size_classes[]) {
   cfg->debugging = 0;
   cfg->logging = 0;
+  cfg->profiling = 0;
   cfg->preferred_device_num = 0;
   cfg->preferred_platform = "";
   cfg->preferred_device = "";
@@ -84,6 +86,13 @@ void opencl_config_init(struct opencl_config *cfg,
   cfg->size_classes = size_classes;
 }
 
+// A record of something that happened.
+struct profiling_record {
+  cl_event *event;
+  int *runs;
+  int64_t *runtime;
+};
+
 struct opencl_context {
   cl_device_id device;
   cl_context ctx;
@@ -100,6 +109,10 @@ struct opencl_context {
   size_t max_local_memory;
 
   size_t lockstep_width;
+
+  struct profiling_record *profiling_records;
+  int profiling_records_capacity;
+  int profiling_records_used;
 };
 
 struct opencl_device_option {
@@ -226,12 +239,12 @@ static char* opencl_succeed_nonfatal(unsigned int ret,
   }
 }
 
-void set_preferred_platform(struct opencl_config *cfg, const char *s) {
+static void set_preferred_platform(struct opencl_config *cfg, const char *s) {
   cfg->preferred_platform = s;
   cfg->ignore_blacklist = 1;
 }
 
-void set_preferred_device(struct opencl_config *cfg, const char *s) {
+static void set_preferred_device(struct opencl_config *cfg, const char *s) {
   int x = 0;
   if (*s == '#') {
     s++;
@@ -580,7 +593,8 @@ static cl_program setup_opencl_with_command_queue(struct opencl_context *ctx,
       max_value = 0; // No limit.
       default_value = ctx->cfg.default_threshold;
     } else {
-      panic(1, "Unknown size class for size '%s': %s\n", size_name, size_class);
+      // Bespoke sizes have no limit or default.
+      max_value = 0;
     }
     if (*size_value == 0) {
       *size_value = default_value;
@@ -734,10 +748,72 @@ static cl_program setup_opencl(struct opencl_context *ctx,
   OPENCL_SUCCEED_FATAL(clCreateContext_error);
 
   cl_int clCreateCommandQueue_error;
-  cl_command_queue queue = clCreateCommandQueue(ctx->ctx, device_option.device, 0, &clCreateCommandQueue_error);
+  cl_command_queue queue =
+    clCreateCommandQueue(ctx->ctx,
+                         device_option.device,
+                         ctx->cfg.profiling ? CL_QUEUE_PROFILING_ENABLE : 0,
+                         &clCreateCommandQueue_error);
   OPENCL_SUCCEED_FATAL(clCreateCommandQueue_error);
 
   return setup_opencl_with_command_queue(ctx, queue, srcs, required_types, extra_build_opts);
+}
+
+// Count up the runtime all the profiling_records that occured during execution.
+// Also clears the buffer of profiling_records.
+static cl_int opencl_tally_profiling_records(struct opencl_context *ctx) {
+  cl_int err;
+  for (int i = 0; i < ctx->profiling_records_used; i++) {
+    struct profiling_record record = ctx->profiling_records[i];
+
+    cl_ulong start_t, end_t;
+
+    if ((err = clGetEventProfilingInfo(*record.event,
+                                       CL_PROFILING_COMMAND_START,
+                                       sizeof(start_t),
+                                       &start_t,
+                                       NULL)) != CL_SUCCESS) {
+      return err;
+    }
+
+    if ((err = clGetEventProfilingInfo(*record.event,
+                                       CL_PROFILING_COMMAND_END,
+                                       sizeof(end_t),
+                                       &end_t,
+                                       NULL)) != CL_SUCCESS) {
+      return err;
+    }
+
+    // OpenCL provides nanosecond resolution, but we want
+    // microseconds.
+    *record.runs += 1;
+    *record.runtime += (end_t - start_t)/1000;
+
+    if ((err = clReleaseEvent(*record.event)) != CL_SUCCESS) {
+      return err;
+    }
+    free(record.event);
+  }
+
+  ctx->profiling_records_used = 0;
+
+  return CL_SUCCESS;
+}
+
+// If profiling, produce an event associated with a profiling record.
+static cl_event* opencl_get_event(struct opencl_context *ctx, int *runs, int64_t *runtime) {
+    if (ctx->profiling_records_used == ctx->profiling_records_capacity) {
+      ctx->profiling_records_capacity *= 2;
+      ctx->profiling_records =
+        realloc(ctx->profiling_records,
+                ctx->profiling_records_capacity *
+                sizeof(struct profiling_record));
+    }
+    cl_event *event = malloc(sizeof(cl_event));
+    ctx->profiling_records[ctx->profiling_records_used].event = event;
+    ctx->profiling_records[ctx->profiling_records_used].runs = runs;
+    ctx->profiling_records[ctx->profiling_records_used].runtime = runtime;
+    ctx->profiling_records_used++;
+    return event;
 }
 
 // Allocate memory from driver. The problem is that OpenCL may perform
@@ -746,7 +822,7 @@ static cl_program setup_opencl(struct opencl_context *ctx,
 // perform a write to see if the allocation succeeded.  This is slow,
 // but the assumption is that this operation will be rare (most things
 // will go through the free list).
-int opencl_alloc_actual(struct opencl_context *ctx, size_t size, cl_mem *mem_out) {
+static int opencl_alloc_actual(struct opencl_context *ctx, size_t size, cl_mem *mem_out) {
   int error;
   *mem_out = clCreateBuffer(ctx->ctx, CL_MEM_READ_WRITE, size, NULL, &error);
 
@@ -765,7 +841,7 @@ int opencl_alloc_actual(struct opencl_context *ctx, size_t size, cl_mem *mem_out
   return error;
 }
 
-int opencl_alloc(struct opencl_context *ctx, size_t min_size, const char *tag, cl_mem *mem_out) {
+static int opencl_alloc(struct opencl_context *ctx, size_t min_size, const char *tag, cl_mem *mem_out) {
   if (min_size < sizeof(int)) {
     min_size = sizeof(int);
   }
@@ -826,7 +902,7 @@ int opencl_alloc(struct opencl_context *ctx, size_t min_size, const char *tag, c
   return error;
 }
 
-int opencl_free(struct opencl_context *ctx, cl_mem mem, const char *tag) {
+static int opencl_free(struct opencl_context *ctx, cl_mem mem, const char *tag) {
   size_t size;
   cl_mem existing_mem;
 
@@ -847,7 +923,7 @@ int opencl_free(struct opencl_context *ctx, cl_mem mem, const char *tag) {
   return error;
 }
 
-int opencl_free_all(struct opencl_context *ctx) {
+static int opencl_free_all(struct opencl_context *ctx) {
   cl_mem mem;
   free_list_pack(&ctx->free_list);
   while (free_list_first(&ctx->free_list, &mem) == 0) {

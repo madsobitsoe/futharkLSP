@@ -3,9 +3,9 @@
 module Futhark.Internalise.Defunctionalise
   ( transformProg ) where
 
-import           Control.Arrow (first, second)
+import qualified Control.Arrow as Arrow
 import           Control.Monad.RWS hiding (Sum)
-import           Data.Bifunctor hiding (first, second)
+import           Data.Bifunctor
 import           Data.Foldable
 import           Data.List
 import qualified Data.List.NonEmpty as NE
@@ -42,7 +42,7 @@ data StaticVal = Dynamic PatternType
 type Env = M.Map VName StaticVal
 
 localEnv :: Env -> DefM a -> DefM a
-localEnv env = local $ second (env<>)
+localEnv env = local $ Arrow.second (env<>)
 
 -- Even when using a "new" environment (for evaluating closures) we
 -- still ram the global environment of DynamicFuns in there.
@@ -57,7 +57,7 @@ askEnv :: DefM Env
 askEnv = asks snd
 
 isGlobal :: VName -> DefM a -> DefM a
-isGlobal v = local $ first (S.insert v)
+isGlobal v = local $ Arrow.first (S.insert v)
 
 -- | Returns the defunctionalization environment restricted
 -- to the given set of variable names and types.
@@ -531,8 +531,17 @@ defuncApply depth e@(Apply e1 e2 d t@(Info ret) loc) = do
     -- Propagate the 'IntrinsicsSV' until we reach the outermost application,
     -- where we construct a dynamic static value with the appropriate type.
     IntrinsicSV
-      | depth == 0 -> return (e', Dynamic $ typeOf e)
-      | otherwise  -> return (e', IntrinsicSV)
+      | depth == 0 ->
+          -- If the intrinsic is fully applied, then we are done.
+          -- Otherwise we need to eta-expand it and recursively
+          -- defunctionalise. XXX: might it be better to simply
+          -- eta-expand immediately any time we encounter a
+          -- non-fully-applied intrinsic?
+          if null argtypes
+            then return (e', Dynamic $ typeOf e)
+            else do (pats, body, tp) <- etaExpand e'
+                    defuncExp $ Lambda pats body Nothing (Info (mempty, tp)) noLoc
+      | otherwise -> return (e', IntrinsicSV)
 
     _ -> error $ "Application of an expression that is neither a static lambda "
               ++ "nor a dynamic function, but has static value: " ++ show sv1
@@ -875,7 +884,7 @@ defuncValBind (ValBind entry@Just{} name _ (Info rettype) tparams params body _ 
       defuncValBind $ ValBind entry name Nothing
         (Info $ onlyConstantDims rettype')
         tparams (params <> body_pats) body' Nothing loc
-  where onlyConstantDims = bimap onDim id
+  where onlyConstantDims = first onDim
         onDim (ConstDim x) = ConstDim x
         onDim _            = AnyDim
 

@@ -179,3 +179,5 @@ sliceSizes :: IntegralExp num =>
 sliceSizes [] = [1]
 sliceSizes (n:ns) =
   product (n : ns) : sliceSizes ns
+
+{- HLINT ignore sliceSizes -}

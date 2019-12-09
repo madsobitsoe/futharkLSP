@@ -155,7 +155,7 @@ transformType t = do
   -- As an attempt at an optimisation, only transform the aliases if
   -- they refer to a variable we have record-replaced.
   return $ if any ((`M.member` rrs) . aliasVar) $ aliases t
-           then bimap id (mconcat . map replace . S.toList) t
+           then second (mconcat . map replace . S.toList) t
            else t
 
 -- | Monomorphization of expressions.
@@ -205,8 +205,10 @@ transformExp (Var (QualName qs fname) (Info t) loc) = do
       t' <- transformType t
       return $ Var (QualName qs fname') (Info t') loc
 
-transformExp (Ascript e tp t loc) =
-  Ascript <$> transformExp e <*> pure tp <*> pure t <*> pure loc
+transformExp (Ascript e tp t loc) = do
+  noticeDims $ unInfo t
+  Ascript <$> transformExp e <*> pure tp <*>
+    traverse transformType t <*> pure loc
 
 transformExp (LetPat pat e1 e2 (Info t) loc) = do
   (pat', rr) <- transformPattern pat

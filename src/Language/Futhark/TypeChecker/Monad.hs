@@ -28,7 +28,6 @@ module Language.Futhark.TypeChecker.Monad
   , MonadTypeChecker(..)
   , checkName
   , badOnLeft
-  , quote
 
   , module Language.Futhark.Warnings
 
@@ -192,7 +191,7 @@ instance Show BreadCrumb where
     "\nwith\n" ++ indent (pretty t2)
     where indent = intercalate "\n" . map ("  "++) . lines
   show (MatchingFields field) =
-    "When matching types of record field `" ++ pretty field ++ "`."
+    "When matching types of record field " ++ quote (pretty field) ++ "."
 
 -- | Tracking breadcrumbs to give a kind of "stack trace" in errors.
 class Monad m => MonadBreadCrumbs m where
@@ -357,12 +356,6 @@ qualifyTypeVars outer_env except ref_qs = runIdentity . astMap mapper
 badOnLeft :: MonadTypeChecker m => Either TypeError a -> m a
 badOnLeft = either throwError return
 
--- | Enclose a string in the prefered quotes used in error messages.
--- These are picked to not collide with characters permitted in
--- identifiers.
-quote :: String -> String
-quote s = "`" ++ s ++ "`"
-
 anySignedType :: [PrimType]
 anySignedType = map Signed [minBound .. maxBound]
 
@@ -390,9 +383,8 @@ ppSpace Signature = "module type"
 
 intrinsicsNameMap :: NameMap
 intrinsicsNameMap = M.fromList $ map mapping $ M.toList intrinsics
-  where mapping (v, IntrinsicType{}) = ((Type, baseName v), QualName [mod] v)
-        mapping (v, _)               = ((Term, baseName v), QualName [mod] v)
-        mod = VName (nameFromString "intrinsics") 0
+  where mapping (v, IntrinsicType{}) = ((Type, baseName v), QualName [] v)
+        mapping (v, _)               = ((Term, baseName v), QualName [] v)
 
 topLevelNameMap :: NameMap
 topLevelNameMap = M.filterWithKey (\k _ -> atTopLevel k) intrinsicsNameMap

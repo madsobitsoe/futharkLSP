@@ -16,7 +16,6 @@ import qualified Futhark.CodeGen.ImpGen.OpenCL as ImpGen
 import Futhark.CodeGen.Backends.GenericCSharp.AST
 import Futhark.CodeGen.Backends.GenericCSharp.Options
 import Futhark.CodeGen.Backends.GenericCSharp.Definitions
-import Futhark.Util.Pretty(pretty)
 import Futhark.Util (zEncodeString)
 import Futhark.MonadFreshNames hiding (newVName')
 
@@ -134,8 +133,7 @@ callKernel (Imp.GetSizeMax v size_class) =
                      Imp.SizeTile -> "MaxTileSize"
                      Imp.SizeThreshold{} -> "MaxThreshold"
                      Imp.SizeLocalMemory -> "MaxLocalMemory"
-
-callKernel (Imp.HostCode c) = CS.compileCode c
+                     Imp.SizeBespoke{} -> "MaxBespoke"
 
 callKernel (Imp.LaunchKernel name args num_workgroups workgroup_size) = do
   num_workgroups' <- mapM CS.compileExp num_workgroups
@@ -265,7 +263,7 @@ writeOpenCLScalar mem i bt "device" val = do
     ]
 
 writeOpenCLScalar _ _ _ space _ =
-  fail $ "Cannot write to '" ++ space ++ "' memory space."
+  error $ "Cannot write to '" ++ space ++ "' memory space."
 
 readOpenCLScalar :: CS.ReadScalar Imp.OpenCL ()
 readOpenCLScalar mem i bt "device" = do
@@ -284,7 +282,7 @@ readOpenCLScalar mem i bt "device" = do
   return $ Var val
 
 readOpenCLScalar _ _ _ space =
-  fail $ "Cannot read from '" ++ space ++ "' memory space."
+  error $ "Cannot read from '" ++ space ++ "' memory space."
 
 computeErrCodeT :: CSType
 computeErrCodeT = CustomT "ComputeErrorCode"
@@ -297,7 +295,7 @@ allocateOpenCLBuffer mem size "device" = do
   CS.stm $ Reassign (Var mem') (CS.simpleCall "MemblockAllocDevice" [Ref $ Var "Ctx", Var mem', size, String mem'])
 
 allocateOpenCLBuffer _ _ space =
-  fail $ "Cannot allocate in '" ++ space ++ "' space"
+  error $ "Cannot allocate in '" ++ space ++ "' space"
 
 copyOpenCLMemory :: CS.Copy Imp.OpenCL ()
 copyOpenCLMemory destmem destidx Imp.DefaultSpace srcmem srcidx (Imp.Space "device") nbytes _ = do
@@ -373,7 +371,7 @@ staticOpenCLArray name "device" t vs = do
     ]
 
 staticOpenCLArray _ space _ _ =
-  fail $ "CSOpenCL backend cannot create static array in memory space '" ++ space ++ "'"
+  error $ "CSOpenCL backend cannot create static array in memory space '" ++ space ++ "'"
 
 memblockFromMem :: VName -> CSExp
 memblockFromMem mem =
@@ -392,7 +390,7 @@ packArrayOutput mem "device" bt ept dims = do
   where dims' = map CS.compileDim dims
 
 packArrayOutput _ sid _ _ _ =
-  fail $ "Cannot return array from " ++ sid ++ " space."
+  error $ "Cannot return array from " ++ sid ++ " space."
 
 unpackArrayInput :: CS.EntryInput Imp.OpenCL ()
 unpackArrayInput mem "device" t _ dims e = do
@@ -415,7 +413,7 @@ unpackArrayInput mem "device" t _ dims e = do
   where dims' = map CS.compileDim dims
 
 unpackArrayInput _ sid _ _ _ _ =
-  fail $ "Cannot accept array from " ++ sid ++ " space."
+  error $ "Cannot accept array from " ++ sid ++ " space."
 
 futharkSyncContext :: CSStmt
 futharkSyncContext = Exp $ CS.simpleCall "FutharkContextSync" []

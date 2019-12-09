@@ -5,7 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
-## [0.13.0]
+## [0.14.0]
+
+### Added
+
+  * (Finally) automatic support for compute model 7.5 in the CUDA backend.
+
+  * Somewhat better performance for very large target arrays for
+    `reduce_by_index.`.
+
+### Removed
+
+### Changed
+
+### Fixed
+
+  * Fixed a slice-iota simplification bug (#813).
+
+  * Fixed defunctionalisation crash involving intrinsics (#814).
+
+## [0.13.1]
+
+### Added
+
+  * Stack traces are now multiline for better legibility.
+
+### Changed
+
+  * The `empty(t)` notation now specifies the type of the *entire
+    value* (not just the element type), and requires dimension sizes
+    when `t` is an array (e.g. `empty(i32)` is no longer allowed, you
+    need for example `empty([0]i32)`).
+
+  * All input files are now assumed to be in UTF-8.
+
+### Fixed
+
+  * Fixed exponential-time behaviour for certain kernels with large
+    arithmetic expressions (#805).
+
+  * `futhark test` and friends no longer crash when reporting some
+    errors (#808).
+
+  * Fix uniqueness of loop results (#810).
+
+## [0.12.3]
+
+### Added
+
+  * Character literals can now be any integer type.
+
+  * The integer modules now have `popc` and `clz` functions.
+
+  * Tweaked inlining so that larger programs may now compile faster
+    (observed about 20%).
+
+  * Pattern-matching on large sum typed-values taken from arrays may
+    be a bit faster.
+
+### Fixed
+
+  * Various small fixes to type errors.
+
+  * All internal functions used in generated C code are now properly
+    declared `static`.
+
+  * Fixed bugs when handling dimensions and aliases in type ascriptions.
+
+## [0.12.2]
 
 ### Added
 
@@ -16,9 +83,14 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   * New tool: `futhark dataget`, for extracting test input data.  Most
     will probably never use this.
 
-### Removed
+  * Programs compiled with the `cuda` backend now take options
+    `--default-group-size`, `--default-num-groups`, and
+    `--default-tile-size`.
 
-### Changed
+  * Segmented `reduce_by_index` are now substantially fasted for small
+    histograms.
+
+  * New functions: `f32.lerp` and `f64.lerp`, for linear interpolation.
 
 ### Fixed
 
@@ -32,6 +104,13 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   * Source location now correct for unknown infix operators.
 
   * Function parameters are no longer in scope of themselves (#798).
+
+  * Fixed a nasty out-of-bounds error in handling of irregular allocations.
+
+  * The `floor`/`ceil` functions in `f32`/`f64` now handle infinities
+    correctly (and are also faster).
+
+  * Using `%` on floats now computes fmod instead of crashing the compiler.
 
 ## [0.12.1]
 

@@ -6,7 +6,7 @@ module Futhark.Pass.ExtractKernels.BlockedKernel
        , segRed
        , nonSegRed
        , segScan
-       , segGenRed
+       , segHist
        , segMap
 
        , streamRed
@@ -55,10 +55,10 @@ getSize desc size_class = do
 
 numberOfGroups :: (MonadBinder m, Op (Lore m) ~ HostOp (Lore m) inner) =>
                   String -> SubExp -> SubExp -> m (SubExp, SubExp)
-numberOfGroups desc w group_size = do
+numberOfGroups desc w64 group_size = do
   max_num_groups_key <- nameFromString . pretty <$> newVName (desc ++ "_num_groups")
   num_groups <- letSubExp "num_groups" $
-                Op $ SizeOp $ CalcNumGroups w max_num_groups_key group_size
+                Op $ SizeOp $ CalcNumGroups w64 max_num_groups_key group_size
   num_threads <- letSubExp "num_threads" $ BasicOp $ BinOp (Mul Int32) num_groups group_size
   return (num_groups, num_threads)
 
@@ -80,16 +80,21 @@ type MkSegLevel m =
 -- array.
 segThreadCapped :: MonadFreshNames m => MkSegLevel m
 segThreadCapped ws desc r = do
-  w <- letSubExp "nest_size" =<< foldBinOp (Mul Int32) (intConst Int32 1) ws
+  w64 <- letSubExp "nest_size" =<<
+         foldBinOp (Mul Int64) (intConst Int64 1) =<<
+         mapM (asIntS Int64) ws
   group_size <- getSize (desc ++ "_group_size") SizeGroup
 
   case r of
     ManyThreads -> do
-      usable_groups <- letSubExp "segmap_usable_groups" =<<
-                       eDivRoundingUp Int32 (eSubExp w) (eSubExp group_size)
+      usable_groups <- letSubExp "segmap_usable_groups" .
+                       BasicOp . ConvOp (SExt Int64 Int32) =<<
+                       letSubExp "segmap_usable_groups_64" =<<
+                       eDivRoundingUp Int64 (eSubExp w64)
+                       (eSubExp =<< asIntS Int64 group_size)
       return $ SegThread (Count usable_groups) (Count group_size) SegNoVirt
     NoRecommendation v -> do
-      (num_groups, _) <- numberOfGroups desc w group_size
+      (num_groups, _) <- numberOfGroups desc w64 group_size
       return $ SegThread (Count num_groups) (Count group_size) v
 
 mkSegSpace :: MonadFreshNames m => [(VName, SubExp)] -> m SegSpace
@@ -295,16 +300,16 @@ streamMap out_desc mapout_pes w comm fold_lam nes arrs = runBinder $ do
 
   return (threads, map patElemName redout_pes)
 
-segGenRed :: (MonadFreshNames m, HasScope Kernels m) =>
+segHist :: (MonadFreshNames m, HasScope Kernels m) =>
              SegLevel
           -> Pattern Kernels
           -> SubExp
           -> [(VName,SubExp)] -- ^ Segment indexes and sizes.
           -> [KernelInput]
-          -> [GenReduceOp Kernels]
+          -> [HistOp Kernels]
           -> Lambda Kernels -> [VName]
           -> m (Stms Kernels)
-segGenRed lvl pat arr_w ispace inps ops lam arrs = runBinder_ $ do
+segHist lvl pat arr_w ispace inps ops lam arrs = runBinder_ $ do
   gtid <- newVName "gtid"
   space <- mkSegSpace $ ispace ++ [(gtid, arr_w)]
 
@@ -317,7 +322,7 @@ segGenRed lvl pat arr_w ispace inps ops lam arrs = runBinder_ $ do
         BasicOp $ Index arr $ fullSlice arr_t [DimFix $ Var gtid]
     map Returns <$> bodyBind (lambdaBody lam)
 
-  letBind_ pat $ Op $ SegOp $ SegGenRed lvl space ops (lambdaReturnType lam) kbody
+  letBind_ pat $ Op $ SegOp $ SegHist lvl space ops (lambdaReturnType lam) kbody
 
 blockedPerThread :: (MonadBinder m, Lore m ~ Kernels) =>
                     VName -> SubExp -> KernelSize -> StreamOrd -> Lambda Kernels
@@ -391,11 +396,12 @@ blockedKernelSize :: (MonadBinder m, Lore m ~ Kernels) =>
 blockedKernelSize desc w = do
   group_size <- getSize (desc ++ "_group_size") SizeGroup
 
-  (_, num_threads) <- numberOfGroups desc w group_size
+  w64 <- letSubExp "w64" $ BasicOp $ ConvOp (SExt Int32 Int64) w
+  (_, num_threads) <- numberOfGroups desc w64 group_size
 
   per_thread_elements <-
     letSubExp "per_thread_elements" =<<
-    eDivRoundingUp Int64 (toExp =<< asIntS Int64 w) (toExp =<< asIntS Int64 num_threads)
+    eDivRoundingUp Int64 (eSubExp w64) (toExp =<< asIntS Int64 num_threads)
 
   return $ KernelSize per_thread_elements num_threads
 

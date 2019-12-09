@@ -30,7 +30,6 @@ import qualified Futhark.CodeGen.ImpCode.OpenCL as ImpOpenCL
 import Futhark.MonadFreshNames
 import Futhark.Representation.ExplicitMemory (allScalarMemory)
 import Futhark.Util (zEncodeString)
-import Futhark.Util.Pretty (pretty)
 
 kernelsToCUDA, kernelsToOpenCL :: ImpKernels.Program
                                -> Either InternalError ImpOpenCL.Program
@@ -72,7 +71,7 @@ pointerQuals "constant"   = return [C.ctyquals|__constant|]
 pointerQuals "write_only" = return [C.ctyquals|__write_only|]
 pointerQuals "read_only"  = return [C.ctyquals|__read_only|]
 pointerQuals "kernel"     = return [C.ctyquals|__kernel|]
-pointerQuals s            = fail $ "'" ++ s ++ "' is not an OpenCL kernel address space."
+pointerQuals s            = error $ "'" ++ s ++ "' is not an OpenCL kernel address space."
 
 -- In-kernel name and per-workgroup size in bytes.
 type LocalMemoryUse = (VName, Count Bytes Exp)
@@ -501,19 +500,19 @@ inKernelOperations = GenericC.Operations
 
         cannotAllocate :: GenericC.Allocate KernelOp KernelRequirements
         cannotAllocate _ =
-          fail "Cannot allocate memory in kernel"
+          error "Cannot allocate memory in kernel"
 
         cannotDeallocate :: GenericC.Deallocate KernelOp KernelRequirements
         cannotDeallocate _ _ =
-          fail "Cannot deallocate memory in kernel"
+          error "Cannot deallocate memory in kernel"
 
         copyInKernel :: GenericC.Copy KernelOp KernelRequirements
         copyInKernel _ _ _ _ _ _ _ =
-          fail "Cannot bulk copy in kernel."
+          error "Cannot bulk copy in kernel."
 
         noStaticArrays :: GenericC.StaticArray KernelOp KernelRequirements
         noStaticArrays _ _ _ _ =
-          fail "Cannot create static array in kernel."
+          error "Cannot create static array in kernel."
 
         kernelMemoryType space
           | Just t <- M.lookup space allScalarMemory =
@@ -567,7 +566,7 @@ typesInCode (If e c1 c2) =
   typesInExp e <> typesInCode c1 <> typesInCode c2
 typesInCode (Assert e _ _) = typesInExp e
 typesInCode (Comment _ c) = typesInCode c
-typesInCode (DebugPrint _ v) = maybe mempty (typesInExp . snd) v
+typesInCode (DebugPrint _ v) = maybe mempty typesInExp v
 typesInCode Op{} = mempty
 
 typesInExp :: Exp -> S.Set PrimType

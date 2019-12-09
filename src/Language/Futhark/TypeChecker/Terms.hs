@@ -223,7 +223,7 @@ instance MonadUnify TermTypeM where
   newTypeVar loc desc = do
     i <- incCounter
     v <- newID $ mkTypeVarName desc i
-    modifyConstraints $ M.insert v $ NoConstraint Nothing $ mkUsage' loc
+    modifyConstraints $ M.insert v $ NoConstraint Lifted $ mkUsage' loc
     return $ Scalar $ TypeVar mempty Nonunique (typeName v) []
 
 instance MonadBreadCrumbs TermTypeM where
@@ -258,11 +258,14 @@ initialTermScope = TermScope { scopeVtable = initialVtable
                              }
   where initialVtable = M.fromList $ mapMaybe addIntrinsicF $ M.toList intrinsics
 
-        funF ts t = foldr (arrow . Scalar . Prim) (Scalar $ Prim t) ts
+        prim = Scalar . Prim
         arrow x y = Scalar $ Arrow mempty Unnamed x y
 
-        addIntrinsicF (name, IntrinsicMonoFun ts t) =
-          Just (name, BoundV Global [] $ funF ts t)
+        addIntrinsicF (name, IntrinsicMonoFun pts t) =
+          Just (name, BoundV Global [] $ arrow pts' $ prim t)
+          where pts' = case pts of [pt] -> prim pt
+                                   _    -> tupleRecord $ map prim pts
+
         addIntrinsicF (name, IntrinsicOverloadedFun ts pts rts) =
           Just (name, OverloadedF ts pts rts)
         addIntrinsicF (name, IntrinsicPolyFun tvs pts rt) =
@@ -420,7 +423,7 @@ instantiateTypeParam :: Monoid as => SrcLoc -> TypeParam -> TermTypeM (VName, Su
 instantiateTypeParam loc tparam = do
   i <- incCounter
   v <- newID $ mkTypeVarName (takeWhile isAlpha (baseString (typeParamName tparam))) i
-  modifyConstraints $ M.insert v $ NoConstraint (Just l) $ mkUsage' loc
+  modifyConstraints $ M.insert v $ NoConstraint l $ mkUsage' loc
   return (v, Subst $ Scalar $ TypeVar mempty Nonunique (typeName v) [])
   where l = case tparam of TypeParamType x _ _ -> x
                            _                   -> Lifted
@@ -428,7 +431,7 @@ instantiateTypeParam loc tparam = do
 newArrayType :: SrcLoc -> String -> Int -> TermTypeM (TypeBase () (), TypeBase () ())
 newArrayType loc desc r = do
   v <- newID $ nameFromString desc
-  modifyConstraints $ M.insert v $ NoConstraint Nothing $ mkUsage' loc
+  modifyConstraints $ M.insert v $ NoConstraint Unlifted $ mkUsage' loc
   let rowt = TypeVar () Nonunique (typeName v) []
   return (Array () Nonunique rowt (ShapeDecl $ replicate r ()),
           Scalar rowt)
@@ -891,7 +894,8 @@ checkExp (Ascript e decl NoInfo loc) = do
     typeError loc $ "Type " ++ quote (pretty t') ++ " is not a subtype of " ++
     quote (pretty decl_t') ++ "."
 
-  return $ Ascript e' decl' (Info (combineTypeShapes t $ fromStruct decl_t)) loc
+  let t'' = flip unifyTypeAliases t' $ combineTypeShapes t' $ fromStruct decl_t'
+  return $ Ascript e' decl' (Info t'') loc
 
 checkExp (BinOp (op, oploc) NoInfo (e1,_) (e2,_) NoInfo loc) = do
   (op', ftype) <- lookupVar oploc op
@@ -1239,6 +1243,7 @@ checkExp (DoLoop mergepat mergeexp form loopbody loc) =
     convergePattern pat body_cons body_t body_loc = do
       let consumed_merge = S.map identName (patternIdents pat) `S.intersection`
                            body_cons
+
           uniquePat (Wildcard (Info t) wloc) =
             Wildcard (Info $ t `setUniqueness` Nonunique) wloc
           uniquePat (PatternParens p ploc) =
@@ -1276,40 +1281,68 @@ checkExp (DoLoop mergepat mergeexp form loopbody loc) =
       -- Check that the new values of consumed merge parameters do not
       -- alias something bound outside the loop, AND that anything
       -- returned for a unique merge parameter does not alias anything
-      -- else returned.
+      -- else returned.  We also update the aliases for the pattern.
       bound_outside <- asks $ S.fromList . M.keys . scopeVtable . termScope
-      let checkMergeReturn (Id pat_v (Info pat_v_t) _) t
+      let combAliases t1 t2 =
+            case t1 of Scalar Record{} -> t1
+                       _ -> t1 `addAliases` (<>aliases t2)
+
+          checkMergeReturn (Id pat_v (Info pat_v_t) patloc) t
             | unique pat_v_t,
-              v:_ <- S.toList $ S.map aliasVar (aliases t) `S.intersection` bound_outside =
-                lift $ typeError loc $ "Loop return value corresponding to merge parameter " ++
+              v:_ <- S.toList $
+                     S.map aliasVar (aliases t) `S.intersection` bound_outside =
+                lift $ typeError loc $
+                "Loop return value corresponding to merge parameter " ++
                 quote (prettyName pat_v) ++ " aliases " ++ prettyName v ++ "."
+
             | otherwise = do
                 (cons,obs) <- get
                 unless (S.null $ aliases t `S.intersection` cons) $
-                  lift $ typeError loc $ "Loop return value for merge parameter " ++
-                  quote (prettyName pat_v) ++ " aliases other consumed merge parameter."
+                  lift $ typeError loc $
+                  "Loop return value for merge parameter " ++
+                  quote (prettyName pat_v) ++
+                  " aliases other consumed merge parameter."
                 when (unique pat_v_t &&
                       not (S.null (aliases t `S.intersection` (cons<>obs)))) $
-                  lift $ typeError loc $ "Loop return value for consuming merge parameter " ++
+                  lift $ typeError loc $
+                  "Loop return value for consuming merge parameter " ++
                   quote (prettyName pat_v) ++ " aliases previously returned value."
                 if unique pat_v_t
                   then put (cons<>aliases t, obs)
                   else put (cons, obs<>aliases t)
+
+                return $ Id pat_v (Info (combAliases pat_v_t t)) patloc
+
+          checkMergeReturn (Wildcard (Info pat_v_t) patloc) t =
+            return $ Wildcard (Info (combAliases pat_v_t t)) patloc
+
           checkMergeReturn (PatternParens p _) t =
             checkMergeReturn p t
+
           checkMergeReturn (PatternAscription p _ _) t =
             checkMergeReturn p t
-          checkMergeReturn (RecordPattern pfs _) (Scalar (Record tfs)) =
-            sequence_ $ M.elems $ M.intersectionWith checkMergeReturn (M.fromList pfs) tfs
-          checkMergeReturn (TuplePattern pats _) t | Just ts <- isTupleRecord t =
-            zipWithM_ checkMergeReturn pats ts
-          checkMergeReturn _ _ =
-            return ()
-      (pat_cons, _) <- execStateT (checkMergeReturn pat' body_t') (mempty, mempty)
+
+          checkMergeReturn (RecordPattern pfs patloc) (Scalar (Record tfs)) =
+            RecordPattern . M.toList <$> sequence pfs' <*> pure patloc
+            where pfs' = M.intersectionWith checkMergeReturn
+                         (M.fromList pfs) tfs
+
+          checkMergeReturn (TuplePattern pats patloc) t
+            | Just ts <- isTupleRecord t =
+                TuplePattern
+                <$> zipWithM checkMergeReturn pats ts
+                <*> pure patloc
+
+          checkMergeReturn p _ =
+            return p
+
+      (pat'', (pat_cons, _)) <-
+        runStateT (checkMergeReturn pat' body_t') (mempty, mempty)
+
       let body_cons' = body_cons <> S.map aliasVar pat_cons
-      if body_cons' == body_cons && patternType pat' == patternType pat
+      if body_cons' == body_cons && patternType pat'' == patternType pat
         then return pat'
-        else convergePattern pat' body_cons' body_t' body_loc
+        else convergePattern pat'' body_cons' body_t' body_loc
 
 checkExp (Constr name es NoInfo loc) = do
   t <- newTypeVar loc "t"
@@ -1990,7 +2023,7 @@ closeOverTypes substs tparams t =
         closeOver (k, _)
           | k `elem` map typeParamName tparams =
               return Nothing
-        closeOver (k, NoConstraint (Just Unlifted) usage) =
+        closeOver (k, NoConstraint Unlifted usage) =
           return $ Just $ TypeParamType Unlifted k $ srclocOf usage
         closeOver (k, NoConstraint _ usage) =
           return $ Just $ TypeParamType Lifted k $ srclocOf usage

@@ -90,13 +90,13 @@ transformExp (Op (Inner (SegOp (SegScan lvl space scan_op nes ts kbody)))) = do
   return (alloc_stms,
           Op $ Inner $ SegOp $ SegScan lvl space (head scan_op') nes ts kbody')
 
-transformExp (Op (Inner (SegOp (SegGenRed lvl space ops ts kbody)))) = do
+transformExp (Op (Inner (SegOp (SegHist lvl space ops ts kbody)))) = do
   (alloc_stms, (lams', kbody')) <- transformScanRed lvl space lams kbody
   let ops' = zipWith onOp ops lams'
   return (alloc_stms,
-          Op $ Inner $ SegOp $ SegGenRed lvl space ops' ts kbody')
-  where lams = map genReduceOp ops
-        onOp op lam = op { genReduceOp = lam }
+          Op $ Inner $ SegOp $ SegHist lvl space ops' ts kbody')
+  where lams = map histOp ops
+        onOp op lam = op { histOp = lam }
 
 transformExp e =
   return (mempty, e)
@@ -535,6 +535,7 @@ sliceKernelSizes num_threads sizes space kstms = do
   kstms' <- either compilerLimitationS return $ unAllocKernelsStms kstms
   let num_sizes = length sizes
       i64s = replicate num_sizes $ Prim int64
+
   kernels_scope <- asks unAllocScope
 
   (max_lam, _) <- flip runBinderT kernels_scope $ do
@@ -574,13 +575,17 @@ sliceKernelSizes num_threads sizes space kstms = do
     pat <- basicPattern [] <$> replicateM num_sizes
            (newIdent "max_per_thread" $ Prim int64)
 
+    w <- letSubExp "size_slice_w" =<<
+         foldBinOp (Mul Int32) (intConst Int32 1) (segSpaceDims space)
+
     thread_space_iota <- letExp "thread_space_iota" $ BasicOp $
-                         Iota num_threads (intConst Int32 0) (intConst Int32 1) Int32
+                         Iota w (intConst Int32 0) (intConst Int32 1) Int32
     let red_op = SegRedOp Commutative max_lam
                  (replicate num_sizes $ intConst Int64 0) mempty
     lvl <- segThread "segred"
+
     addStms =<< mapM renameStm =<<
-      nonSegRed lvl pat num_threads [red_op] size_lam' [thread_space_iota]
+      nonSegRed lvl pat w [red_op] size_lam' [thread_space_iota]
 
     size_sums <- forM (patternNames pat) $ \threads_max ->
       letExp "size_sum" $
