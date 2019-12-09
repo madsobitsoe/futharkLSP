@@ -377,21 +377,22 @@ getAndPublishStatus uri version fileName lf =
         dump $ "filename: " ++ filename
         res <- runFutharkM (readProgram filename) NotVerbose
         case res of
-          Left _ -> dump "compilation failed.\n"
+          Left _ -> dump "compilation failed.\n" -- dump to stderr (debug)
           Right (w,_,_) -> do
-            dump $ show w
+            dump $ show w -- dump to stderr (debug)
             let diags =
                   [J.Diagnostic
                    (J.Range (J.Position 0 1) (J.Position 0 5))
                    (Just J.DsWarning)  -- severity
                    Nothing  -- code
                    (Just "lsp-hello") -- source
-                   (T.pack $ show w)
+                   (T.pack $ show w) -- Convert the warnings to T.text and put them in diags
                    (Just (J.List []))
                   ]
-
+            -- lf is the LSP server Method
+            -- (Core.publishDiagnosticsFunc lf) gives us a function that can send diagnostics to the client
+            -- 100 is max_warnings. TODO Replace with variable
             (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
-        --        Core.publishDiagnosticsFunc lf 100 uri version (partitionBySource diags)
     
 
 syncOptions :: J.TextDocumentSyncOptions
