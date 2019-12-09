@@ -14,7 +14,7 @@ import NeatInterpolation (text)
 import Futhark.CodeGen.ImpCode.OpenCL (PrimType(..), SizeClass(..))
 import Futhark.CodeGen.OpenCL.Heuristics
 import Futhark.CodeGen.Backends.GenericPython.AST
-import Futhark.Util.Pretty (prettyText)
+import Futhark.Util.Pretty (pretty, prettyText)
 
 -- | @rts/python/opencl.py@ embedded as a string.
 openClPrelude :: String
@@ -52,9 +52,7 @@ sizeClassesToPython = Dict . map f . M.toList
   where f (size_name, size_class) =
           (String $ pretty size_name,
            Dict [(String "class", String $ pretty size_class),
-                 (String "value", defValue size_class)])
-        defValue (SizeBespoke _ x) = Integer $ toInteger x
-        defValue _ = None
+                 (String "value", None)])
 
 sizeHeuristicsToPython :: [SizeHeuristic] -> PyExp
 sizeHeuristicsToPython = List . map f

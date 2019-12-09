@@ -19,7 +19,7 @@ module Futhark.Representation.AST.Attributes.Aliases
        where
 
 import Control.Arrow (first)
-import qualified Data.Kind
+import Data.Monoid ((<>))
 
 import Futhark.Representation.AST.Attributes (IsOp)
 import Futhark.Representation.AST.Syntax
@@ -160,7 +160,7 @@ instance AliasedOp () where
   consumedInOp () = mempty
 
 class AliasedOp (OpWithAliases op) => CanBeAliased op where
-  type OpWithAliases op :: Data.Kind.Type
+  type OpWithAliases op :: *
   removeOpAliases :: OpWithAliases op -> op
   addOpAliases :: op -> OpWithAliases op
 

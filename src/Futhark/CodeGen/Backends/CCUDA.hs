@@ -88,26 +88,6 @@ cliOptions = [ Option { optionLongName = "dump-cuda"
                           exit(0);
                         }|]
                       }
-             , Option { optionLongName = "default-group-size"
-                      , optionShortName = Nothing
-                      , optionArgument = RequiredArgument "INT"
-                      , optionAction = [C.cstm|futhark_context_config_set_default_group_size(cfg, atoi(optarg));|]
-                      }
-             , Option { optionLongName = "default-num-groups"
-                      , optionShortName = Nothing
-                      , optionArgument = RequiredArgument "INT"
-                      , optionAction = [C.cstm|futhark_context_config_set_default_num_groups(cfg, atoi(optarg));|]
-                      }
-             , Option { optionLongName = "default-tile-size"
-                      , optionShortName = Nothing
-                      , optionArgument = RequiredArgument "INT"
-                      , optionAction = [C.cstm|futhark_context_config_set_default_tile_size(cfg, atoi(optarg));|]
-                      }
-             , Option { optionLongName = "default-threshold"
-                      , optionShortName = Nothing
-                      , optionArgument = RequiredArgument "INT"
-                      , optionAction = [C.cstm|futhark_context_config_set_default_threshold(cfg, atoi(optarg));|]
-                      }
              , Option { optionLongName = "tuning"
                  , optionShortName = Nothing
                  , optionArgument = RequiredArgument "FILE"
@@ -131,7 +111,7 @@ writeCUDAScalar mem idx t "device" _ val = do
                                  sizeof($ty:t)));
                  }|]
 writeCUDAScalar _ _ _ space _ _ =
-  error $ "Cannot write to '" ++ space ++ "' memory space."
+  fail $ "Cannot write to '" ++ space ++ "' memory space."
 
 readCUDAScalar :: GC.ReadScalar OpenCL ()
 readCUDAScalar mem idx t "device" _ = do
@@ -144,19 +124,19 @@ readCUDAScalar mem idx t "device" _ = do
                 |]
   return [C.cexp|$id:val|]
 readCUDAScalar _ _ _ space _ =
-  error $ "Cannot write to '" ++ space ++ "' memory space."
+  fail $ "Cannot write to '" ++ space ++ "' memory space."
 
 allocateCUDABuffer :: GC.Allocate OpenCL ()
 allocateCUDABuffer mem size tag "device" =
   GC.stm [C.cstm|CUDA_SUCCEED(cuda_alloc(&ctx->cuda, $exp:size, $exp:tag, &$exp:mem));|]
 allocateCUDABuffer _ _ _ space =
-  error $ "Cannot allocate in '" ++ space ++ "' memory space."
+  fail $ "Cannot allocate in '" ++ space ++ "' memory space."
 
 deallocateCUDABuffer :: GC.Deallocate OpenCL ()
 deallocateCUDABuffer mem tag "device" =
   GC.stm [C.cstm|CUDA_SUCCEED(cuda_free(&ctx->cuda, $exp:mem, $exp:tag));|]
 deallocateCUDABuffer _ _ space =
-  error $ "Cannot deallocate in '" ++ space ++ "' memory space."
+  fail $ "Cannot deallocate in '" ++ space ++ "' memory space."
 
 copyCUDAMemory :: GC.Copy OpenCL ()
 copyCUDAMemory dstmem dstidx dstSpace srcmem srcidx srcSpace nbytes = do
@@ -170,7 +150,7 @@ copyCUDAMemory dstmem dstidx dstSpace srcmem srcidx srcSpace nbytes = do
     memcpyFun DefaultSpace (Space "device")     = return "cuMemcpyDtoH"
     memcpyFun (Space "device") DefaultSpace     = return "cuMemcpyHtoD"
     memcpyFun (Space "device") (Space "device") = return "cuMemcpy"
-    memcpyFun _ _ = error $ "Cannot copy to '" ++ show dstSpace
+    memcpyFun _ _ = fail $ "Cannot copy to '" ++ show dstSpace
                            ++ "' from '" ++ show srcSpace ++ "'."
 
 staticCUDAArray :: GC.StaticArray OpenCL ()
@@ -200,15 +180,16 @@ staticCUDAArray name "device" t vs = do
   }|]
   GC.item [C.citem|struct memblock_device $id:name = ctx->$id:name;|]
 staticCUDAArray _ space _ _ =
-  error $ "CUDA backend cannot create static array in '" ++ space
+  fail $ "CUDA backend cannot create static array in '" ++ space
           ++ "' memory space"
 
 cudaMemoryType :: GC.MemoryType OpenCL ()
 cudaMemoryType "device" = return [C.cty|typename CUdeviceptr|]
 cudaMemoryType space =
-  error $ "CUDA backend does not support '" ++ space ++ "' memory space."
+  fail $ "CUDA backend does not support '" ++ space ++ "' memory space."
 
 callKernel :: GC.OpCompiler OpenCL ()
+callKernel (HostCode c) = GC.compileCode c
 callKernel (GetSize v key) =
   GC.stm [C.cstm|$id:v = ctx->sizes.$id:key;|]
 callKernel (CmpSizeLe v key x) = do
@@ -223,7 +204,6 @@ callKernel (GetSizeMax v size_class) =
     cudaSizeClass SizeNumGroups = "grid_size"
     cudaSizeClass SizeTile = "tile_size"
     cudaSizeClass SizeLocalMemory = "shared_memory"
-    cudaSizeClass (SizeBespoke x _) = pretty x
 callKernel (LaunchKernel name args num_blocks block_size) = do
   args_arr <- newVName "kernel_args"
   time_start <- newVName "time_start"

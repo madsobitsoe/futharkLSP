@@ -332,11 +332,11 @@ UnOp :: { (QualName Name, SrcLoc) }
 
 -- Note that this production does not include Minus, but does include
 -- operator sections.
-BinOp :: { (QualName Name, SrcLoc) }
+BinOp :: { QualName Name }
       : '+...'     { binOpName $1 }
       | '-...'     { binOpName $1 }
       | '*...'     { binOpName $1 }
-      | '*'        { (qualName (nameFromString "*"), $1) }
+      | '*'        { qualName (nameFromString "*") }
       | '/...'     { binOpName $1 }
       | '%...'     { binOpName $1 }
       | '//...'    { binOpName $1 }
@@ -351,27 +351,25 @@ BinOp :: { (QualName Name, SrcLoc) }
       | '||...'    { binOpName $1 }
       | '**...'    { binOpName $1 }
       | '^...'     { binOpName $1 }
-      | '^'        { (qualName (nameFromString "^"), $1) }
+      | '^'        { qualName (nameFromString "^") }
       | '&...'     { binOpName $1 }
       | '|...'     { binOpName $1 }
-      | '|'        { (qualName (nameFromString "|"), $1) }
+      | '|'        { qualName (nameFromString "|") }
       | '>>...'    { binOpName $1 }
       | '<<...'    { binOpName $1 }
       | '<|...'    { binOpName $1 }
       | '|>...'    { binOpName $1 }
-      | '<'        { (qualName (nameFromString "<"), $1) }
-      | '`' QualName '`' { $2 }
+      | '<'        { qualName (nameFromString "<") }
+      | '`' QualName '`' { fst $2 }
 
 BindingUnOp :: { Name }
-      : UnOp {% let (QualName qs name, loc) = $1 in do
-                   unless (null qs) $ parseErrorAt loc $
-                     Just "Cannot use a qualified name in binding position."
+      : UnOp {% let (QualName qs name, _) = $1 in do
+                   unless (null qs) $ fail "Cannot use a qualified name in binding position."
                    return name }
 
 BindingBinOp :: { Name }
-      : BinOp {% let (QualName qs name, loc) = $1 in do
-                   unless (null qs) $ parseErrorAt loc $
-                     Just "Cannot use a qualified name in binding position."
+      : BinOp {% let QualName qs name = $1 in do
+                   unless (null qs) $ fail "Cannot use a qualified name in binding position."
                    return name }
       | '-'   { nameFromString "-" }
 
@@ -611,8 +609,6 @@ ApplyList :: { [UncheckedExp] }
 Atom :: { UncheckedExp }
 Atom : PrimLit        { Literal (fst $1) (snd $1) }
      | Constr         { Constr (fst $1) [] NoInfo (snd $1) }
-     | charlit        { let L loc (CHARLIT x) = $1
-                        in IntLit (toInteger (ord x)) NoInfo loc }
      | intlit         { let L loc (INTLIT x) = $1 in IntLit x NoInfo loc }
      | floatlit       { let L loc (FLOATLIT x) = $1 in FloatLit x NoInfo loc }
      | stringlit      { let L loc (STRINGLIT s) = $1 in
@@ -647,11 +643,11 @@ Atom : PrimLit        { Literal (fst $1) (snd $1) }
         { OpSectionLeft (qualName (nameFromString "-"))
            NoInfo $2 (NoInfo, NoInfo) NoInfo (srcspan $1 $>) }
      | '(' BinOp Exp2 ')'
-       { OpSectionRight (fst $2) NoInfo $3 (NoInfo, NoInfo) NoInfo (srcspan $1 $>) }
+       { OpSectionRight $2 NoInfo $3 (NoInfo, NoInfo) NoInfo (srcspan $1 $>) }
      | '(' Exp2 BinOp ')'
-       { OpSectionLeft (fst $3) NoInfo $2 (NoInfo, NoInfo) NoInfo (srcspan $1 $>) }
+       { OpSectionLeft $3 NoInfo $2 (NoInfo, NoInfo) NoInfo (srcspan $1 $>) }
      | '(' BinOp ')'
-       { OpSection (fst $2) NoInfo (srcspan $1 $>) }
+       { OpSection $2 NoInfo (srcspan $1 $>) }
 
      | '(' FieldAccess FieldAccesses ')'
        { ProjectSection (map fst ($2:$3)) NoInfo (srcspan $1 $>) }
@@ -676,6 +672,9 @@ PrimLit :: { (PrimValue, SrcLoc) }
 
         | f32lit { let L loc (F32LIT num) = $1 in (FloatValue $ Float32Value num, loc) }
         | f64lit { let L loc (F64LIT num) = $1 in (FloatValue $ Float64Value num, loc) }
+
+        | charlit { let L loc (CHARLIT char) = $1
+                    in (SignedValue $ Int32Value $ fromIntegral $ ord char, loc) }
 
 Exps1 :: { (UncheckedExp, [UncheckedExp]) }
        : Exps1_ { case reverse (snd $1 : fst $1) of
@@ -782,8 +781,6 @@ CFieldPatterns1 :: { [(Name, PatternBase NoInfo Name)] }
 
 CaseLiteral :: { (UncheckedExp, SrcLoc) }
              : PrimLit        { (Literal (fst $1) (snd $1), snd $1) }
-             | charlit        { let L loc (CHARLIT x) = $1
-                                in (IntLit (toInteger (ord x)) NoInfo loc, loc) }
              | intlit         { let L loc (INTLIT x) = $1 in (IntLit x NoInfo loc, loc) }
              | floatlit       { let L loc (FLOATLIT x) = $1 in (FloatLit x NoInfo loc, loc) }
              | stringlit      { let L loc (STRINGLIT s) = $1 in
@@ -884,7 +881,7 @@ CatValues : Value CatValues { $1 : $2 }
           |                 { [] }
 
 PrimType :: { PrimType }
-         : id {% let L loc (ID s) = $1 in primTypeFromName loc s }
+         : id {% let L _ (ID s) = $1 in primTypeFromName s }
 
 IntValue :: { Value }
          : SignedLit { PrimValue (SignedValue (fst $1)) }
@@ -939,19 +936,18 @@ ArrayValue :  '[' Value ']'
                   Left e -> throwError e
                   Right v -> return $ ArrayValue (arrayFromList $ $2:$4) $ valueType v
              }
+           | id '(' PrimType ')'
+             {% ($1 `mustBe` "empty") >> return (ArrayValue (listArray (0,-1) []) (Scalar (Prim $3))) }
            | id '(' RowType ')'
-             {% ($1 `mustBe` "empty") >> mustBeEmpty (srcspan $2 $4) $3 >> return (ArrayValue (listArray (0,-1) []) $3) }
+             {% ($1 `mustBe` "empty") >> return (ArrayValue (listArray (0,-1) []) $3) }
 
            -- Errors
            | '[' ']'
              {% emptyArrayError $1 }
 
-Dim :: { Int32 }
-Dim : intlit { let L _ (INTLIT num) = $1 in fromInteger num }
-
-RowType :: { ValueType }
-RowType : '[' Dim ']' RowType  { arrayOf $4 (ShapeDecl [$2]) Nonunique }
-        | '[' Dim ']' PrimType { arrayOf (Scalar (Prim $4)) (ShapeDecl [$2]) Nonunique }
+RowType :: { TypeBase () () }
+RowType : '[' ']' RowType   { arrayOf $3 (rank 1) Nonunique }
+        | '[' ']' PrimType  { arrayOf (Scalar (Prim $3)) (rank 1) Nonunique }
 
 Values :: { [Value] }
 Values : Value ',' Values { $1 : $3 }
@@ -985,12 +981,6 @@ mustBe (L loc (ID got)) expected
 mustBe (L loc _) expected =
   parseErrorAt loc $ Just $
   "Only the keyword '" ++ expected ++ "' may appear here."
-
-mustBeEmpty :: SrcLoc -> ValueType -> ParserMonad ()
-mustBeEmpty loc (Array _ _ _ (ShapeDecl dims))
-  | any (==0) dims = return ()
-mustBeEmpty loc t =
-  parseErrorAt loc $ Just $ pretty t ++ " is not an empty array."
 
 data ParserEnv = ParserEnv {
                  parserFile :: FilePath
@@ -1058,7 +1048,7 @@ patternExp (RecordPattern fs loc) = RecordLit <$> mapM field fs <*> pure loc
 eof :: Pos -> L Token
 eof pos = L (SrcLoc $ Loc pos pos) EOF
 
-binOpName (L loc (SYMBOL _ qs op)) = (QualName qs op, loc)
+binOpName (L _ (SYMBOL _ qs op)) = QualName qs op
 
 binOp x (L loc (SYMBOL _ qs op)) y =
   BinOp (QualName qs op, loc) NoInfo (x, NoInfo) (y, NoInfo) NoInfo $
@@ -1070,9 +1060,9 @@ getTokens = lift $ lift get
 putTokens :: ([L Token], Pos) -> ParserMonad ()
 putTokens = lift . lift . put
 
-primTypeFromName :: SrcLoc -> Name -> ParserMonad PrimType
-primTypeFromName loc s = maybe boom return $ M.lookup s namesToPrimTypes
-  where boom = parseErrorAt loc $ Just $ "No type named " ++ nameToString s
+primTypeFromName :: Name -> ParserMonad PrimType
+primTypeFromName s = maybe boom return $ M.lookup s namesToPrimTypes
+  where boom = fail $ "No type named " ++ nameToString s
 
 getFilename :: ParserMonad FilePath
 getFilename = lift $ gets parserFile

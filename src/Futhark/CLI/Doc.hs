@@ -4,6 +4,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Futhark.CLI.Doc (main) where
 
+import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State
 import Data.FileEmbed
 import Data.List

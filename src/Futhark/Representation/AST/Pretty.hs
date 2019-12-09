@@ -17,8 +17,10 @@ module Futhark.Representation.AST.Pretty
   where
 
 import           Data.Maybe
+import           Data.Monoid                                    ((<>))
 
 import           Futhark.Util.Pretty
+
 import           Futhark.Representation.AST.Attributes.Patterns
 import           Futhark.Representation.AST.Syntax
 

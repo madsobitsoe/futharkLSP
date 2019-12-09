@@ -172,8 +172,6 @@ newtype PkgM a = PkgM { unPkgM :: ReaderT PkgConfig (StateT (PkgRegistry PkgM) I
 instance Monad PkgM where
   PkgM m >>= f = PkgM $ m >>= unPkgM . f
   return = PkgM . return
-
-instance MonadFail PkgM where
   fail s = liftIO $ do
     prog <- getProgName
     putStrLn $ prog ++ ": " ++ s

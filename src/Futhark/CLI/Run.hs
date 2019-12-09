@@ -5,7 +5,7 @@ module Futhark.CLI.Run (main) where
 
 import Control.Monad.Free.Church
 import Control.Exception
-import Data.Bifunctor (first)
+import Data.Array
 import Data.List
 import Data.Loc
 import Data.Maybe
@@ -54,8 +54,12 @@ interpret config fp = do
       Left err -> do
         hPutStrLn stderr $ "Error when reading input: " ++ show err
         exitFailure
-      Right vs ->
-        return vs
+      Right vs
+        | Just vs' <- mapM convertValue vs ->
+            return vs'
+        | otherwise -> do
+            hPutStrLn stderr "Error when reading input: irregular array."
+            exitFailure
 
   (fname, ret) <-
     case M.lookup (T.Term, entry) $ T.envNameMap tenv of
@@ -65,25 +69,24 @@ interpret config fp = do
       _ -> do hPutStrLn stderr $ "Invalid entry point: " ++ pretty entry
               exitFailure
 
-  case I.interpretFunction ienv (qualLeaf fname) inps of
-    Left err -> do hPutStrLn stderr err
+  r <- runInterpreter' $ I.interpretFunction ienv (qualLeaf fname) inps
+  case r of
+    Left err -> do hPrint stderr err
                    exitFailure
-    Right run -> do
-      run' <- runInterpreter' run
-      case run' of
-        Left err -> do hPrint stderr err
-                       exitFailure
-        Right res ->
-          case (I.fromTuple res, isTupleRecord ret) of
-            (Just vs, Just ts) -> zipWithM_ putValue vs ts
-            _ -> putValue res ret
+    Right res ->
+      case (I.fromTuple res, isTupleRecord ret) of
+        (Just vs, Just ts) -> zipWithM_ putValue vs ts
+        _ -> putValue res ret
 
 putValue :: I.Value -> TypeBase () () -> IO ()
 putValue v t
   | I.isEmptyArray v =
-      putStrLn $ "empty(" ++ pretty t' ++ ")"
+      putStrLn $ "empty(" ++ pretty (stripArray 1 t) ++ ")"
   | otherwise = putStrLn $ pretty v
-  where t' = first (const 0) t `setUniqueness` Nonunique :: ValueType
+
+convertValue :: Value -> Maybe I.Value
+convertValue (PrimValue p) = Just $ I.ValuePrim p
+convertValue (ArrayValue arr _) = I.mkArray =<< mapM convertValue (elems arr)
 
 data InterpreterConfig =
   InterpreterConfig { interpreterEntryPoint :: Name

@@ -21,7 +21,6 @@ module Language.Futhark.Attributes
   , progModuleTypes
   , identifierReference
   , identifierReferences
-  , prettyStacktrace
 
   -- * Queries on expressions
   , typeOf
@@ -162,7 +161,7 @@ anyDimShapeAnnotations = modifyShapeAnnotations $ const AnyDim
 modifyShapeAnnotations :: (oldshape -> newshape)
                        -> TypeBase oldshape as
                        -> TypeBase newshape as
-modifyShapeAnnotations = first
+modifyShapeAnnotations f = bimap f id
 
 -- | Return the uniqueness of a type.
 uniqueness :: TypeBase shape as -> Uniqueness
@@ -240,7 +239,7 @@ arrayOfWithAliases :: Monoid as =>
 arrayOfWithAliases (Array as1 _ et shape1) as2 shape2 u =
   Array (as1<>as2) u et (shape2 <> shape1)
 arrayOfWithAliases (Scalar t) as shape u =
-  Array as u (second (const ()) t) shape
+  Array as u (bimap id (const ()) t) shape
 
 -- | @stripArray n t@ removes the @n@ outermost layers of the array.
 -- Essentially, it is the type of indexing an array of type @t@ with
@@ -327,7 +326,7 @@ setAliases t = addAliases t . const
 -- aliasing replaced by @f@ applied to that aliasing.
 addAliases :: TypeBase dim asf -> (asf -> ast)
            -> TypeBase dim ast
-addAliases = flip second
+addAliases t f = bimap id f t
 
 intValueType :: IntValue -> IntType
 intValueType Int8Value{}  = Int8
@@ -346,7 +345,7 @@ primValueType (UnsignedValue v) = Unsigned $ intValueType v
 primValueType (FloatValue v)    = FloatType $ floatValueType v
 primValueType BoolValue{}       = Bool
 
-valueType :: Value -> ValueType
+valueType :: Value -> TypeBase () ()
 valueType (PrimValue bv) = Scalar $ Prim $ primValueType bv
 valueType (ArrayValue _ t) = t
 
@@ -406,19 +405,7 @@ typeOf (Update e _ _ _) = typeOf e `setAliases` mempty
 typeOf (RecordUpdate _ _ _ (Info t) _) = t
 typeOf (Unsafe e _) = typeOf e
 typeOf (Assert _ e _ _) = typeOf e
-typeOf (DoLoop pat _ form _ _) =
-  -- We set all of the uniqueness to be unique.  This is intentional,
-  -- and matches what happens for function calls.  Those arrays that
-  -- really *cannot* be consumed will alias something unconsumable,
-  -- and will be caught that way.
-  second (`S.difference` S.map AliasBound bound_here) $
-  patternType pat `setUniqueness` Unique
-  where bound_here = S.map identName (patternIdents pat) <> form_bound
-        form_bound =
-          case form of
-            For v _ -> S.singleton $ identName v
-            ForIn forpat _ -> S.map identName (patternIdents forpat)
-            While{} -> mempty
+typeOf (DoLoop pat _ _ _ _) = patternType pat
 typeOf (Lambda params _ _ (Info (als, t)) _) =
   unscopeType bound_here $ foldr (arrow . patternParam) t params `setAliases` als
   where bound_here = S.map identName (mconcat $ map patternIdents params)
@@ -630,14 +617,13 @@ intrinsics = M.fromList $ zipWith namify [10..] $
               ("zip", IntrinsicPolyFun [tp_a, tp_b] [arr_a, arr_b] arr_a_b),
               ("unzip", IntrinsicPolyFun [tp_a, tp_b] [arr_a_b] t_arr_a_arr_b),
 
-              ("hist", IntrinsicPolyFun [tp_a]
-                       [Scalar $ Prim $ Signed Int32,
-                        uarr_a,
-                        Scalar t_a `arr` (Scalar t_a `arr` Scalar t_a),
-                        Scalar t_a,
-                        Array () Nonunique (Prim $ Signed Int32) (rank 1),
-                        arr_a]
-                       uarr_a),
+              ("gen_reduce", IntrinsicPolyFun [tp_a]
+                             [uarr_a,
+                              Scalar t_a `arr` (Scalar t_a `arr` Scalar t_a),
+                              Scalar t_a,
+                              Array () Nonunique (Prim $ Signed Int32) (rank 1),
+                              arr_a]
+                             uarr_a),
 
               ("map", IntrinsicPolyFun [tp_a, tp_b] [Scalar t_a `arr` Scalar t_b, arr_a] uarr_b),
 
@@ -759,8 +745,8 @@ intrinsics = M.fromList $ zipWith namify [10..] $
         intrinsicBinOp Band     = binOp anyIntType
         intrinsicBinOp Xor      = binOp anyIntType
         intrinsicBinOp Bor      = binOp anyIntType
-        intrinsicBinOp LogAnd   = binOp [Bool]
-        intrinsicBinOp LogOr    = binOp [Bool]
+        intrinsicBinOp LogAnd   = Just $ IntrinsicMonoFun [Bool,Bool] Bool
+        intrinsicBinOp LogOr    = Just $ IntrinsicMonoFun [Bool,Bool] Bool
         intrinsicBinOp Equal    = Just IntrinsicEquality
         intrinsicBinOp NotEqual = Just IntrinsicEquality
         intrinsicBinOp Less     = ordering

@@ -6,9 +6,7 @@
 -- block specifies input- and output-sets.
 module Futhark.Test
        ( testSpecFromFile
-       , testSpecFromFileOrDie
        , testSpecsFromPaths
-       , testSpecsFromPathsOrDie
        , valuesFromByteString
        , getValues
        , getValuesBS
@@ -49,6 +47,7 @@ import qualified Data.Map.Strict as M
 import Data.Char
 import Data.Functor
 import Data.Maybe
+import Data.Foldable (foldl')
 import Data.List
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
@@ -388,24 +387,17 @@ readInputOutputs line name t =
 commentPrefix :: T.Text
 commentPrefix = T.pack "--"
 
-couldNotRead :: IOError -> IO (Either String a)
-couldNotRead = return . Left . show
-
 -- | Read the test specification from the given Futhark program.
-testSpecFromFile :: FilePath -> IO (Either String ProgramTest)
+-- Note: will call 'error' on parse errors.
+testSpecFromFile :: FilePath -> IO ProgramTest
 testSpecFromFile path = do
-  blocks_or_err <-
-    (Right . testBlocks <$> T.readFile path)
-    `catch` couldNotRead
-  case blocks_or_err of
-    Left err -> return $ Left err
-    Right blocks -> do
-      let (first_spec_line, first_spec, rest_specs) =
-            case blocks of []       -> (0, mempty, [])
-                           (n,s):ss -> (n, s, ss)
-      case readTestSpec (1+first_spec_line) path first_spec of
-        Left err -> return $ Left $ errorBundlePretty err
-        Right v  -> Right <$> foldM moreCases v rest_specs
+  blocks <- testBlocks <$> T.readFile path
+  let (first_spec_line, first_spec, rest_specs) =
+        case blocks of []       -> (0, mempty, [])
+                       (n,s):ss -> (n, s, ss)
+  case readTestSpec (1+first_spec_line) path first_spec of
+    Left err -> error $ errorBundlePretty err
+    Right v  -> foldM moreCases v rest_specs
 
   where moreCases test (lineno, cases) =
           case readInputOutputs lineno path cases of
@@ -415,15 +407,6 @@ testSpecFromFile path = do
                 RunCases old_cases structures warnings ->
                   return test { testAction = RunCases (old_cases ++ cases') structures warnings }
                 _ -> fail "Secondary test block provided, but primary test block specifies compilation error."
-
--- | Like 'testSpecFromFile', but kills the process on error.
-testSpecFromFileOrDie :: FilePath -> IO ProgramTest
-testSpecFromFileOrDie prog = do
-  spec_or_err <- testSpecFromFile prog
-  case spec_or_err of
-    Left err -> do putStrLn err
-                   exitFailure
-    Right spec -> return spec
 
 testBlocks :: T.Text -> [(Int, T.Text)]
 testBlocks = mapMaybe isTestBlock . commentBlocks
@@ -447,31 +430,19 @@ commentBlocks = commentBlocks' . zip [0..] . T.lines
 
 -- | Read test specifications from the given path, which can be a file
 -- or directory containing @.fut@ files and further directories.
-testSpecsFromPath :: FilePath -> IO (Either String [(FilePath, ProgramTest)])
+-- Calls 'error' on parse errors, or if the given path name does not
+-- name a file that exists.
+testSpecsFromPath :: FilePath -> IO [(FilePath, ProgramTest)]
 testSpecsFromPath path = do
-  programs_or_err <- (Right <$> testPrograms path) `catch` couldNotRead
-  case programs_or_err of
-    Left err -> return $ Left err
-    Right programs -> do
-      specs_or_errs <- mapM testSpecFromFile programs
-      return $ zip programs <$> sequence specs_or_errs
+  programs <- testPrograms path
+  zip programs <$> mapM testSpecFromFile programs
 
 -- | Read test specifications from the given paths, which can be a
 -- files or directories containing @.fut@ files and further
--- directories.
-testSpecsFromPaths :: [FilePath]
-                   -> IO (Either String [(FilePath, ProgramTest)])
-testSpecsFromPaths = fmap (fmap concat . sequence) . mapM testSpecsFromPath
-
--- | Like 'testSpecsFromPaths', but kills the process on errors.
-testSpecsFromPathsOrDie :: [FilePath]
-                        -> IO [(FilePath, ProgramTest)]
-testSpecsFromPathsOrDie dirs = do
-  specs_or_err <- testSpecsFromPaths dirs
-  case specs_or_err of
-    Left err -> do putStrLn err
-                   exitFailure
-    Right specs -> return specs
+-- directories.  Calls 'error' on parse errors, or if any of the
+-- immediately passed path names do not name a file that exists.
+testSpecsFromPaths :: [FilePath] -> IO [(FilePath, ProgramTest)]
+testSpecsFromPaths = fmap concat . mapM testSpecsFromPath
 
 testPrograms :: FilePath -> IO [FilePath]
 testPrograms dir = filter isFut <$> directoryContents dir
@@ -486,13 +457,13 @@ valuesFromByteString srcname =
 -- | Get the actual core Futhark values corresponding to a 'Values'
 -- specification.  The 'FilePath' is the directory which file paths
 -- are read relative to.
-getValues :: (MonadFail m, MonadIO m) => FilePath -> Values -> m [Value]
+getValues :: MonadIO m => FilePath -> Values -> m [Value]
 getValues _ (Values vs) =
   return vs
 getValues dir v = do
   s <- getValuesBS dir v
   case valuesFromByteString file s of
-    Left e   -> fail e
+    Left e   -> fail $ show e
     Right vs -> return vs
   where file = case v of Values{} -> "<values>"
                          InFile f -> f
@@ -587,7 +558,7 @@ testRunReferenceOutput prog entry tr =
         clean c = c
 
 -- | Get the values corresponding to an expected result, if any.
-getExpectedResult :: (MonadFail m, MonadIO m) =>
+getExpectedResult :: MonadIO m =>
                      FilePath -> T.Text -> TestRun
                   -> m (ExpectedResult [Value])
 getExpectedResult prog entry tr =

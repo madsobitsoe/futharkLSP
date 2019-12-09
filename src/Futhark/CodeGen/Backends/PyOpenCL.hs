@@ -14,6 +14,7 @@ import qualified Futhark.CodeGen.ImpGen.OpenCL as ImpGen
 import Futhark.CodeGen.Backends.GenericPython.AST
 import Futhark.CodeGen.Backends.GenericPython.Options
 import Futhark.CodeGen.Backends.GenericPython.Definitions
+import Futhark.Util.Pretty(pretty)
 import Futhark.MonadFreshNames
 
 
@@ -138,6 +139,8 @@ callKernel (Imp.CmpSizeLe v key x) = do
 callKernel (Imp.GetSizeMax v size_class) =
   Py.stm $ Assign (Var (Py.compileName v)) $
   Var $ "self.max_" ++ pretty size_class
+callKernel (Imp.HostCode c) =
+  Py.compileCode c
 
 callKernel (Imp.LaunchKernel name args num_workgroups workgroup_size) = do
   num_workgroups' <- mapM (fmap asLong . Py.compileExp) num_workgroups
@@ -180,7 +183,7 @@ writeOpenCLScalar mem i bt "device" val = do
      ArgKeyword "is_blocking" $ Var "synchronous"]
 
 writeOpenCLScalar _ _ _ space _ =
-  error $ "Cannot write to '" ++ space ++ "' memory space."
+  fail $ "Cannot write to '" ++ space ++ "' memory space."
 
 readOpenCLScalar :: Py.ReadScalar Imp.OpenCL ()
 readOpenCLScalar mem i bt "device" = do
@@ -198,7 +201,7 @@ readOpenCLScalar mem i bt "device" = do
   return $ Index val' $ IdxExp $ Integer 0
 
 readOpenCLScalar _ _ _ space =
-  error $ "Cannot read from '" ++ space ++ "' memory space."
+  fail $ "Cannot read from '" ++ space ++ "' memory space."
 
 allocateOpenCLBuffer :: Py.Allocate Imp.OpenCL ()
 allocateOpenCLBuffer mem size "device" =
@@ -206,7 +209,7 @@ allocateOpenCLBuffer mem size "device" =
   Py.simpleCall "opencl_alloc" [Var "self", size, String $ pretty mem]
 
 allocateOpenCLBuffer _ _ space =
-  error $ "Cannot allocate in '" ++ space ++ "' space"
+  fail $ "Cannot allocate in '" ++ space ++ "' space"
 
 copyOpenCLMemory :: Py.Copy Imp.OpenCL ()
 copyOpenCLMemory destmem destidx Imp.DefaultSpace srcmem srcidx (Imp.Space "device") nbytes bt = do
@@ -287,7 +290,7 @@ staticOpenCLArray name "device" t vs = do
   Py.stm $ Assign (Var name') (Field (Var "self") name')
   where name' = Py.compileName name
 staticOpenCLArray _ space _ _ =
-  error $ "PyOpenCL backend cannot create static array in memory space '" ++ space ++ "'"
+  fail $ "PyOpenCL backend cannot create static array in memory space '" ++ space ++ "'"
 
 packArrayOutput :: Py.EntryOutput Imp.OpenCL ()
 packArrayOutput mem "device" bt ept dims =
@@ -297,7 +300,7 @@ packArrayOutput mem "device" bt ept dims =
    Arg $ Var $ Py.compilePrimTypeExt bt ept,
    ArgKeyword "data" $ Var $ Py.compileName mem]
 packArrayOutput _ sid _ _ _ =
-  error $ "Cannot return array from " ++ sid ++ " space."
+  fail $ "Cannot return array from " ++ sid ++ " space."
 
 unpackArrayInput :: Py.EntryInput Imp.OpenCL ()
 unpackArrayInput mem "device" t s dims e = do
@@ -326,7 +329,7 @@ unpackArrayInput mem "device" t s dims e = do
     numpyArrayCase
   where mem_dest = Var $ Py.compileName mem
 unpackArrayInput _ sid _ _ _ _ =
-  error $ "Cannot accept array from " ++ sid ++ " space."
+  fail $ "Cannot accept array from " ++ sid ++ " space."
 
 ifNotZeroSize :: PyExp -> PyStmt -> PyStmt
 ifNotZeroSize e s =

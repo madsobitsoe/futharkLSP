@@ -24,6 +24,7 @@ import Data.List
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Maybe
+import Data.Monoid ((<>))
 
 import qualified Language.Futhark as E
 import Futhark.Representation.SOACS as I
@@ -117,9 +118,9 @@ internaliseTypeM orig_t =
     E.Scalar (E.Record ets) ->
       concat <$> mapM (internaliseTypeM . snd) (E.sortFields ets)
     E.Scalar E.TypeVar{} ->
-      error "internaliseTypeM: cannot handle type variable."
+      fail "internaliseTypeM: cannot handle type variable."
     E.Scalar E.Arrow{} ->
-      error $ "internaliseTypeM: cannot handle function type: " ++ pretty orig_t
+      fail $ "internaliseTypeM: cannot handle function type: " ++ pretty orig_t
     E.Scalar (E.Sum cs) -> do
       (ts, _) <- internaliseConstructors <$>
                  traverse (fmap concat . mapM internaliseTypeM) cs

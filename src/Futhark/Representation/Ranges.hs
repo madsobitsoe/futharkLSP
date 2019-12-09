@@ -34,11 +34,11 @@ where
 
 import Control.Monad.Identity
 import Control.Monad.Reader
+import Data.Monoid ((<>))
 import Data.Foldable
 
 import Futhark.Representation.AST.Syntax
 import Futhark.Representation.AST.Attributes
-import Futhark.Representation.AST.Attributes.Aliases
 import Futhark.Representation.AST.Attributes.Ranges
 import Futhark.Representation.AST.Traversals
 import Futhark.Representation.AST.Pretty
@@ -183,16 +183,3 @@ mkRangedLetStm :: (Attributes lore, CanBeRanged (Op lore)) =>
                -> Stm (Ranges lore)
 mkRangedLetStm pat explore e =
   Let (addRangesToPattern pat e) (StmAux mempty explore) e
-
--- It is convenient for a wrapped aliased lore to also be aliased.
-
-instance AliasesOf attr => AliasesOf ([Range], attr) where
-  aliasesOf = aliasesOf . snd
-
-instance AliasesOf attr => AliasesOf (Range, attr) where
-  aliasesOf = aliasesOf . snd
-
-instance (Aliased lore, CanBeRanged (Op lore),
-          AliasedOp (OpWithRanges (Op lore))) => Aliased (Ranges lore) where
-  bodyAliases = bodyAliases . removeBodyRanges
-  consumedInBody = consumedInBody . removeBodyRanges

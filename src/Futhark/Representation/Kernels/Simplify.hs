@@ -87,13 +87,12 @@ simplifyKernelOp _ (SegOp (SegScan lvl space scan_op nes ts kbody)) = do
   return (SegOp $ SegScan lvl' space' scan_op' nes' ts' kbody',
           hoisted)
 
-simplifyKernelOp _ (SegOp (SegHist lvl space ops ts kbody)) = do
+simplifyKernelOp _ (SegOp (SegGenRed lvl space ops ts kbody)) = do
   (lvl', space', ts') <- Engine.simplify (lvl, space, ts)
 
   (ops', ops_hoisted) <- fmap unzip $ forM ops $
-    \(HistOp w rf arrs nes dims lam) -> do
+    \(GenReduceOp w arrs nes dims lam) -> do
       w' <- Engine.simplify w
-      rf' <- Engine.simplify rf
       arrs' <- Engine.simplify arrs
       nes' <- Engine.simplify nes
       dims' <- Engine.simplify dims
@@ -101,12 +100,12 @@ simplifyKernelOp _ (SegOp (SegHist lvl space ops ts kbody)) = do
         Engine.localVtable (<>scope_vtable) $
         Engine.simplifyLambda lam $
         replicate (length nes * 2) Nothing
-      return (HistOp w' rf' arrs' nes' dims' lam',
+      return (GenReduceOp w' arrs' nes' dims' lam',
               op_hoisted)
 
   (kbody', body_hoisted) <- simplifyKernelBody space kbody
 
-  return (SegOp $ SegHist lvl' space' ops' ts' kbody',
+  return (SegOp $ SegGenRed lvl' space' ops' ts' kbody',
           mconcat ops_hoisted <> body_hoisted)
 
   where scope = scopeOfSegSpace space

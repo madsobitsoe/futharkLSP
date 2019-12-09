@@ -63,6 +63,7 @@ import Data.Maybe
 import Futhark.Analysis.PrimExp
 import Futhark.Construct (instantiateShapes)
 import Futhark.Representation.Aliases
+import Futhark.Analysis.Alias
 import Futhark.Util
 import Futhark.Util.Pretty (Pretty, prettyDoc, indent, ppr, text, (<+>), align)
 
@@ -455,7 +456,7 @@ checkArrIdent v = do
 -- yielding either a type error or a program with complete type
 -- information.
 checkProg :: Checkable lore =>
-             Prog (Aliases lore) -> Either (TypeError lore) ()
+             Prog lore -> Either (TypeError lore) ()
 checkProg prog = do
   let typeenv = Env { envVtable = M.empty
                     , envFtable = mempty
@@ -467,10 +468,11 @@ checkProg prog = do
         local (\env -> env { envFtable = ftable }) $
         checkFun fun
   (ftable, _) <- runTypeM typeenv buildFtable
-  sequence_ $ parMap rpar (onFunction ftable) $ progFunctions prog
+  sequence_ $ parMap rpar (onFunction ftable) $ progFunctions prog'
   where
-    buildFtable = do table <- initialFtable prog
-                     foldM expand table $ progFunctions prog
+    prog' = aliasAnalysis prog
+    buildFtable = do table <- initialFtable prog'
+                     foldM expand table $ progFunctions prog'
     expand ftable (FunDef _ name ret params _)
       | M.member name ftable =
           bad $ DupDefinitionError name
@@ -913,23 +915,9 @@ checkStm stm@(Let pat (StmAux (Certificates cs) (_,attr)) e) m = do
   context "When checking expression annotation" $ checkExpLore attr
   context ("When matching\n" ++ message "  " pat ++ "\nwith\n" ++ message "  " e) $
     matchPattern pat e
-  binding (maybeWithoutAliases $ scopeOf stm) $ do
+  binding (scopeOf stm) $ do
     mapM_ checkPatElem (patternElements $ removePatternAliases pat)
     m
-  where
-    -- FIXME: this is wrong.  However, the core language type system
-    -- is not strong enough to fully capture the aliases we want (see
-    -- issue #803).  Since we eventually inline everything anyway, and
-    -- our intra-procedural alias analysis is much simpler and
-    -- correct, I could not justify spending time on improving the
-    -- inter-procedural alias analysis.  If we ever stop inlining
-    -- everything, probably we need to go back and refine this.
-    maybeWithoutAliases =
-      case stmExp stm of
-        Apply{} -> M.map withoutAliases
-        _ -> id
-    withoutAliases (LetInfo (_, lattr)) = LetInfo (mempty, lattr)
-    withoutAliases info = info
 
 matchExtPattern :: Checkable lore =>
                    Pattern (Aliases lore) -> [ExtType] -> TypeM lore ()

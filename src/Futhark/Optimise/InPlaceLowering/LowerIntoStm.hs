@@ -18,6 +18,7 @@ import Futhark.Representation.Aliases
 import Futhark.Representation.Kernels
 import Futhark.Construct
 import Futhark.Optimise.InPlaceLowering.SubstituteIndices
+import Futhark.Tools (fullSlice)
 
 data DesiredUpdate attr =
   DesiredUpdate { updateName :: VName -- ^ Name of result.

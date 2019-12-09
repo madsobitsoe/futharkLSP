@@ -8,7 +8,6 @@ import Control.Monad
 import Data.List
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
-import GHC.IO.Encoding (setLocaleEncoding)
 import System.IO
 import System.Exit
 import System.Environment
@@ -31,12 +30,10 @@ import qualified Futhark.CLI.Dataset as Dataset
 import qualified Futhark.CLI.Datacmp as Datacmp
 import qualified Futhark.CLI.Pkg as Pkg
 import qualified Futhark.CLI.Doc as Doc
-import qualified Futhark.CLI.LSP as LSP
 import qualified Futhark.CLI.REPL as REPL
 import qualified Futhark.CLI.Run as Run
 import qualified Futhark.CLI.Misc as Misc
 import qualified Futhark.CLI.Autotune as Autotune
-import qualified Futhark.CLI.Query as Query
 
 type Command = String -> [String] -> IO ()
 
@@ -58,7 +55,7 @@ commands = sortOn fst
            , ("csopencl", (CSOpenCL.main, "Compile to C# calling OpenCL."))
 
            , ("test", (Test.main, "Test Futhark programs."))
-           , ("bench", (Bench.main, "Benchmark Futhark programs."))
+           , ("bench", (Bench.main, "Test Futhark programs."))
 
            , ("dataset", (Dataset.main, "Generate random test data."))
            , ("datacmp", (Datacmp.main, "Compare Futhark data files for equality."))
@@ -68,10 +65,8 @@ commands = sortOn fst
            , ("pkg", (Pkg.main, "Manage local packages."))
 
            , ("check", (Misc.mainCheck, "Type check a program."))
-           , ("lsp", (LSP.main, "Run LSP server."))
            , ("imports", (Misc.mainImports, "Print all non-builtin imported Futhark files."))
            , ("autotune", (Autotune.main, "Autotune threshold parameters."))
-           , ("query", (Query.main, "Query semantic information about program."))
            ]
 
 msg :: String
@@ -101,7 +96,6 @@ main :: IO ()
 main = reportingIOErrors $ do
   hSetEncoding stdout utf8
   hSetEncoding stderr utf8
-  setLocaleEncoding utf8
   args <- getArgs
   prog <- getProgName
   case args of

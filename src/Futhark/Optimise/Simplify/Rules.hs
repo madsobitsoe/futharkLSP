@@ -21,7 +21,8 @@ where
 
 import Control.Monad
 import Data.Either
-import Data.List
+import Data.Foldable (all)
+import Data.List hiding (all)
 import Data.Maybe
 import qualified Data.Map.Strict as M
 
@@ -625,10 +626,8 @@ simplifyIndexing vtable seType idd inds consuming =
           Just $ do
             i_offset' <- asIntS to_it i_offset
             i_stride' <- asIntS to_it i_stride
-            i_offset'' <- letSubExp "iota_offset" <=< toExp $
-                          primExpFromSubExp (IntType to_it) x +
-                          primExpFromSubExp (IntType to_it) s *
-                          primExpFromSubExp (IntType to_it) i_offset'
+            i_offset'' <- letSubExp "iota_offset" $
+                          BasicOp $ BinOp (Add Int32) x i_offset'
             i_stride'' <- letSubExp "iota_offset" $
                           BasicOp $ BinOp (Mul Int32) s i_stride'
             fmap (SubExpResult cs) $ letSubExp "slice_iota" $
@@ -745,16 +744,15 @@ simplifyIndexing vtable seType idd inds consuming =
           -- worth inlining over keeping it in an array and reading it
           -- from memory.
           worthInlining e
-            | primExpSizeAtLeast 20 e = False -- totally ad-hoc.
-            | otherwise = worthInlining' e
-          worthInlining' (BinOpExp Pow{} _ _) = False
-          worthInlining' (BinOpExp FPow{} _ _) = False
-          worthInlining' (BinOpExp _ x y) = worthInlining' x && worthInlining' y
-          worthInlining' (CmpOpExp _ x y) = worthInlining' x && worthInlining' y
-          worthInlining' (ConvOpExp _ x) = worthInlining' x
-          worthInlining' (UnOpExp _ x) = worthInlining' x
-          worthInlining' FunExp{} = False
-          worthInlining' _ = True
+            | length e > 10 = False -- totally ad-hoc.
+          worthInlining (BinOpExp Pow{} _ _) = False
+          worthInlining (BinOpExp FPow{} _ _) = False
+          worthInlining (BinOpExp _ x y) = worthInlining x && worthInlining y
+          worthInlining (CmpOpExp _ x y) = worthInlining x && worthInlining y
+          worthInlining (ConvOpExp _ x) = worthInlining x
+          worthInlining (UnOpExp _ x) = worthInlining x
+          worthInlining FunExp{} = False
+          worthInlining _ = True
 
 sliceSlice :: MonadBinder m =>
               [DimIndex SubExp] -> [DimIndex SubExp] -> m [DimIndex SubExp]
@@ -805,12 +803,12 @@ simplifyConcat (vtable, _) pat (StmAux cs _) (Concat 0 x xs _)
   | Just (vs, vcs) <- unzip <$> mapM isArrayLit (x:xs) = Simplify $ do
       rt <- rowType <$> lookupType x
       certifying (cs <> mconcat vcs) $
-        letBind_ pat $ BasicOp $ ArrayLit (concat vs) rt
+        letBind_ pat $ BasicOp $ ArrayLit vs rt
       where isArrayLit v
               | Just (Replicate shape se, vcs) <- ST.lookupBasicOp v vtable,
-                unitShape shape = Just ([se], vcs)
-              | Just (ArrayLit ses _, vcs) <- ST.lookupBasicOp v vtable =
-                  Just (ses, vcs)
+                unitShape shape = Just (se, vcs)
+              | Just (ArrayLit [se] _, vcs) <- ST.lookupBasicOp v vtable =
+                  Just (se, vcs)
               | otherwise =
                   Nothing
 

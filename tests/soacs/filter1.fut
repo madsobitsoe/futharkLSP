@@ -6,9 +6,9 @@
 --   [1, 2, 3]
 -- }
 -- input {
---   empty([0]i32)
+--   empty(i32)
 -- }
 -- output {
---   empty([0]i32)
+--   empty(i32)
 -- }
 let main(a: []i32): []i32 = filter (0<) a

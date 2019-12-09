@@ -20,7 +20,6 @@ module Futhark.CodeGen.ImpGen.Kernels.Base
   , compileGroupResult
   , virtualiseGroups
   , groupLoop
-  , kernelLoop
   , groupCoverSpace
 
   , getSize
@@ -51,7 +50,7 @@ import qualified Futhark.CodeGen.ImpCode.Kernels as Imp
 import Futhark.CodeGen.ImpCode.Kernels (elements)
 import Futhark.CodeGen.ImpGen
 import Futhark.Util.IntegralExp (quotRoundingUp, quot, rem)
-import Futhark.Util (chunks, maybeNth, mapAccumLM, takeLast, dropLast)
+import Futhark.Util (chunks, maybeNth, mapAccumLM, takeLast)
 
 type CallKernelGen = ImpM ExplicitMemory Imp.HostOp
 type InKernelGen = ImpM ExplicitMemory Imp.KernelOp
@@ -128,27 +127,20 @@ compileThreadExp (Pattern _ [dest]) (BasicOp (ArrayLit es _)) =
 compileThreadExp dest e =
   defCompileExp dest e
 
-
--- | Assign iterations of a for-loop to all threads in the kernel.  The
--- passed-in function is invoked with the (symbolic) iteration.  For
--- multidimensional loops, use 'groupCoverSpace'.
-kernelLoop :: Imp.Exp -> Imp.Exp -> Imp.Exp
-           -> (Imp.Exp -> InKernelGen ()) -> InKernelGen ()
-kernelLoop tid num_threads n f = do
-  -- Compute how many elements this thread is responsible for.
-  -- Formula: (n - tid) / num_threads (rounded up).
-  let elems_for_this = (n - tid) `quotRoundingUp` num_threads
-
-  sFor "i" elems_for_this $ \i -> f $
-    i * num_threads + tid
-
 -- | Assign iterations of a for-loop to threads in the workgroup.  The
 -- passed-in function is invoked with the (symbolic) iteration.  For
 -- multidimensional loops, use 'groupCoverSpace'.
 groupLoop :: KernelConstants -> Imp.Exp
           -> (Imp.Exp -> InKernelGen ()) -> InKernelGen ()
-groupLoop constants =
-  kernelLoop (kernelLocalThreadId constants) (kernelGroupSize constants)
+groupLoop constants n f = do
+  -- Compute how many elements this thread is responsible for.
+  -- Formula: (n - ltid) / group_size (rounded up).
+  let ltid = kernelLocalThreadId constants
+      elems_for_this = (n - ltid) `quotRoundingUp` kernelGroupSize constants
+
+  sFor "i" elems_for_this $ \i -> f $
+    i * kernelGroupSize constants +
+    kernelLocalThreadId constants
 
 -- | Iterate collectively though a multidimensional space, such that
 -- all threads in the group participate.  The passed-in function is
@@ -210,18 +202,18 @@ compileGroupSpace constants lvl space = do
   dPrimV_ (segFlat space) $ kernelLocalThreadId constants
 
 -- Construct the necessary lock arrays for an intra-group histogram.
-prepareIntraGroupSegHist :: KernelConstants
+prepareIntraGroupSegGenRed :: KernelConstants
                            -> Count GroupSize SubExp
-                           -> [HistOp ExplicitMemory]
+                           -> [GenReduceOp ExplicitMemory]
                            -> InKernelGen [[Imp.Exp] -> InKernelGen ()]
-prepareIntraGroupSegHist constants group_size =
+prepareIntraGroupSegGenRed constants group_size =
   fmap snd . mapAccumLM onOp Nothing
   where
     onOp l op = do
 
-      let local_subhistos = histDest op
+      let local_subhistos = genReduceDest op
 
-      case (l, atomicUpdateLocking $ histOp op) of
+      case (l, atomicUpdateLocking $ genReduceOp op) of
         (_, AtomicPrim f) -> return (l, f (Space "local") local_subhistos)
         (_, AtomicCAS f) -> return (l, f (Space "local") local_subhistos)
         (Just l', AtomicLocking f) -> return (l, f l' (Space "local") local_subhistos)
@@ -230,9 +222,9 @@ prepareIntraGroupSegHist constants group_size =
           num_locks <- toExp $ unCount group_size
 
           let dims = map (toExp' int32) $
-                     shapeDims (histShape op) ++
-                     [histWidth op]
-              l' = Locking locks 0 1 0 (pure . (`rem` num_locks) . flattenIndex dims)
+                     shapeDims (genReduceShape op) ++
+                     [genReduceWidth op]
+              l' = Locking locks 0 1 0 ((`rem` num_locks) . flattenIndex dims)
               locks_t = Array int32 (Shape [unCount group_size]) NoUniqueness
 
           locks_mem <- sAlloc "locks_mem" (typeSize locks_t) $ Space "local"
@@ -335,18 +327,18 @@ compileGroupOp constants pat (Inner (SegOp (SegRed lvl space ops _ body))) = do
       forM_ (zip red_pes tmp_arrs) $ \(pe, arr) ->
         copyDWIM (patElemName pe) segment_is (Var arr) (segment_is ++ [last dims'-1])
 
-compileGroupOp constants pat (Inner (SegOp (SegHist lvl space ops _ kbody))) = do
+compileGroupOp constants pat (Inner (SegOp (SegGenRed lvl space ops _ kbody))) = do
   compileGroupSpace constants lvl space
   let ltids = map fst $ unSegSpace space
 
   -- We don't need the red_pes, because it is guaranteed by our type
   -- rules that they occupy the same memory as the destinations for
   -- the ops.
-  let num_red_res = length ops + sum (map (length . histNeutral) ops)
+  let num_red_res = length ops + sum (map (length . genReduceNeutral) ops)
       (_red_pes, map_pes) =
         splitAt num_red_res $ patternElements pat
 
-  ops' <- prepareIntraGroupSegHist constants (segGroupSize lvl) ops
+  ops' <- prepareIntraGroupSegGenRed constants (segGroupSize lvl) ops
 
   -- Ensure that all locks have been initialised.
   sOp Imp.LocalBarrier
@@ -357,10 +349,10 @@ compileGroupOp constants pat (Inner (SegOp (SegHist lvl space ops _ kbody))) = d
         (red_is, red_vs) = splitAt (length ops) $ map kernelResultSubExp red_res
     zipWithM_ (compileThreadResult space constants) map_pes map_res
 
-    let vs_per_op = chunks (map (length . histDest) ops) red_vs
+    let vs_per_op = chunks (map (length . genReduceDest) ops) red_vs
 
     forM_ (zip4 red_is vs_per_op ops' ops) $
-      \(bin, op_vs, do_op, HistOp dest_w _ _ _ shape lam) -> do
+      \(bin, op_vs, do_op, GenReduceOp dest_w _ _ shape lam) -> do
         let bin' = toExp' int32 bin
             dest_w' = toExp' int32 dest_w
             bin_in_bounds = 0 .<=. bin' .&&. bin' .<. dest_w'
@@ -398,7 +390,7 @@ data Locking =
             -- ^ What to write when we lock it.
           , lockingToUnlock :: Imp.Exp
             -- ^ What to write when we unlock it.
-          , lockingMapping :: [Imp.Exp] -> [Imp.Exp]
+          , lockingMapping :: [Imp.Exp] -> Imp.Exp
             -- ^ A transformation from the logical lock index to the
             -- physical position in the array.  This can also be used
             -- to make the lock array smaller.
@@ -475,7 +467,7 @@ atomicUpdateLocking op = AtomicLocking $ \locking space arrs bucket -> do
 
   -- Correctly index into locks.
   (locks', _locks_space, locks_offset) <-
-    fullyIndexArray (lockingArray locking) $ lockingMapping locking bucket
+    fullyIndexArray (lockingArray locking) [lockingMapping locking bucket]
 
   -- Critical section
   let try_acquire_lock =
@@ -509,7 +501,7 @@ atomicUpdateLocking op = AtomicLocking $ \locking space arrs bucket -> do
   let op_body = sComment "execute operation" $
                 compileBody' acc_params $ lambdaBody op
 
-      do_hist =
+      do_gen_reduce =
         everythingVolatile $
         sComment "update global result" $
         zipWithM_ (writeArray bucket) arrs $ map (Var . paramName) acc_params
@@ -525,7 +517,7 @@ atomicUpdateLocking op = AtomicLocking $ \locking space arrs bucket -> do
       dLParams acc_params
       bind_acc_params
       op_body
-      do_hist
+      do_gen_reduce
       fence
       release_lock
       break_loop
@@ -548,11 +540,7 @@ atomicUpdateCAS space t arr old bucket x do_op = do
   -- } while(assumed != old);
   assumed <- dPrim "assumed" t
   run_loop <- dPrimV "run_loop" 1
-
-  -- XXX: CUDA may generate really bad code if this is not a volatile
-  -- read.  Unclear why.  The later reads are volatile, so maybe
-  -- that's it.
-  everythingVolatile $ copyDWIM old [] (Var arr) bucket
+  copyDWIM old [] (Var arr) bucket
 
   (arr', _a_space, bucket_offset) <- fullyIndexArray arr bucket
 
@@ -1037,12 +1025,8 @@ virtualiseGroups constants SegVirt required_groups m = do
   let iterations = (required_groups - Imp.vi32 phys_group_id) `quotRoundingUp`
                    kernelNumGroups constants
 
-  sFor "i" iterations $ \i -> do
+  sFor "i" iterations $ \i ->
     m =<< dPrimV "virt_group_id" (Imp.vi32 phys_group_id + i * kernelNumGroups constants)
-    -- Make sure the virtual group is actually done before we let
-    -- another virtual group have its way with it.
-    sOp Imp.GlobalBarrier
-    sOp Imp.LocalBarrier
 
 sKernelThread, sKernelGroup :: String
                             -> Count NumGroups Imp.Exp -> Count GroupSize Imp.Exp
@@ -1118,10 +1102,10 @@ groupOperations constants =
   }
 
 -- | Perform a Replicate with a kernel.
-sReplicateKernel :: VName -> SubExp -> CallKernelGen ()
-sReplicateKernel arr se = do
+sReplicate :: VName -> Shape -> SubExp
+           -> CallKernelGen ()
+sReplicate arr (Shape ds) se = do
   t <- subExpType se
-  ds <- dropLast (arrayRank t) . arrayDims <$> lookupType arr
 
   dims <- mapM toExp $ ds ++ arrayDims t
   (constants, set_constants) <-
@@ -1135,61 +1119,6 @@ sReplicateKernel arr se = do
     set_constants
     sWhen (kernelThreadActive constants) $
       copyDWIM arr is' se $ drop (length ds) is'
-
-replicateFunction :: PrimType -> CallKernelGen Imp.Function
-replicateFunction bt = do
-  mem <- newVName "mem"
-  num_elems <- newVName "num_elems"
-  val <- newVName "val"
-
-  let params = [Imp.MemParam mem (Space "device"),
-                Imp.ScalarParam num_elems int32,
-                Imp.ScalarParam val bt]
-      shape = Shape [Var num_elems]
-  function [] params $ do
-    arr <- sArray "arr" bt shape $ ArrayIn mem $ IxFun.iota $
-           map (primExpFromSubExp int32) $ shapeDims shape
-    sReplicateKernel arr $ Var val
-
-replicateName :: PrimType -> String
-replicateName bt = "replicate_" ++ pretty bt
-
-replicateForType :: PrimType -> CallKernelGen Name
-replicateForType bt = do
-  -- FIXME: The leading underscore is to avoid clashes with a
-  -- programmer-defined function of the same name (this is a bad
-  -- solution...).
-  let fname = nameFromString $ "_" <> replicateName bt
-
-  exists <- hasFunction fname
-  unless exists $ emitFunction fname =<< replicateFunction bt
-
-  return fname
-
-replicateIsFill :: VName -> SubExp -> CallKernelGen (Maybe (CallKernelGen ()))
-replicateIsFill arr v = do
-  ArrayEntry (MemLocation arr_mem arr_shape arr_ixfun) _ <- lookupArray arr
-  v_t <- subExpType v
-  case v_t of
-    Prim v_t'
-      | IxFun.isLinear arr_ixfun -> return $ Just $ do
-          fname <- replicateForType v_t'
-          emit $ Imp.Call [] fname
-            [Imp.MemArg arr_mem,
-             Imp.ExpArg $ unCount $ product $ map dimSizeToExp arr_shape,
-             Imp.ExpArg $ toExp' v_t' v]
-    _ -> return Nothing
-
--- | Perform a Replicate with a kernel.
-sReplicate :: VName -> SubExp -> CallKernelGen ()
-sReplicate arr se = do
-  -- If the replicate is of a particularly common and simple form
-  -- (morally a memset()/fill), then we use a common function.
-  is_fill <- replicateIsFill arr se
-
-  case is_fill of
-    Just m -> m
-    Nothing -> sReplicateKernel arr se
 
 -- | Perform an Iota with a kernel.
 sIota :: VName -> Imp.Exp -> Imp.Exp -> Imp.Exp -> IntType

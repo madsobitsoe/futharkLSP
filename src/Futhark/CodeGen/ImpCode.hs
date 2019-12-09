@@ -57,6 +57,7 @@ module Futhark.CodeGen.ImpCode
   )
   where
 
+import Data.Monoid ((<>))
 import Data.List
 import Data.Loc
 import Data.Traversable
@@ -78,7 +79,7 @@ data Size = ConstSize Int64
 type MemSize = Size
 type DimSize = Size
 
-data Type = Scalar PrimType | Mem Space
+data Type = Scalar PrimType | Mem MemSize Space
 
 data Param = MemParam VName Space
            | ScalarParam VName PrimType
@@ -126,7 +127,7 @@ data ExternalValue = OpaqueValue String [ValueDesc]
 data FunctionT a = Function { functionEntry :: Bool
                             , functionOutput :: [Param]
                             , functionInput :: [Param]
-                            , functionBody :: Code a
+                            , functionbBody :: Code a
                             , functionResult :: [ExternalValue]
                             , functionArgs :: [ExternalValue]
                             }
@@ -182,13 +183,13 @@ data Code a = Skip
               -- ^ Has the same semantics as the contained code, but
               -- the comment should show up in generated code for ease
               -- of inspection.
-            | DebugPrint String (Maybe Exp)
-              -- ^ Print the given value to the screen, somehow
-              -- annotated with the given string as a description.  If
-              -- no type/value pair, just print the string.  This has
-              -- no semantic meaning, but is used entirely for
-              -- debugging.  Code generators are free to ignore this
-              -- statement.
+            | DebugPrint String (Maybe (PrimType, Exp))
+              -- ^ Print the given value (of the given type) to the
+              -- screen, somehow annotated with the given string as a
+              -- description.  If no type/value pair, just print the
+              -- string.  This has no semantic meaning, but is used
+              -- entirely for debugging.  Code generators are free to
+              -- ignore this statement.
             | Op a
             deriving (Show)
 
@@ -358,8 +359,8 @@ instance Pretty op => Pretty (Code op) where
     ppr fname <> parens (commasep $ map ppr args)
   ppr (Comment s code) =
     text "--" <+> text s </> ppr code
-  ppr (DebugPrint desc (Just e)) =
-    text "debug" <+> parens (commasep [text (show desc), ppr e])
+  ppr (DebugPrint desc (Just (pt, e))) =
+    text "debug" <+> parens (commasep [text (show desc), ppr pt, ppr e])
   ppr (DebugPrint desc Nothing) =
     text "debug" <+> parens (text (show desc))
 
@@ -496,7 +497,7 @@ instance FreeIn a => FreeIn (Code a) where
   freeIn' (Comment _ code) =
     freeIn' code
   freeIn' (DebugPrint _ v) =
-    maybe mempty freeIn' v
+    maybe mempty (freeIn' . snd) v
 
 instance FreeIn ExpLeaf where
   freeIn' (Index v e _ _ _) = freeIn' v <> freeIn' e

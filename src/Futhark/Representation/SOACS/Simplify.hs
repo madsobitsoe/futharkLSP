@@ -8,7 +8,6 @@ module Futhark.Representation.SOACS.Simplify
        ( simplifySOACS
        , simplifyLambda
        , simplifyFun
-       , simplifyFun'
        , simplifyStms
 
        , simpleSOACS
@@ -67,10 +66,6 @@ simplifyFun :: MonadFreshNames m => FunDef SOACS -> m (FunDef SOACS)
 simplifyFun =
   Simplify.simplifyFun simpleSOACS soacRules Engine.noExtraHoistBlockers
 
-simplifyFun' :: MonadFreshNames m => FunDef SOACS -> m (FunDef SOACS)
-simplifyFun' =
-  Simplify.simplifyFun simpleSOACS mempty Engine.noExtraHoistBlockers
-
 simplifyLambda :: (HasScope SOACS m, MonadFreshNames m) =>
                   Lambda -> [Maybe VName] -> m Lambda
 simplifyLambda =
@@ -108,18 +103,17 @@ simplifySOAC (Scatter len lam ivs as) = do
   as' <- mapM Engine.simplify as
   return (Scatter len' lam' ivs' as', hoisted)
 
-simplifySOAC (Hist w ops bfun imgs) = do
+simplifySOAC (GenReduce w ops bfun imgs) = do
   w' <- Engine.simplify w
-  (ops', hoisted) <- fmap unzip $ forM ops $ \(HistOp dests_w rf dests nes op) -> do
+  (ops', hoisted) <- fmap unzip $ forM ops $ \(GenReduceOp dests_w dests nes op) -> do
     dests_w' <- Engine.simplify dests_w
-    rf' <- Engine.simplify rf
     dests' <- Engine.simplify dests
     nes' <- mapM Engine.simplify nes
     (op', hoisted) <- Engine.simplifyLambda op $ replicate (length $ lambdaParams op) Nothing
-    return (HistOp dests_w' rf' dests' nes' op', hoisted)
+    return (GenReduceOp dests_w' dests' nes' op', hoisted)
   imgs'  <- mapM Engine.simplify imgs
   (bfun', bfun_hoisted) <- Engine.simplifyLambda bfun $ map Just imgs
-  return (Hist w' ops' bfun' imgs', mconcat hoisted <> bfun_hoisted)
+  return (GenReduce w' ops' bfun' imgs', mconcat hoisted <> bfun_hoisted)
 
 simplifySOAC (Screma w (ScremaForm (scan_lam, scan_nes) reds map_lam) arrs) = do
   (scan_lam', scan_lam_hoisted) <-
@@ -605,11 +599,11 @@ fromArrayOp (ArrayRearrange cs arr perm) = (cs, BasicOp $ Rearrange perm arr)
 fromArrayOp (ArrayRotate cs arr rots) = (cs, BasicOp $ Rotate rots arr)
 fromArrayOp (ArrayVar cs arr) = (cs, BasicOp $ SubExp $ Var arr)
 
-arrayOps :: AST.Body (Wise SOACS) -> S.Set (AST.Pattern (Wise SOACS), ArrayOp)
+arrayOps :: AST.Body (Wise SOACS) -> S.Set ArrayOp
 arrayOps = mconcat . map onStm . stmsToList . bodyStms
-  where onStm (Let pat aux e) =
+  where onStm (Let _ aux e) =
           case isArrayOp (stmAuxCerts aux) e of
-            Just op -> S.singleton (pat, op)
+            Just op -> S.singleton op
             Nothing -> execState (walkExpM walker e) mempty
         onOp = execWriter . mapSOACM identitySOACMapper { mapOnSOACLambda = onLambda }
         onLambda lam = do tell $ arrayOps $ lambdaBody lam
@@ -652,7 +646,7 @@ replaceArrayOps substs (Body _ stms res) =
 simplifyMapIota :: TopDownRuleOp (Wise SOACS)
 simplifyMapIota vtable pat _ (Screma w (ScremaForm scan reduce map_lam) arrs)
   | Just (p, _) <- find isIota (zip (lambdaParams map_lam) arrs),
-    indexings <- filter (indexesWith (paramName p)) $ map snd $ S.toList $
+    indexings <- filter (indexesWith (paramName p)) $ S.toList $
                  arrayOps $ lambdaBody map_lam,
     not $ null indexings = Simplify $ do
       -- For each indexing with iota, add the corresponding array to
@@ -698,7 +692,7 @@ simplifyMapIota  _ _ _ _ = Skip
 -- full array.
 moveTransformToInput :: TopDownRuleOp (Wise SOACS)
 moveTransformToInput vtable pat _ (Screma w (ScremaForm scan reduce map_lam) arrs)
-  | ops <- map snd $ filter arrayIsMapParam $ S.toList $ arrayOps $ lambdaBody map_lam,
+  | ops <- filter arrayIsMapParam $ S.toList $ arrayOps $ lambdaBody map_lam,
     not $ null ops = Simplify $ do
       (more_arrs, more_params, replacements) <-
         unzip3 . catMaybes <$> mapM mapOverArr ops
@@ -714,27 +708,21 @@ moveTransformToInput vtable pat _ (Screma w (ScremaForm scan reduce map_lam) arr
       letBind_ pat $ Op $ Screma w (ScremaForm scan reduce map_lam') (arrs <> more_arrs)
 
   where map_param_names = map paramName (lambdaParams map_lam)
-        topLevelPattern = (`elem` fmap stmPattern (bodyStms (lambdaBody map_lam)))
-        onlyUsedOnce arr =
-          case filter ((arr `nameIn`) . freeIn) $ stmsToList $ bodyStms $ lambdaBody map_lam of
-            _ : _ : _ -> False
-            _ -> True
 
         -- It's not just about whether the array is a parameter;
         -- everything else must be map-invariant.
-        arrayIsMapParam (pat', ArrayIndexing cs arr slice) =
+        arrayIsMapParam (ArrayIndexing cs arr slice) =
           arr `elem` map_param_names &&
           all (`ST.elem` vtable) (namesToList $ freeIn cs <> freeIn slice) &&
-          not (null slice) &&
-          (not (null $ sliceDims slice) || (topLevelPattern pat' && onlyUsedOnce arr))
-        arrayIsMapParam (_, ArrayRearrange cs arr perm) =
+          not (null slice) && not (null $ sliceDims slice)
+        arrayIsMapParam (ArrayRearrange cs arr perm) =
           arr `elem` map_param_names &&
           all (`ST.elem` vtable) (namesToList $ freeIn cs) &&
           not (null perm)
-        arrayIsMapParam (_, ArrayRotate cs arr rots) =
+        arrayIsMapParam (ArrayRotate cs arr rots) =
           arr `elem` map_param_names &&
           all (`ST.elem` vtable) (namesToList $ freeIn cs <> freeIn rots)
-        arrayIsMapParam (_, ArrayVar{}) =
+        arrayIsMapParam ArrayVar{} =
           False
 
         mapOverArr op

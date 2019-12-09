@@ -33,7 +33,6 @@ import Text.Printf
 
 import Prelude hiding (id, (.))
 
-import qualified Futhark.Analysis.Alias as Alias
 import Futhark.Error
 import Futhark.Representation.AST (Prog, PrettyLore)
 import Futhark.TypeCheck
@@ -127,9 +126,8 @@ onePass pass = Pipeline perform
           when (pipelineVerbose cfg) $ logMsg $
             "Running pass " <> T.pack (passName pass)
           prog' <- runPass pass prog
-          let prog'' = Alias.aliasAnalysis prog'
           when (pipelineValidate cfg) $
-            case checkProg prog'' of
+            case checkProg prog' of
               Left err -> validationError pass prog' $ show err
               Right () -> return ()
           return prog'

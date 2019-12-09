@@ -402,7 +402,6 @@ public struct OpenCLContext {
    public int MaxTileSize;
    public int MaxThreshold;
    public int MaxLocalMemory;
-   public int MaxBespoke;
 
    public int LockstepWidth;
 }
@@ -808,7 +807,6 @@ private CLProgramHandle SetupOpenCL(ref FutharkContext ctx,
     ctx.OpenCL.MaxTileSize = MaxTileSize; // No limit.
     ctx.OpenCL.MaxThreshold = ctx.OpenCL.MaxNumGroups; // No limit.
     ctx.OpenCL.MaxLocalMemory = MaxLocalMemory;
-    ctx.OpenCL.MaxBespoke = 0; // No limit.
 
     // Now we go through all the sizes, clamp them to the valid range,
     // or set them to the default.
@@ -831,8 +829,7 @@ private CLProgramHandle SetupOpenCL(ref FutharkContext ctx,
             max_value = 0; // No limit.
             default_value = ctx.OpenCL.Cfg.DefaultThreshold;
         } else {
-            // Bespoke sizes have no limit or default.
-            max_value = 0;
+            panic(1, "Unknown size class for size '{0}': {1}\n", size_name, size_class);
         }
         if (size_value == 0) {
             ctx.OpenCL.Cfg.SizeValues[i] = default_value;

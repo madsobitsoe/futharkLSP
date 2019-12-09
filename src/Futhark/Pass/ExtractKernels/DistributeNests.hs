@@ -15,7 +15,7 @@ module Futhark.Pass.ExtractKernels.DistributeNests
   , lambdaContainsParallelism
   , determineReduceOp
   , incrementalFlattening
-  , histKernel
+  , genReduceKernel
 
   , DistEnv (..)
   , DistAcc (..)
@@ -224,7 +224,7 @@ leavingNesting :: Monad m => MapLoop -> DistAcc -> DistNestT m DistAcc
 leavingNesting (MapLoop _ cs w lam arrs) acc =
   case popInnerTarget $ distTargets acc of
    Nothing ->
-     error "The kernel targets list is unexpectedly small"
+     fail "The kernel targets list is unexpectedly small"
    Just ((pat,res), newtargets) -> do
      let acc' = acc { distTargets = newtargets }
      if null $ distStms acc'
@@ -345,8 +345,8 @@ maybeDistributeStm bnd@(Let pat (StmAux cs _) (Op (Scatter w lam ivs as))) acc =
     _ ->
       addStmToKernel bnd acc
 
--- Parallelise segmented Hist.
-maybeDistributeStm bnd@(Let pat (StmAux cs _) (Op (Hist w ops lam as))) acc =
+-- Parallelise segmented GenReduce.
+maybeDistributeStm bnd@(Let pat (StmAux cs _) (Op (GenReduce w ops lam as))) acc =
   distributeSingleStm acc bnd >>= \case
     Just (kernels, res, nest, acc')
       | Just (perm, pat_unused) <- permutationAndMissing pat res ->
@@ -354,7 +354,7 @@ maybeDistributeStm bnd@(Let pat (StmAux cs _) (Op (Hist w ops lam as))) acc =
           let lam' = soacsLambdaToKernels lam
           nest' <- expandKernelNest pat_unused nest
           addKernels kernels
-          addKernel =<< segmentedHistKernel nest' perm cs w ops lam' as
+          addKernel =<< segmentedGenReduceKernel nest' perm cs w ops lam' as
           return acc'
     _ ->
       addStmToKernel bnd acc
@@ -632,18 +632,9 @@ segmentedScatterKernel nest perm scatter_pat cs scatter_w lam ivs dests = do
   let rts = concatMap (take 1) $ chunks as_ns $
             drop (sum as_ns) $ lambdaReturnType lam
       (is,vs) = splitAt (sum as_ns) $ bodyResult $ lambdaBody lam
-
-  -- Maybe add certificates to the indices.
-  (is', k_body_stms) <- runBinder $ do
-    addStms $ bodyStms $ lambdaBody lam
-    forM is $ \i ->
-      if cs == mempty
-      then return i
-      else certifying cs $ letSubExp "scatter_i" $ BasicOp $ SubExp i
-
-  let k_body = KernelBody () k_body_stms $
+      k_body = KernelBody () (bodyStms $ lambdaBody lam) $
                map (inPlaceReturn ispace) $
-               zip3 as_ws as_inps $ chunks as_ns $ zip is' vs
+               zip3 as_ws as_inps $ chunks as_ns $ zip is vs
 
   (k, k_bnds) <- mapKernel mk_lvl ispace kernel_inps rts k_body
 
@@ -653,38 +644,38 @@ segmentedScatterKernel nest perm scatter_pat cs scatter_w lam ivs dests = do
     let pat = Pattern [] $ rearrangeShape perm $
               patternValueElements $ loopNestingPattern $ fst nest
 
-    letBind_ pat $ Op $ SegOp k
+    certifying cs $ letBind_ pat $ Op $ SegOp k
   where findInput kernel_inps a =
           maybe bad return $ find ((==a) . kernelInputName) kernel_inps
-        bad = error "Ill-typed nested scatter encountered."
+        bad = fail "Ill-typed nested scatter encountered."
 
         inPlaceReturn ispace (aw, inp, is_vs) =
           WriteReturns (init ws++[aw]) (kernelInputArray inp)
           [ (map Var (init gtids)++[i], v) | (i,v) <- is_vs ]
           where (gtids,ws) = unzip ispace
 
-segmentedHistKernel :: MonadFreshNames m =>
+segmentedGenReduceKernel :: MonadFreshNames m =>
                             KernelNest
                          -> [Int]
                          -> Certificates
                          -> SubExp
-                         -> [SOAC.HistOp SOACS]
+                         -> [SOAC.GenReduceOp SOACS]
                          -> Out.Lambda Out.Kernels
                          -> [VName]
                          -> DistNestT m KernelsStms
-segmentedHistKernel nest perm cs hist_w ops lam arrs = do
+segmentedGenReduceKernel nest perm cs genred_w ops lam arrs = do
   -- We replicate some of the checking done by 'isSegmentedOp', but
-  -- things are different because a Hist is not a reduction or
+  -- things are different because a GenReduce is not a reduction or
   -- scan.
   (ispace, inputs) <- flatKernel nest
   let orig_pat = Pattern [] $ rearrangeShape perm $
                  patternValueElements $ loopNestingPattern $ fst nest
 
   -- The input/output arrays _must_ correspond to some kernel input,
-  -- or else the original nested Hist would have been ill-typed.
+  -- or else the original nested GenReduce would have been ill-typed.
   -- Find them.
-  ops' <- forM ops $ \(SOAC.HistOp num_bins rf dests nes op) ->
-    SOAC.HistOp num_bins rf
+  ops' <- forM ops $ \(SOAC.GenReduceOp num_bins dests nes op) ->
+    SOAC.GenReduceOp num_bins
     <$> mapM (fmap kernelInputArray . findInput inputs) dests
     <*> pure nes
     <*> pure op
@@ -695,30 +686,30 @@ segmentedHistKernel nest perm cs hist_w ops lam arrs = do
     -- It is important not to launch unnecessarily many threads for
     -- histograms, because it may mean we unnecessarily need to reduce
     -- subhistograms as well.
-    lvl <- mk_lvl (hist_w : map snd ispace) "seghist" $ NoRecommendation SegNoVirt
+    lvl <- mk_lvl (genred_w : map snd ispace) "seggenred" $ NoRecommendation SegNoVirt
     addStms =<<
-      histKernel lvl orig_pat ispace inputs cs hist_w ops' lam arrs
+      genReduceKernel lvl orig_pat ispace inputs cs genred_w ops' lam arrs
   where findInput kernel_inps a =
           maybe bad return $ find ((==a) . kernelInputName) kernel_inps
-        bad = error "Ill-typed nested Hist encountered."
+        bad = fail "Ill-typed nested GenReduce encountered."
 
-histKernel :: (MonadFreshNames m, HasScope Out.Kernels m) =>
+genReduceKernel :: (MonadFreshNames m, HasScope Out.Kernels m) =>
                    SegLevel -> Pattern -> [(VName, SubExp)] -> [KernelInput]
-                -> Certificates -> SubExp -> [SOAC.HistOp SOACS]
+                -> Certificates -> SubExp -> [SOAC.GenReduceOp SOACS]
                 -> Out.Lambda Out.Kernels -> [VName]
                 -> m KernelsStms
-histKernel lvl orig_pat ispace inputs cs hist_w ops lam arrs =
+genReduceKernel lvl orig_pat ispace inputs cs genred_w ops lam arrs =
   runBinder_ $ do
-    ops' <- forM ops $ \(SOAC.HistOp num_bins rf dests nes op) -> do
+    ops' <- forM ops $ \(SOAC.GenReduceOp num_bins dests nes op) -> do
       (op', nes', shape) <- determineReduceOp op nes
-      return $ Out.HistOp num_bins rf dests nes' shape op'
+      return $ Out.GenReduceOp num_bins dests nes' shape op'
 
-    let isDest = flip elem $ concatMap Out.histDest ops'
+    let isDest = flip elem $ concatMap Out.genReduceDest ops'
         inputs' = filter (not . isDest . kernelInputArray) inputs
 
     certifying cs $
       addStms =<< traverse renameStm =<<
-      segHist lvl orig_pat hist_w ispace inputs' ops' lam arrs
+      segGenRed lvl orig_pat genred_w ispace inputs' ops' lam arrs
 
 determineReduceOp :: (MonadBinder m, Lore m ~ Out.Kernels) =>
                      Lambda -> [SubExp] -> m (Out.Lambda Out.Kernels, [SubExp], Shape)
@@ -730,7 +721,7 @@ determineReduceOp lam nes =
       let (shape, lam') = isVectorMap lam
       nes' <- forM ne_vs' $ \ne_v -> do
         ne_v_t <- lookupType ne_v
-        letSubExp "hist_ne" $
+        letSubExp "genred_ne" $
           BasicOp $ Index ne_v $ fullSlice ne_v_t $
           replicate (shapeRank shape) $ DimFix $ intConst Int32 0
       let lam'' = soacsLambdaToKernels lam'
@@ -812,7 +803,7 @@ isSegmentedOp nest perm segment_size free_in_op _free_in_fold_op nes arrs m = ru
   let indices = map fst ispace
 
       prepareNe (Var v) | v `nameIn` bound_by_nest =
-                            fail "Neutral element bound in nest"
+                          fail "Neutral element bound in nest"
       prepareNe ne = return ne
 
       prepareArr arr =

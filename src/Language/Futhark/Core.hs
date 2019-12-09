@@ -10,7 +10,6 @@ module Language.Futhark.Core
 
   -- * Location utilities
   , locStr
-  , prettyStacktrace
 
   -- * Name handling
   , Name
@@ -23,8 +22,6 @@ module Language.Futhark.Core
   , baseName
   , baseString
   , pretty
-  , quote
-
   -- * Special identifiers
   , defaultEntryPoint
 
@@ -122,14 +119,6 @@ locStr (SrcLoc (Loc (Pos file line1 col1 _) (Pos _ line2 col2 _)))
       first_part ++ "-" ++ show line2 ++ ":" ++ show col2
   where first_part = file ++ ":" ++ show line1 ++ ":" ++ show col1
 
--- | Given a list of strings representing entries in the stack trace,
--- produce a final newline-terminated string for showing to the user.
--- This string should also be preceded by a newline.
-prettyStacktrace :: [String] -> String
-prettyStacktrace = unlines . reverse . stacktrace' . reverse
-  where stacktrace' (x:xs) = (" `-> " ++ x) : map (" |-> "++) xs
-        stacktrace' [] = []
-
 -- | A name tagged with some integer.  Only the integer is used in
 -- comparisons, no matter the type of @vn@.
 data VName = VName !Name !Int
@@ -152,9 +141,3 @@ instance Eq VName where
 
 instance Ord VName where
   VName _ x `compare` VName _ y = x `compare` y
-
--- | Enclose a string in the prefered quotes used in error messages.
--- These are picked to not collide with characters permitted in
--- identifiers.
-quote :: String -> String
-quote s = "`" ++ s ++ "`"

@@ -74,6 +74,7 @@ import Control.Monad.Writer
 import Control.Monad.RWS
 import Control.Arrow((&&&))
 import Data.Maybe
+import Data.List
 import qualified Data.Map.Strict as M
 
 import Futhark.Representation.Primitive hiding (Bool)
@@ -83,6 +84,7 @@ import qualified Futhark.CodeGen.ImpCode as Imp
 import Futhark.CodeGen.Backends.GenericCSharp.AST
 import Futhark.CodeGen.Backends.GenericCSharp.Options
 import Futhark.CodeGen.Backends.GenericCSharp.Definitions
+import Futhark.Util.Pretty(pretty)
 import Futhark.Util (zEncodeString)
 import Futhark.Representation.AST.Attributes (builtInFunctions)
 import Text.Printf (printf)
@@ -154,21 +156,21 @@ defaultOperations = Operations { opsWriteScalar = defWriteScalar
                                , opsSyncRun = defSyncRun
                                }
   where defWriteScalar _ _ _ _ _ =
-          error "Cannot write to non-default memory space because I am dumb"
+          fail "Cannot write to non-default memory space because I am dumb"
         defReadScalar _ _ _ _ =
-          error "Cannot read from non-default memory space"
+          fail "Cannot read from non-default memory space"
         defAllocate _ _ _ =
-          error "Cannot allocate in non-default memory space"
+          fail "Cannot allocate in non-default memory space"
         defCopy _ _ _ _ _ _ _ _ =
-          error "Cannot copy to or from non-default memory space"
+          fail "Cannot copy to or from non-default memory space"
         defStaticArray _ _ _ _ =
-          error "Cannot create static array in non-default memory space"
+          fail "Cannot create static array in non-default memory space"
         defCompiler _ =
-          error "The default compiler cannot compile extended operations"
+          fail "The default compiler cannot compile extended operations"
         defEntryOutput _ _ _ _ =
-          error "Cannot return array not in default memory space"
+          fail "Cannot return array not in default memory space"
         defEntryInput _ _ _ _ =
-          error "Cannot accept array not in default memory space"
+          fail "Cannot accept array not in default memory space"
         defSyncRun =
           Pass
 
@@ -324,7 +326,7 @@ paramsTypes :: [Imp.Param] -> [Imp.Type]
 paramsTypes = map paramType
 
 paramType :: Imp.Param -> Imp.Type
-paramType (Imp.MemParam _ space) = Imp.Mem space
+paramType (Imp.MemParam _ space) = Imp.Mem (Imp.ConstSize 0) space
 paramType (Imp.ScalarParam _ t) = Imp.Scalar t
 
 compileOutput :: Imp.Param -> (CSExp, CSType)
@@ -455,8 +457,8 @@ compileProg module_name constructor imports defines ops userstate boilerplate pr
                 (filter (Imp.functionEntry . snd) funs)
 
               debug_ending <- gets compDebugItems
-              return [Namespace name (ClassDef
-                       (PublicClass name $
+              return [Namespace name ((ClassDef $
+                       PublicClass name $
                          member_decls' ++
                          constructor' : defines' ++
                          opencl_boilerplate ++
@@ -583,7 +585,7 @@ compileName = zEncodeString . pretty
 
 compileType :: Imp.Type -> CSType
 compileType (Imp.Scalar p) = compilePrimTypeToAST p
-compileType (Imp.Mem space) = rawMemCSType space
+compileType (Imp.Mem _ space) = rawMemCSType space
 
 compilePrimTypeToAST :: PrimType -> CSType
 compilePrimTypeToAST (IntType Int8) = Primitive $ CSInt Int8T
@@ -798,18 +800,17 @@ printStm (Imp.ArrayValue _ _ _ _ []) ind e = do
 printStm (Imp.ArrayValue mem space bt ept (outer:shape)) ind e = do
   ptr <- newVName "shapePtr"
   first <- newVName "printFirst"
-  let dims = map compileDim $ outer:shape
-      size = callMethod (CreateArray (Primitive $ CSInt Int32T) $ Right dims)
+  let size = callMethod (CreateArray (Primitive $ CSInt Int32T) $ Right $ map compileDim $ outer:shape)
                  "Aggregate" [ Integer 1
                              , Lambda (Tuple [Var "acc", Var "val"])
                                       [Exp $ BinOp "*" (Var "acc") (Var "val")]
                              ]
-      emptystr = "empty(" ++ ppArrayType bt [length dims-1, length dims-2..0] ++ ")"
+      emptystr = "empty(" ++ ppArrayType bt (length shape) ++ ")"
 
   printelem <- printStm (Imp.ArrayValue mem space bt ept shape) ind e
   return $
     If (BinOp "==" size (Integer 0))
-      [Exp $ simpleCall "Console.Write" [formatString emptystr dims]]
+      [puts emptystr]
     [ Assign (Var $ pretty first) $ Var "true"
     , puts "["
     , For (pretty ptr) (compileDim outer)
@@ -820,8 +821,9 @@ printStm (Imp.ArrayValue mem space bt ept (outer:shape)) ind e = do
     , puts "]"
     ]
 
-    where ppArrayType t [] = prettyPrimType ept t
-          ppArrayType t (i:is) = "[{" ++ show i ++ "}]" ++ ppArrayType t is
+    where ppArrayType :: PrimType -> Int -> String
+          ppArrayType t 0 = prettyPrimType ept t
+          ppArrayType t n = "[]" ++ ppArrayType t (n-1)
 
           prettyPrimType Imp.TypeUnsigned (IntType Int8) = "u8"
           prettyPrimType Imp.TypeUnsigned (IntType Int16) = "u16"
@@ -1177,7 +1179,6 @@ compileExp (Imp.BinOpExp op x y) = do
     FSub{} -> simple "-"
     FMul{} -> simple "*"
     FDiv{} -> simple "/"
-    FMod{} -> simple "%"
     LogAnd{} -> simple "&&"
     LogOr{} -> simple "||"
     _ -> return $ simpleCall (pretty op) [x', y']
@@ -1275,8 +1276,8 @@ compileCode (Imp.Assert e (Imp.ErrorMsg parts) (loc,locs)) = do
   let onPart (i, Imp.ErrorString s) = return (printFormatArg i, String s)
       onPart (i, Imp.ErrorInt32 x) = (printFormatArg i,) <$> compileExp x
   (formatstrs, formatargs) <- unzip <$> mapM onPart (zip ([1..] :: [Integer]) parts)
-  stm $ Assert e' $ String ("Error at {0}:\n" <> concat formatstrs) : (String stacktrace : formatargs)
-  where stacktrace = prettyStacktrace $ reverse $ map locStr $ loc:locs
+  stm $ Assert e' $ (String $ "Error at {0}:\n" <> concat formatstrs) : (String stacktrace : formatargs)
+  where stacktrace = intercalate " -> " (reverse $ map locStr $ loc:locs)
         printFormatArg = printf "{%d}"
 
 compileCode (Imp.Call dests fname args) = do
@@ -1373,7 +1374,7 @@ unRefMem mem (Space "device") =
                                                  , (String . compileName) mem]
 unRefMem _ DefaultSpace = stm Pass
 unRefMem _ (Space "local") = stm Pass
-unRefMem _ (Space _) = error "The default compiler cannot compile unRefMem for other spaces"
+unRefMem _ (Space _) = fail "The default compiler cannot compile unRefMem for other spaces"
 
 
 -- | Public names must have a consistent prefix.

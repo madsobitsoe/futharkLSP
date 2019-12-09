@@ -17,6 +17,7 @@ import qualified Data.Map.Strict as M
 import Futhark.Representation.AST.Attributes.Aliases
 import Futhark.Representation.AST
 import Futhark.Construct
+import Futhark.Tools (fullSlice)
 import Futhark.Util
 
 type IndexSubstitution attr = (Certificates, VName, attr, Slice SubExp)

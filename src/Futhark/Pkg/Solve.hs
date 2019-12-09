@@ -15,6 +15,7 @@ import Control.Monad.State
 import qualified Data.Set as S
 import qualified Data.Map as M
 import qualified Data.Text as T
+import Data.Monoid ((<>))
 
 import Control.Monad.Free.Church
 

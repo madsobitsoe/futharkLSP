@@ -391,8 +391,7 @@ runTests config paths = do
   hSetBuffering stdout LineBuffering
 
   let mode = configTestMode config
-  all_tests <- map (makeTestCase config mode) <$>
-               testSpecsFromPathsOrDie paths
+  all_tests <- map (makeTestCase config mode) <$> testSpecsFromPaths paths
   testmvar <- newEmptyMVar
   reportmvar <- newEmptyMVar
   concurrency <- getNumCapabilities

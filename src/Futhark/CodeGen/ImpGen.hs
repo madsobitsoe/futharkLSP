@@ -82,8 +82,6 @@ module Futhark.CodeGen.ImpGen
   , sWrite, sUpdate
   , sLoopNest
   , (<--)
-
-  , function
   )
   where
 
@@ -101,7 +99,8 @@ import Data.List
 
 import qualified Futhark.CodeGen.ImpCode as Imp
 import Futhark.CodeGen.ImpCode
-  (Bytes, Elements,
+  (Count (..),
+   Bytes, Elements,
    bytes, elements, withElemType)
 import Futhark.Representation.ExplicitMemory
 import Futhark.Representation.SOACS (SOACS)
@@ -745,7 +744,7 @@ addArrays = mapM_ addArray
           , entryArrayElemType = bt
           }
 
--- | Like 'dFParams', but does not create new declarations.
+-- | Like 'daringFParams', but does not create new declarations.
 -- Note: a hack to be used only for functions.
 addFParams :: ExplicitMemorish lore => [FParam lore] -> ImpM lore op ()
 addFParams = mapM_ addFParam
@@ -1305,15 +1304,3 @@ sLoopNest = sLoopNest' [] . shapeDims
 (<--) :: VName -> Imp.Exp -> ImpM lore op ()
 x <-- e = emit $ Imp.SetScalar x e
 infixl 3 <--
-
--- | Constructing a non-entry point function.
-function :: [Imp.Param] -> [Imp.Param] -> ImpM lore op () -> ImpM lore op (Imp.Function op)
-function outputs inputs m = do
-  body <- collect $ do
-    mapM_ addParam $ outputs ++ inputs
-    m
-  return $ Imp.Function False outputs inputs body [] []
-  where addParam (Imp.MemParam name space) =
-          addVar name $ MemVar Nothing $ MemEntry space
-        addParam (Imp.ScalarParam name bt) =
-          addVar name $ ScalarVar Nothing $ ScalarEntry bt
