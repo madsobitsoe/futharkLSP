@@ -290,7 +290,7 @@ cmpSizeLe desc size_class to_what = do
   runBinder $ do
     to_what' <- letSubExp "comparatee" =<<
                 foldBinOp (Mul Int32) (intConst Int32 1) to_what
-    cmp_res <- letSubExp desc $ Op $ CmpSizeLe size_key size_class to_what'
+    cmp_res <- letSubExp desc $ Op $ SizeOp $ CmpSizeLe size_key size_class to_what'
     return (cmp_res, size_key)
 
 kernelAlternatives :: (MonadFreshNames m, HasScope Out.Kernels m) =>
@@ -508,15 +508,15 @@ transformStm _ (Let pat (StmAux cs _) (Op (Scatter w lam ivs as))) = runBinder_ 
     addStms stms
     letBind_ pat $ Op $ SegOp kernel
 
-transformStm _ (Let orig_pat (StmAux cs _) (Op (GenReduce w ops bucket_fun imgs))) = do
+transformStm _ (Let orig_pat (StmAux cs _) (Op (Hist w ops bucket_fun imgs))) = do
   let bfun' = soacsLambdaToKernels bucket_fun
 
   -- It is important not to launch unnecessarily many threads for
   -- histograms, because it may mean we unnecessarily need to reduce
   -- subhistograms as well.
   runBinder_ $ do
-    lvl <- segThreadCapped [w] "seggenred" $ NoRecommendation SegNoVirt
-    addStms =<< genReduceKernel lvl orig_pat [] [] cs w ops bfun' imgs
+    lvl <- segThreadCapped [w] "seghist" $ NoRecommendation SegNoVirt
+    addStms =<< histKernel lvl orig_pat [] [] cs w ops bfun' imgs
 
 transformStm _ bnd =
   runBinder_ $ FOT.transformStmRecursively bnd
@@ -530,7 +530,7 @@ nestedParallelism :: Body -> [SubExp]
 nestedParallelism = concatMap (parallelism . stmExp) . bodyStms
   where parallelism (Op (Scatter w _ _ _)) = [w]
         parallelism (Op (Screma w _ _)) = [w]
-        parallelism (Op (GenReduce w _ _ _)) = [w]
+        parallelism (Op (Hist w _ _ _)) = [w]
         parallelism (Op (Stream w Sequential{} lam _))
           | chunk_size_param : _ <- lambdaParams lam =
               let update (Var v) | v == paramName chunk_size_param = w
@@ -645,7 +645,7 @@ onMap' loopnest path mk_seq_stms mk_par_stms pat lam = do
           addStms intra_prelude
 
           max_group_size <-
-            letSubExp "max_group_size" $ Op $ Out.GetSizeMax Out.SizeGroup
+            letSubExp "max_group_size" $ Op $ SizeOp $ Out.GetSizeMax Out.SizeGroup
           fits <- letSubExp "fits" $ BasicOp $
                   CmpOp (CmpSle Int32) group_size max_group_size
 

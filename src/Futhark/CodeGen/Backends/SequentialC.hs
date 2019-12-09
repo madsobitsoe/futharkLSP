@@ -72,6 +72,7 @@ compileProg =
              [C.cedecl|struct $id:s {
                           int detail_memory;
                           int debugging;
+                          int profiling;
                           typename lock_t lock;
                           char *error;
                           $sdecls:fields
@@ -112,6 +113,18 @@ compileProg =
                                  ctx->error = NULL;
                                  return error;
                                }|])
+
+          GC.publicDef_ "context_pause_profiling" GC.InitDecl $ \s ->
+            ([C.cedecl|void $id:s(struct $id:ctx* ctx);|],
+             [C.cedecl|void $id:s(struct $id:ctx* ctx) {
+                         (void)ctx;
+                       }|])
+
+          GC.publicDef_ "context_unpause_profiling" GC.InitDecl $ \s ->
+            ([C.cedecl|void $id:s(struct $id:ctx* ctx);|],
+             [C.cedecl|void $id:s(struct $id:ctx* ctx) {
+                         (void)ctx;
+                       }|])
 
 copySequentialMemory :: GC.Copy Imp.Sequential ()
 copySequentialMemory destmem destidx DefaultSpace srcmem srcidx DefaultSpace nbytes =

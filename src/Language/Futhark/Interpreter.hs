@@ -12,7 +12,6 @@ module Language.Futhark.Interpreter
   , ExtOp(..)
   , typeEnv
   , Value (ValuePrim, ValueArray, ValueRecord)
-  , mkArray
   , fromTuple
   , isEmptyArray
   ) where
@@ -23,7 +22,7 @@ import Control.Monad.Except
 import Control.Monad.Reader
 import qualified Control.Monad.Fail as Fail
 import Data.Array
-import Data.Bifunctor (bimap)
+import Data.Bifunctor (first)
 import Data.List hiding (break)
 import Data.Maybe
 import qualified Data.Map as M
@@ -32,6 +31,7 @@ import Data.Monoid hiding (Sum)
 import Data.Loc
 
 import Language.Futhark hiding (Value)
+import qualified Language.Futhark as F
 import Futhark.Representation.Primitive (intValue, floatValue)
 import qualified Futhark.Representation.Primitive as P
 import qualified Language.Futhark.Semantic as T
@@ -115,7 +115,7 @@ instance Pretty Value where
 
   ppr (ValueRecord m) = prettyRecord m
   ppr ValueFun{} = text "#<fun>"
-  ppr (ValueSum n vs) = text "#" <> ppr n <+> sep (map ppr vs)
+  ppr (ValueSum n vs) = text "#" <> sep (ppr n : map ppr vs)
 
 -- | Create an array value; failing if that would result in an
 -- irregular array.
@@ -238,7 +238,7 @@ instance Show InterpreterError where
 bad :: SrcLoc -> Env -> String -> EvalM a
 bad loc env s = stacking loc env $ do
   ss <- map locStr <$> stacktrace
-  liftF $ ExtOpError $ InterpreterError $ "Error at " ++ intercalate " -> " ss ++ ": " ++ s
+  liftF $ ExtOpError $ InterpreterError $ "Error at\n" ++ prettyStacktrace ss ++ s
 
 trace :: Value -> EvalM ()
 trace v = do
@@ -343,8 +343,8 @@ matchValueToType :: Env
 matchValueToType env t@(Scalar (TypeVar _ _ tn [])) val
   | Just shape <- M.lookup (typeLeaf tn) $ envShapes env,
     shape /= valueShape val =
-      Left $ "Value passed for type parameter `" <> prettyName (typeLeaf tn) <>
-      "` does not match shape " <> pretty shape <>
+      Left $ "Value passed for type parameter " <> quote (prettyName (typeLeaf tn)) <>
+      " does not match shape " <> pretty shape <>
       " of previously observed value."
   | Nothing <- M.lookup (typeLeaf tn) $ envShapes env =
       matchValueToType (tnenv <> env) t val
@@ -356,7 +356,7 @@ matchValueToType env t@(Array _ _ _ (ShapeDecl ds@(d:_))) val@(ValueArray arr) =
       | Just x <- look v ->
           if x == arr_n
           then continue env
-          else emptyOrWrong $ "`" <> pretty v <> "` (" <> pretty x <> ")"
+          else emptyOrWrong $ quote (pretty v) <> " (" <> pretty x <> ")"
       | otherwise ->
           continue $
           valEnv (M.singleton (qualLeaf v)
@@ -502,7 +502,7 @@ evalTermVar :: Env -> QualName VName -> EvalM Value
 evalTermVar env qv =
   case lookupVar qv env of
     Just (TermValue _ v) -> return v
-    _ -> error $ "`" <> pretty qv <> "` is not bound to a value."
+    _ -> error $ quote (pretty qv) <> " is not bound to a value."
 
 -- | Expand type based on information that was not available at
 -- type-checking time (the structure of abstract types).
@@ -527,8 +527,8 @@ evalType env t@(Scalar (TypeVar () _ tn args)) =
       let (substs, types) = mconcat $ zipWith matchPtoA ps args
           onDim (NamedDim v) = fromMaybe (NamedDim v) $ M.lookup (qualLeaf v) substs
           onDim d = d
-      in if null ps then bimap onDim id t'
-         else evalType (Env mempty types mempty <> env) $ bimap onDim id t'
+      in if null ps then first onDim t'
+         else evalType (Env mempty types mempty <> env) $ first onDim t'
     Nothing -> t
 
   where matchPtoA (TypeParamDim p _) (TypeArgDim (NamedDim qv) _) =
@@ -564,8 +564,8 @@ evalFunction env tparams [] body (_, t) loc = do
           case matchValueToType env vt v of
             Right _ -> return v
             Left err ->
-              bad loc env $ "Value `" <> pretty v <>
-              "` cannot match type `" <> pretty vt <> "`: " ++ err
+              bad loc env $ "Value " <> quote (pretty v) <>
+              " cannot match type " <> quote (pretty vt) <> ": " ++ err
 
         isDimParam TypeParamDim{} = True
         isDimParam _ = False
@@ -625,8 +625,8 @@ eval env (Ascript e td _ loc) = do
   let t = evalType env $ unInfo $ expandedType td
   case matchValueToType env t v of
     Right _ -> return v
-    Left err -> bad loc env $ "Value `" <> pretty v <> "` cannot match shape of type `" <>
-                pretty (declaredType td) <> "` (`" <> pretty t <> "`): " ++ err
+    Left err -> bad loc env $ "Value " <> quote (pretty v) <> " cannot match shape of type " <>
+                quote (pretty (declaredType td)) <> " (" <> quote (pretty t) <> "): " ++ err
 
 eval env (LetPat p e body _ _) = do
   v <- eval env e
@@ -655,7 +655,7 @@ eval _ (FloatLit v (Info t) _) =
       return $ ValuePrim $ FloatValue $ floatValue ft v
     _ -> error $ "eval: nonsensical type for float literal: " ++ pretty t
 
-eval env (BinOp op op_t (x, _) (y, _) _ loc)
+eval env (BinOp (op, _) op_t (x, _) (y, _) _ loc)
   | baseString (qualLeaf op) == "&&" = do
       x' <- asBool <$> eval env x
       if x'
@@ -833,7 +833,7 @@ substituteInModule substs = onModule
       ModuleFun $ \m -> onModule <$> f (substituteInModule rev_substs m)
     onTerm (TermValue t v) = TermValue t v
     onTerm (TermModule m) = TermModule $ onModule m
-    onType (T.TypeAbbr l ps t) = T.TypeAbbr l ps $ bimap onDim id t
+    onType (T.TypeAbbr l ps t) = T.TypeAbbr l ps $ first onDim t
     onDim (NamedDim v) = NamedDim $ replaceQ v
     onDim (ConstDim x) = ConstDim x
     onDim AnyDim = AnyDim
@@ -845,7 +845,7 @@ evalModuleVar :: Env -> QualName VName -> EvalM Module
 evalModuleVar env qv =
   case lookupVar qv env of
     Just (TermModule m) -> return m
-    _ -> error $ "`" <> pretty qv <> "` is not bound to a module."
+    _ -> error $ quote (pretty qv) <> " is not bound to a module."
 
 evalModExp :: Env -> ModExp -> EvalM Module
 
@@ -995,10 +995,10 @@ initialCtx =
       case fromTuple v of Just [x,y,z] -> f x y z
                           _ -> error $ "Expected triple; got: " ++ pretty v
 
-    fun5t f =
+    fun6t f =
       TermValue Nothing $ ValueFun $ \v ->
-      case fromTuple v of Just [x,y,z,a,b] -> f x y z a b
-                          _ -> error $ "Expected quintuple; got: " ++ pretty v
+      case fromTuple v of Just [x,y,z,a,b,c] -> f x y z a b c
+                          _ -> error $ "Expected sextuple; got: " ++ pretty v
 
     bopDef fs = fun2 $ \x y ->
       case (x, y) of
@@ -1006,8 +1006,8 @@ initialCtx =
           | Just z <- msum $ map (`bopDef'` (x', y')) fs ->
               return $ ValuePrim z
         _ ->
-          bad noLoc mempty $ "Cannot apply operator to arguments `" <>
-          pretty x <> "` and `" <> pretty y <> "`."
+          bad noLoc mempty $ "Cannot apply operator to arguments " <>
+          quote (pretty x) <> " and " <> quote (pretty y) <> "."
       where bopDef' (valf, retf, op) (x, y) = do
               x' <- valf x
               y' <- valf y
@@ -1019,11 +1019,22 @@ initialCtx =
           | Just r <- msum $ map (`unopDef'` x') fs ->
               return $ ValuePrim r
         _ ->
-          bad noLoc mempty $ "Cannot apply function to argument `" <>
-          pretty x <> "`."
+          bad noLoc mempty $ "Cannot apply function to argument " <>
+          quote (pretty x) <> "."
       where unopDef' (valf, retf, op) x = do
               x' <- valf x
               retf =<< op x'
+
+    tbopDef f = fun1 $ \v ->
+      case fromTuple v of
+        Just [ValuePrim x, ValuePrim y]
+          | Just x' <- getV x,
+            Just y' <- getV y,
+            Just z <- f x' y' ->
+              return $ ValuePrim $ putV z
+        _ ->
+          bad noLoc mempty $ "Cannot apply operator to argument " <>
+          quote (pretty v) <> "."
 
     def "!" = Just $ unopDef [ (getS, putS, P.doUnOp $ P.Complement Int8)
                              , (getS, putS, P.doUnOp $ P.Complement Int16)
@@ -1040,7 +1051,7 @@ initialCtx =
     def "*" = arithOp P.Mul P.FMul
     def "**" = arithOp P.Pow P.FPow
     def "/" = Just $ bopDef $ sintOp P.SDiv ++ uintOp P.UDiv ++ floatOp P.FDiv
-    def "%" = Just $ bopDef $ sintOp P.SMod ++ uintOp P.UMod
+    def "%" = Just $ bopDef $ sintOp P.SMod ++ uintOp P.UMod ++ floatOp P.FMod
     def "//" = Just $ bopDef $ sintOp P.SQuot ++ uintOp P.UDiv
     def "%%" = Just $ bopDef $ sintOp P.SRem ++ uintOp P.UMod
     def "^" = Just $ bopDef $ intOp P.Xor
@@ -1074,18 +1085,25 @@ initialCtx =
 
     def s
       | Just bop <- find ((s==) . pretty) P.allBinOps =
-          Just $ bopDef [(getV, Just . putV, P.doBinOp bop)]
+          Just $ tbopDef $ P.doBinOp bop
+      | Just unop <- find ((s==) . pretty) P.allCmpOps =
+          Just $ tbopDef $ \x y -> P.BoolValue <$> P.doCmpOp unop x y
       | Just cop <- find ((s==) . pretty) P.allConvOps =
           Just $ unopDef [(getV, Just . putV, P.doConvOp cop)]
       | Just unop <- find ((s==) . pretty) P.allUnOps =
           Just $ unopDef [(getV, Just . putV, P.doUnOp unop)]
-      | Just unop <- find ((s==) . pretty) P.allCmpOps =
-          Just $ bopDef [(getV, bool, P.doCmpOp unop)]
 
       | Just (pts, _, f) <- M.lookup s P.primFuns =
           case length pts of
             1 -> Just $ unopDef [(getV, Just . putV, f . pure)]
-            _ -> Just $ bopDef [(getV, Just . putV, \x y -> f [x,y])]
+            _ -> Just $ fun1 $ \x -> do
+              let getV' (ValuePrim v) = getV v
+                  getV' _ = Nothing
+              case f =<< mapM getV' =<< fromTuple x of
+                Just res ->
+                  return $ ValuePrim $ putV res
+                _ ->
+                  error $ "Cannot apply " ++ pretty s ++ " to " ++ pretty x
 
       | "sign_" `isPrefixOf` s =
           Just $ fun1 $ \x ->
@@ -1097,7 +1115,6 @@ initialCtx =
           case x of (ValuePrim (SignedValue x')) ->
                       return $ ValuePrim $ UnsignedValue x'
                     _ -> error $ "Cannot unsign: " ++ pretty x
-      where bool = Just . BoolValue
 
     def s | "map_stream" `isPrefixOf` s =
               Just $ fun2t stream
@@ -1128,13 +1145,13 @@ initialCtx =
               if i >= 0 && i < arrayLength arr'
               then arr' // [(i, v)] else arr'
 
-    def "gen_reduce" = Just $ fun5t $ \arr fun _ is vs ->
+    def "hist" = Just $ fun6t $ \_ arr fun _ is vs ->
       case arr of
         ValueArray arr' ->
           ValueArray <$> foldM (update fun) arr'
           (zip (map asInt $ fromArray is) (fromArray vs))
         _ ->
-          error $ "gen_reduce expects array, but got: " ++ pretty arr
+          error $ "hist expects array, but got: " ++ pretty arr
       where update fun arr' (i, v) =
               if i >= 0 && i < arrayLength arr'
               then do
@@ -1227,7 +1244,15 @@ interpretImport ctx (fp, prog) = do
 
 -- | Execute the named function on the given arguments; will fail
 -- horribly if these are ill-typed.
-interpretFunction :: Ctx -> VName -> [Value] -> F ExtOp Value
-interpretFunction ctx fname vs = runEvalM (ctxImports ctx) $ do
-  f <- evalTermVar (ctxEnv ctx) $ qualName fname
-  foldM (apply noLoc mempty) f vs
+interpretFunction :: Ctx -> VName -> [F.Value] -> Either String (F ExtOp Value)
+interpretFunction ctx fname vs = do
+  vs' <- case mapM convertValue vs of
+           Just vs' -> Right vs'
+           Nothing -> Left "Invalid input: irregular array."
+
+  Right $ runEvalM (ctxImports ctx) $ do
+    f <- evalTermVar (ctxEnv ctx) (qualName fname)
+    foldM (apply noLoc mempty) f vs'
+
+  where convertValue (F.PrimValue p) = Just $ ValuePrim p
+        convertValue (F.ArrayValue arr _) = mkArray =<< mapM convertValue (elems arr)

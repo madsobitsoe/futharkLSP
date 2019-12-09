@@ -100,7 +100,6 @@ import Control.Monad.Except
 import qualified Data.Map.Strict as M
 import Data.Foldable (traverse_)
 import Data.List
-import Data.Monoid ((<>))
 
 import Futhark.Analysis.Metrics
 import Futhark.Representation.AST.Syntax
@@ -204,7 +203,7 @@ instance OpMetrics inner => OpMetrics (MemOp inner) where
   opMetrics (Inner k) = opMetrics k
 
 instance IsOp inner => IsOp (MemOp inner) where
-  safeOp Alloc{} = True
+  safeOp Alloc{} = False
   safeOp (Inner k) = safeOp k
   cheapOp (Inner k) = cheapOp k
   cheapOp Alloc{} = True
@@ -734,7 +733,7 @@ lookupArraySummary name = do
     MemArray _ _ _ (ArrayIn mem ixfun) ->
       return (mem, ixfun)
     _ ->
-      fail $ "Variable " ++ pretty name ++ " does not look like an array."
+      error $ "Variable " ++ pretty name ++ " does not look like an array."
 
 checkMemInfo :: TC.Checkable lore =>
                  VName -> MemInfo SubExp u MemBind
@@ -842,7 +841,7 @@ arrayVarReturns v = do
     MemArray et shape _ (ArrayIn mem ixfun) ->
       return (et, Shape $ shapeDims shape, mem, ixfun)
     _ ->
-      fail $ "arrayVarReturns: " ++ pretty v ++ " is not an array."
+      error $ "arrayVarReturns: " ++ pretty v ++ " is not an array."
 
 varReturns :: (HasScope lore m, Monad m, ExplicitMemorish lore) =>
               VName -> m ExpReturns
@@ -927,11 +926,11 @@ expReturns e@(DoLoop ctx val _ _) = do
                           Just $ ReturnsInBlock mem ixfun')
                   where ixfun' = existentialiseIxFun (map paramName mergevars) ixfun
               (Array{}, _) ->
-                fail "expReturns: Array return type but not array merge variable."
+                error "expReturns: Array return type but not array merge variable."
               (Prim bt, _) ->
                 return $ MemPrim bt
               (Mem{}, _) ->
-                fail "expReturns: loop returns memory block explicitly."
+                error "expReturns: loop returns memory block explicitly."
           isMergeVar v = find ((==v) . paramName . snd) $ zip [0..] mergevars
           mergevars = map fst $ ctx ++ val
 
@@ -969,8 +968,8 @@ segOpReturns k@(SegRed _ _ _ _ kbody) =
   kernelBodyReturns kbody =<< (extReturns <$> opType k)
 segOpReturns k@(SegScan _ _ _ _ _ kbody) =
   kernelBodyReturns kbody =<< (extReturns <$> opType k)
-segOpReturns (SegGenRed _ _ ops _ _) =
-  concat <$> mapM (mapM varReturns . genReduceDest) ops
+segOpReturns (SegHist _ _ ops _ _) =
+  concat <$> mapM (mapM varReturns . histDest) ops
 
 kernelBodyReturns :: (HasScope ExplicitMemory m, Monad m) =>
                      KernelBody ExplicitMemory -> [ExpReturns] -> m [ExpReturns]

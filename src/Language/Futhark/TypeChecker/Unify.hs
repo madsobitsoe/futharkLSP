@@ -59,7 +59,7 @@ instance Show Usage where
 instance Located Usage where
   locOf (Usage _ loc) = locOf loc
 
-data Constraint = NoConstraint (Maybe Liftedness) Usage
+data Constraint = NoConstraint Liftedness Usage
                 | ParamType Liftedness SrcLoc
                 | Constraint (TypeBase () ()) Usage
                 | Overloaded [PrimType] Usage
@@ -97,13 +97,13 @@ normaliseType :: (Substitutable a, MonadUnify m) => a -> m a
 normaliseType t = do constraints <- getConstraints
                      return $ applySubst (`lookupSubst` constraints) t
 
--- | Is the given type variable actually the name of an abstract type
--- or type parameter, which we cannot substitute?
+-- | Is the given type variable the name of an abstract type or type
+-- parameter, which we cannot substitute?
 isRigid :: VName -> Constraints -> Bool
 isRigid v constraints = case M.lookup v constraints of
-                             Nothing -> True
-                             Just ParamType{} -> True
-                             _ -> False
+                          Nothing -> True
+                          Just ParamType{} -> True
+                          _ -> False
 
 unifySharedConstructors :: MonadUnify m =>
                            Usage
@@ -127,7 +127,7 @@ unify :: MonadUnify m => Usage -> TypeBase () () -> TypeBase () () -> m ()
 unify usage orig_t1 orig_t2 = do
   orig_t1' <- normaliseType orig_t1
   orig_t2' <- normaliseType orig_t2
-  breadCrumb (MatchingTypes orig_t1' orig_t2') $ subunify orig_t1 orig_t2
+  breadCrumb (MatchingTypes orig_t1' orig_t2') $ subunify orig_t1' orig_t2'
   where
     subunify t1 t2 = do
       constraints <- getConstraints
@@ -218,7 +218,7 @@ linkVarToType usage vn tp = do
             modifyConstraints $ M.map $ applySubstInConstraint vn $ Subst tp'
             case M.lookup vn constraints of
 
-              Just (NoConstraint (Just Unlifted) unlift_usage) ->
+              Just (NoConstraint Unlifted unlift_usage) ->
                 zeroOrderType usage (show unlift_usage) tp'
 
               Just (Equality _) ->
@@ -228,7 +228,8 @@ linkVarToType usage vn tp = do
                 | tp `notElem` map (Scalar . Prim) ts ->
                     case tp' of
                       Scalar (TypeVar _ _ (TypeName [] v) [])
-                        | not $ isRigid v constraints -> linkVarToTypes usage v ts
+                        | not $ isRigid v constraints ->
+                            linkVarToTypes usage v ts
                       _ ->
                         typeError usage $ "Cannot unify " ++ quote (prettyName vn) ++
                         "' with type\n" ++ indent (pretty tp) ++ "\nas " ++
@@ -315,6 +316,16 @@ linkVarToTypes usage vn ts = do
               intercalate "," (map pretty vn_ts) ++ " due to " ++ show vn_usage ++ "."
         ts' -> modifyConstraints $ M.insert vn $ Overloaded ts' usage
 
+    Just (HasConstrs _ vn_usage) ->
+      typeError usage $ "Type constrained to one of " ++
+      intercalate "," (map pretty ts) ++ ", but also inferred to be sum type due to " ++
+      show vn_usage ++ "."
+
+    Just (HasFields _ vn_usage) ->
+      typeError usage $ "Type constrained to one of " ++
+      intercalate "," (map pretty ts) ++ ", but also inferred to be record due to " ++
+      show vn_usage ++ "."
+
     _ -> modifyConstraints $ M.insert vn $ Overloaded ts usage
 
 equalityType :: (MonadUnify m, Pretty (ShapeDecl dim), Monoid as) =>
@@ -339,6 +350,8 @@ equalityType usage t = do
               modifyConstraints $ M.insert vn (Equality usage)
             Just (Overloaded _ _) ->
               return () -- All primtypes support equality.
+            Just Equality{} ->
+              return ()
             Just (HasConstrs cs _) ->
               mapM_ (equalityType usage) $ concat $ M.elems cs
             _ ->
@@ -361,7 +374,7 @@ zeroOrderType usage desc t = do
                 " must be non-function, but inferred to be " ++
                 quote (pretty vn_t) ++ " due to " ++ show old_usage ++ "."
             Just (NoConstraint _ _) ->
-              modifyConstraints $ M.insert vn (NoConstraint (Just Unlifted) usage)
+              modifyConstraints $ M.insert vn (NoConstraint Unlifted usage)
             Just (ParamType Lifted ploc) ->
               typeError usage $ "Type " ++ desc ++
               " must be non-function, but type parameter " ++ quote (prettyName vn) ++ " at " ++
@@ -421,7 +434,7 @@ mustHaveField usage l t = do
           return t'
       | otherwise ->
           typeError usage $
-          "Attempt to access field " ++ quote (pretty l) ++ "` of value of type " ++
+          "Attempt to access field " ++ quote (pretty l) ++ " of value of type " ++
           quote (pretty (toStructural t)) ++ "."
     _ -> do unify usage (toStructural t) $ Scalar $ Record $ M.singleton l l_type'
             return l_type
@@ -444,7 +457,7 @@ instance MonadUnify UnifyM where
             put (x, i+1)
             return i
     let v = VName (mkTypeVarName desc i) 0
-    modifyConstraints $ M.insert v $ NoConstraint Nothing $ Usage Nothing loc
+    modifyConstraints $ M.insert v $ NoConstraint Lifted $ Usage Nothing loc
     return $ Scalar $ TypeVar mempty Nonunique (typeName v) []
 
 -- | Construct a the name of a new type variable given a base
@@ -472,4 +485,4 @@ runUnifyM :: [TypeParam] -> UnifyM a -> Either TypeError a
 runUnifyM tparams (UnifyM m) = runExcept $ evalStateT m (constraints, 0)
   where constraints = M.fromList $ mapMaybe f tparams
         f TypeParamDim{} = Nothing
-        f (TypeParamType l p loc) = Just (p, NoConstraint (Just l) $ Usage Nothing loc)
+        f (TypeParamType l p loc) = Just (p, NoConstraint l $ Usage Nothing loc)

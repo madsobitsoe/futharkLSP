@@ -5,6 +5,7 @@ module Futhark.Analysis.PrimExp
   ( PrimExp (..)
   , evalPrimExp
   , primExpType
+  , primExpSizeAtLeast
   , coerceIntPrimExp
   , true
   , false
@@ -14,7 +15,7 @@ module Futhark.Analysis.PrimExp
   , (.&&.), (.||.), (.<.), (.<=.), (.>.), (.>=.), (.==.), (.&.), (.|.), (.^.)
   ) where
 
-import           Data.Foldable
+import           Control.Monad
 import           Data.Traversable
 import qualified Data.Map as M
 
@@ -82,6 +83,23 @@ instance Traversable PrimExp where
 instance FreeIn v => FreeIn (PrimExp v) where
   freeIn' = foldMap freeIn'
 
+-- | True if the 'PrimExp' has at least this many nodes.  This can be
+-- much more efficient than comparing with 'length' for large
+-- 'PrimExp's, as this function is lazy.
+primExpSizeAtLeast :: Int -> PrimExp v -> Bool
+primExpSizeAtLeast k = maybe True (>=k) . descend 0
+  where descend i _
+          | i >= k = Nothing
+        descend i LeafExp{} = Just (i+1)
+        descend i ValueExp{} = Just (i+1)
+        descend i (BinOpExp _ x y) = do x' <- descend (i+1) x
+                                        descend x' y
+        descend i (CmpOpExp _ x y) = do x' <- descend (i+1) x
+                                        descend x' y
+        descend i (ConvOpExp _ x) = descend (i+1) x
+        descend i (UnOpExp _ x) = descend (i+1) x
+        descend i (FunExp _ args _) = foldM descend (i+1) args
+
 -- | Perform quick and dirty constant folding on the top level of a
 -- PrimExp.  This is necessary because we want to consider
 -- e.g. equality modulo constant folding.
@@ -146,6 +164,12 @@ instance Pretty v => Num (PrimExp v) where
            | otherwise = numBad "signum" x
 
   fromInteger = fromInt32 . fromInteger
+
+instance Pretty v => Fractional (PrimExp v) where
+  x / y | Just z <- msum [asFloatOp FDiv x y] = constFoldPrimExp z
+        | otherwise = numBad "/" (x,y)
+
+  fromRational = ValueExp . FloatValue . Float64Value . fromRational
 
 instance Pretty v => IntegralExp (PrimExp v) where
   x `div` y | Just z <- msum [asIntOp SDiv x y, asFloatOp FDiv x y] = constFoldPrimExp z
@@ -248,7 +272,7 @@ numBad s x =
 
 -- | Evaluate a 'PrimExp' in the given monad.  Invokes 'fail' on type
 -- errors.
-evalPrimExp :: (Pretty v, Monad m) => (v -> m PrimValue) -> PrimExp v -> m PrimValue
+evalPrimExp :: (Pretty v, MonadFail m) => (v -> m PrimValue) -> PrimExp v -> m PrimValue
 evalPrimExp f (LeafExp v _) = f v
 evalPrimExp _ (ValueExp v) = return v
 evalPrimExp f (BinOpExp op x y) = do
@@ -270,7 +294,7 @@ evalPrimExp f (FunExp h args _) = do
   maybe (evalBad h args) return $ do (_, _, fun) <- M.lookup h primFuns
                                      fun args'
 
-evalBad :: (Pretty a, Pretty b, Monad m) => a -> b -> m c
+evalBad :: (Pretty a, Pretty b, MonadFail m) => a -> b -> m c
 evalBad op arg = fail $ "evalPrimExp: Type error when applying " ++
                  pretty op ++ " to " ++ pretty arg
 

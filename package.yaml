@@ -1,5 +1,5 @@
 name: futhark
-version: "0.13.0"
+version: "0.14.0"
 synopsis: An optimising compiler for a functional, array-oriented language.
 description: |
   Futhark is a small programming language designed to be compiled to
@@ -34,7 +34,7 @@ extra-source-files:
 
 library:
   dependencies:
-    - base >= 4 && < 5
+    - base >= 4.13 && < 5
     - array >= 0.4
     - binary >= 0.8.3
     - data-binary-ieee754 >= 0.1
@@ -82,7 +82,7 @@ library:
     - haskell-lsp
     - rope-utf16-splay >= 0.3
     - hslogger >= 1.2
-    - unordered-containers >= 0.2
+    - unordered-containers >= 0.2.2
     - data-default >= 0.7
     - stm >= 2.5
     - lens >= 4.17

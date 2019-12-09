@@ -55,7 +55,6 @@ import Data.List
 import Prelude hiding (quot, rem)
 
 import Futhark.Error
-import Futhark.MonadFreshNames
 import Futhark.Transform.Rename
 import Futhark.Representation.ExplicitMemory
 import qualified Futhark.CodeGen.ImpCode.Kernels as Imp
@@ -231,10 +230,10 @@ smallSegmentsReduction (Pattern _ segred_pes) num_groups group_size space reds b
       required_groups = num_segments `quotRoundingUp` segments_per_group
 
   emit $ Imp.DebugPrint "\n# SegRed-small" Nothing
-  emit $ Imp.DebugPrint "num_segments" $ Just (int32, num_segments)
-  emit $ Imp.DebugPrint "segment_size" $ Just (int32, segment_size)
-  emit $ Imp.DebugPrint "segments_per_group" $ Just (int32, segments_per_group)
-  emit $ Imp.DebugPrint "required_groups" $ Just (int32, required_groups)
+  emit $ Imp.DebugPrint "num_segments" $ Just num_segments
+  emit $ Imp.DebugPrint "segment_size" $ Just segment_size
+  emit $ Imp.DebugPrint "segments_per_group" $ Just segments_per_group
+  emit $ Imp.DebugPrint "required_groups" $ Just required_groups
 
   sKernelThread "segred_small" num_groups' group_size' (segFlat space) $ \constants -> do
 
@@ -323,13 +322,13 @@ largeSegmentsReduction segred_pat num_groups group_size space reds body = do
     groups_per_segment * unCount group_size'
 
   emit $ Imp.DebugPrint "\n# SegRed-large" Nothing
-  emit $ Imp.DebugPrint "num_segments" $ Just (int32, num_segments)
-  emit $ Imp.DebugPrint "segment_size" $ Just (int32, segment_size)
-  emit $ Imp.DebugPrint "virt_num_groups" $ Just (int32, Imp.vi32 virt_num_groups)
-  emit $ Imp.DebugPrint "num_groups" $ Just (int32, Imp.unCount num_groups')
-  emit $ Imp.DebugPrint "group_size" $ Just (int32, Imp.unCount group_size')
-  emit $ Imp.DebugPrint "elems_per_thread" $ Just (int32, Imp.unCount elems_per_thread)
-  emit $ Imp.DebugPrint "groups_per_segment" $ Just (int32, groups_per_segment)
+  emit $ Imp.DebugPrint "num_segments" $ Just num_segments
+  emit $ Imp.DebugPrint "segment_size" $ Just segment_size
+  emit $ Imp.DebugPrint "virt_num_groups" $ Just $ Imp.vi32 virt_num_groups
+  emit $ Imp.DebugPrint "num_groups" $ Just $ Imp.unCount num_groups'
+  emit $ Imp.DebugPrint "group_size" $ Just $ Imp.unCount group_size'
+  emit $ Imp.DebugPrint "elems_per_thread" $ Just $ Imp.unCount elems_per_thread
+  emit $ Imp.DebugPrint "groups_per_segment" $ Just groups_per_segment
 
   reds_group_res_arrs <- groupResultArrays (Count (Var virt_num_groups)) group_size reds
 
@@ -510,7 +509,6 @@ reductionStageZero constants ispace num_elements global_tid elems_per_thread thr
             forM_ (zip (slugAccs slug) (lambdaParams slug_op_renamed)) $ \((acc, acc_is), p) ->
             copyDWIM acc (acc_is++vec_is) (Var $ paramName p) []
 
-  i <- newVName "i"
   -- If this is a non-commutative reduction, each thread must run the
   -- loop the same number of iterations, because we will be performing
   -- a group-wide reduction in there.
@@ -521,16 +519,16 @@ reductionStageZero constants ispace num_elements global_tid elems_per_thread thr
           Noncommutative -> (Imp.unCount elems_per_thread,
                              sWhen (Imp.var gtid int32 .<. Imp.unCount num_elements))
 
-  sFor i Int32 bound $ do
+  sFor "i" bound $ \i -> do
     gtid <--
       case comm of
         Commutative ->
           global_tid +
-          Imp.var threads_per_segment int32 * Imp.var i int32
+          Imp.var threads_per_segment int32 * i
         Noncommutative ->
           let index_in_segment = global_tid `quot` kernelGroupSize constants
           in local_tid +
-             (index_in_segment * Imp.unCount elems_per_thread + Imp.var i int32) *
+             (index_in_segment * Imp.unCount elems_per_thread + i) *
              kernelGroupSize constants
 
     check_bounds $ sComment "apply map function" $

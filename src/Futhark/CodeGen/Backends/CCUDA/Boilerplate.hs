@@ -81,8 +81,10 @@ generateConfigFuns sizes = do
                               const char **nvrtc_opts;
                             };|])
 
-  let size_value_inits = map (\i -> [C.cstm|cfg->sizes[$int:i] = 0;|])
-                           [0..M.size sizes-1]
+  let size_value_inits = zipWith sizeInit [0..M.size sizes-1] (M.elems sizes)
+      sizeInit i size = [C.cstm|cfg->sizes[$int:i] = $int:val;|]
+         where val = case size of SizeBespoke _ x -> x
+                                  _               -> 0
   GC.publicDef_ "context_config_new" GC.InitDecl $ \s ->
     ([C.cedecl|struct $id:cfg* $id:s(void);|],
      [C.cedecl|struct $id:cfg* $id:s(void) {
@@ -159,17 +161,18 @@ generateConfigFuns sizes = do
                           cfg->cu_cfg.load_ptx_from = path;
                       }|])
 
-  GC.publicDef_ "context_config_set_default_block_size" GC.InitDecl $ \s ->
+  GC.publicDef_ "context_config_set_default_group_size" GC.InitDecl $ \s ->
     ([C.cedecl|void $id:s(struct $id:cfg* cfg, int size);|],
      [C.cedecl|void $id:s(struct $id:cfg* cfg, int size) {
                          cfg->cu_cfg.default_block_size = size;
                          cfg->cu_cfg.default_block_size_changed = 1;
                        }|])
 
-  GC.publicDef_ "context_config_set_default_grid_size" GC.InitDecl $ \s ->
+  GC.publicDef_ "context_config_set_default_num_groups" GC.InitDecl $ \s ->
     ([C.cedecl|void $id:s(struct $id:cfg* cfg, int num);|],
      [C.cedecl|void $id:s(struct $id:cfg* cfg, int num) {
                          cfg->cu_cfg.default_grid_size = num;
+                         cfg->cu_cfg.default_grid_size_changed = 1;
                        }|])
 
   GC.publicDef_ "context_config_set_default_tile_size" GC.InitDecl $ \s ->
@@ -196,12 +199,12 @@ generateConfigFuns sizes = do
                            }
                          }
 
-                         if (strcmp(size_name, "default_block_size") == 0) {
+                         if (strcmp(size_name, "default_group_size") == 0) {
                            cfg->cu_cfg.default_block_size = size_value;
                            return 0;
                          }
 
-                         if (strcmp(size_name, "default_grid_size") == 0) {
+                         if (strcmp(size_name, "default_num_groups") == 0) {
                            cfg->cu_cfg.default_grid_size = size_value;
                            return 0;
                          }
@@ -233,6 +236,7 @@ generateContextFuns cfg kernel_names sizes = do
      [C.cedecl|struct $id:s {
                          int detail_memory;
                          int debugging;
+                         int profiling;
                          typename lock_t lock;
                          char *error;
                          $sdecls:fields
@@ -251,7 +255,7 @@ generateContextFuns cfg kernel_names sizes = do
                           if (ctx == NULL) {
                             return NULL;
                           }
-                          ctx->debugging = ctx->detail_memory = cfg->cu_cfg.debugging;
+                          ctx->profiling = ctx->debugging = ctx->detail_memory = cfg->cu_cfg.debugging;
 
                           ctx->cuda.cfg = cfg->cu_cfg;
                           create_lock(&ctx->lock);
@@ -285,6 +289,20 @@ generateContextFuns cfg kernel_names sizes = do
      [C.cedecl|char* $id:s(struct $id:ctx* ctx) {
                          return ctx->error;
                        }|])
+
+
+  GC.publicDef_ "context_pause_profiling" GC.InitDecl $ \s ->
+    ([C.cedecl|void $id:s(struct $id:ctx* ctx);|],
+     [C.cedecl|void $id:s(struct $id:ctx* ctx) {
+                 (void)ctx;
+               }|])
+
+  GC.publicDef_ "context_unpause_profiling" GC.InitDecl $ \s ->
+    ([C.cedecl|void $id:s(struct $id:ctx* ctx);|],
+     [C.cedecl|void $id:s(struct $id:ctx* ctx) {
+                 (void)ctx;
+               }|])
+
   where
     loadKernelByName name =
       [C.cstm|CUDA_SUCCEED(cuModuleGetFunction(&ctx->$id:name,

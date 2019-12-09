@@ -40,7 +40,6 @@ module Futhark.Representation.AST.Attributes
 
 import Data.List
 import Data.Maybe (mapMaybe, isJust)
-import Data.Monoid ((<>))
 import qualified Data.Map.Strict as M
 
 import Futhark.Representation.AST.Attributes.Reshape
@@ -106,6 +105,7 @@ safeExp (BasicOp op) = safeBasicOp op
         safeBasicOp Scratch{} = True
         safeBasicOp Concat{} = True
         safeBasicOp Reshape{} = True
+        safeBasicOp Rearrange{} = True
         safeBasicOp Manifest{} = True
         safeBasicOp Iota{} = True
         safeBasicOp Replicate{} = True

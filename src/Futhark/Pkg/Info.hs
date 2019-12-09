@@ -26,14 +26,12 @@ import qualified Data.Text as T
 import qualified Data.ByteString as BS
 import qualified Data.Text.Encoding as T
 import Data.List
-import Data.Monoid ((<>))
 import qualified System.FilePath.Posix as Posix
 import System.Exit
 import System.IO
 
 import qualified Codec.Archive.Zip as Zip
 import Data.Time (UTCTime, UTCTime, defaultTimeLocale, formatTime, getCurrentTime)
-import Data.Versions (SemVer(..), semver, prettySemVer)
 import System.Process.ByteString (readProcessWithExitCode)
 import Network.HTTP.Client hiding (path)
 import Network.HTTP.Simple
@@ -89,7 +87,7 @@ memoiseGetManifest (GetManifest m) = do
                 liftIO $ writeIORef ref $ Just v'
                 return v'
 
-downloadZipball :: (MonadLogger m, MonadIO m) =>
+downloadZipball :: (MonadLogger m, MonadIO m, MonadFail m) =>
                    T.Text -> m Zip.Archive
 downloadZipball url = do
   logMsg $ "Downloading " <> T.unpack url
@@ -126,7 +124,7 @@ majorRevOfPkg p =
 -- repositories.  For example, a package @github.com/user/repo@ will
 -- match version 0.* or 1.* tags only, a package
 -- @github.com/user/repo/v2@ will match 2.* tags, and so forth..
-pkgInfo :: (MonadIO m, MonadLogger m) =>
+pkgInfo :: (MonadIO m, MonadLogger m, MonadFail m) =>
            PkgPath -> m (Either T.Text (PkgInfo m))
 pkgInfo path
   | ["github.com", owner, repo] <- T.splitOn "/" path =
@@ -153,7 +151,7 @@ pkgInfo path
 -- by other systems (Go most notably), so we should not be stepping on
 -- any toes.
 
-gitCmd :: MonadIO m => [String] -> m BS.ByteString
+gitCmd :: (MonadIO m, MonadFail m) => [String] -> m BS.ByteString
 gitCmd opts = do
   (code, out, err) <- liftIO $ readProcessWithExitCode "git" opts mempty
   liftIO $ BS.hPutStr stderr err
@@ -166,7 +164,7 @@ gitCmd opts = do
 -- couple of generic functions that are used to implement support for
 -- both.
 
-ghglRevGetManifest :: (MonadIO m, MonadLogger m) =>
+ghglRevGetManifest :: (MonadIO m, MonadLogger m, MonadFail m) =>
                       T.Text -> T.Text -> T.Text -> T.Text -> GetManifest m
 ghglRevGetManifest url owner repo tag = GetManifest $ do
   logMsg $ "Downloading package manifest from " <> url
@@ -186,7 +184,7 @@ ghglRevGetManifest url owner repo tag = GetManifest $ do
             Right pm -> return pm
     x -> fail $ msg $ "got HTTP status " ++ show x
 
-ghglLookupCommit :: (MonadIO m, MonadLogger m) =>
+ghglLookupCommit :: (MonadIO m, MonadLogger m, MonadFail m) =>
                     T.Text -> T.Text
                  -> T.Text -> T.Text -> T.Text -> T.Text -> T.Text -> m (PkgRevInfo m)
 ghglLookupCommit archive_url manifest_url owner repo d ref hash = do
@@ -195,7 +193,7 @@ ghglLookupCommit archive_url manifest_url owner repo d ref hash = do
   time <- liftIO getCurrentTime -- FIXME
   return $ PkgRevInfo archive_url dir hash gd time
 
-ghglPkgInfo :: (MonadIO m, MonadLogger m) =>
+ghglPkgInfo :: (MonadIO m, MonadLogger m, MonadFail m) =>
                T.Text -> (T.Text -> T.Text) -> (T.Text -> T.Text)
             -> T.Text -> T.Text -> [Word] -> m (Either T.Text (PkgInfo m))
 ghglPkgInfo repo_url mk_archive_url mk_manifest_url owner repo versions = do
@@ -226,7 +224,7 @@ ghglPkgInfo repo_url mk_archive_url mk_manifest_url owner repo versions = do
               return $ Just (v, pinfo)
           | otherwise = return Nothing
 
-ghPkgInfo :: (MonadIO m, MonadLogger m) =>
+ghPkgInfo :: (MonadIO m, MonadLogger m, MonadFail m) =>
              T.Text -> T.Text -> [Word] -> m (Either T.Text (PkgInfo m))
 ghPkgInfo owner repo versions =
   ghglPkgInfo repo_url mk_archive_url mk_manifest_url owner repo versions
@@ -236,7 +234,7 @@ ghPkgInfo owner repo versions =
                             owner <> "/" <> repo <> "/" <>
                             r <> "/" <> T.pack futharkPkg
 
-glPkgInfo :: (MonadIO m, MonadLogger m) =>
+glPkgInfo :: (MonadIO m, MonadLogger m, MonadFail m) =>
              T.Text -> T.Text -> [Word] -> m (Either T.Text (PkgInfo m))
 glPkgInfo owner repo versions =
   ghglPkgInfo repo_url mk_archive_url mk_manifest_url owner repo versions
@@ -266,7 +264,7 @@ lookupKnownPackage p (PkgRegistry m) = M.lookup p m
 -- | Monads that support a stateful package registry.  These are also
 -- required to be instances of 'MonadIO' because most package registry
 -- operations involve network operations.
-class (MonadIO m, MonadLogger m) => MonadPkgRegistry m where
+class (MonadIO m, MonadLogger m, MonadFail m) => MonadPkgRegistry m where
   getPkgRegistry :: m (PkgRegistry m)
   putPkgRegistry :: PkgRegistry m -> m ()
   modifyPkgRegistry :: (PkgRegistry m -> PkgRegistry m) -> m ()

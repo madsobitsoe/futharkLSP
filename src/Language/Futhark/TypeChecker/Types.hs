@@ -32,13 +32,12 @@ import Data.Bifunctor
 import Data.List
 import Data.Loc
 import Data.Maybe
-import Data.Monoid ((<>))
 import qualified Data.Map.Strict as M
 
 import Language.Futhark
 import Language.Futhark.TypeChecker.Monad
 
--- | @unifyTypes uf t2 t2@ attempts to unify @t1@ and @t2@.  If
+-- | @unifyTypes uf t1 t2@ attempts to unify @t1@ and @t2@.  If
 -- unification cannot happen, 'Nothing' is returned, otherwise a type
 -- that combines the aliasing of @t1@ and @t2@ is returned.
 -- Uniqueness is unified with @uf@.
@@ -121,7 +120,7 @@ checkTypeExp (TEVar name loc) = do
   case ps of
     [] -> return (TEVar name' loc, t, l)
     _  -> throwError $ TypeError loc $
-          "Type constructor " ++ pretty name ++ " used without any arguments."
+          "Type constructor " ++ quote (pretty name) ++ " used without any arguments."
 checkTypeExp (TETuple ts loc) = do
   (ts', ts_s, ls) <- unzip3 <$> mapM checkTypeExp ts
   return (TETuple ts' loc, tupleRecord ts_s, foldl' max Unlifted ls)
@@ -144,7 +143,7 @@ checkTypeExp (TEArray t d loc) = do
   case (l, arrayOf st (ShapeDecl [d']) Nonunique) of
     (Unlifted, st') -> return (TEArray t' d' loc, st', Unlifted)
     _ -> throwError $ TypeError loc $
-         "Cannot create array with elements of type `" ++ pretty st ++ "` (might be functional)."
+         "Cannot create array with elements of type " ++ quote (pretty st) ++ " (might be functional)."
   where checkDimDecl AnyDim =
           return AnyDim
         checkDimDecl (ConstDim k) =
@@ -154,7 +153,7 @@ checkTypeExp (TEArray t d loc) = do
 checkTypeExp (TEUnique t loc) = do
   (t', st, l) <- checkTypeExp t
   unless (mayContainArray st) $
-    warn loc $ "Declaring `" <> pretty st <> "` as unique has no effect."
+    warn loc $ "Declaring " <> quote (pretty st) <> " as unique has no effect."
   return (TEUnique t' loc, st `setUniqueness` Unique, l)
   where mayContainArray (Scalar Prim{}) = False
         mayContainArray Array{} = True
@@ -166,8 +165,7 @@ checkTypeExp (TEArrow (Just v) t1 t2 loc) = do
   (t1', st1, _) <- checkTypeExp t1
   bindSpaced [(Term, v)] $ do
     v' <- checkName Term v loc
-    let env = mempty { envVtable = M.singleton v' $ BoundV [] st1 }
-    localEnv env $ do
+    bindVal v' (BoundV [] st1) $ do
       (t2', st2, _) <- checkTypeExp t2
       return (TEArrow (Just v') t1' t2' loc,
               Scalar $ Arrow mempty (Named v') st1 st2,
@@ -183,8 +181,8 @@ checkTypeExp ote@TEApply{} = do
   (tname', ps, t, l) <- lookupType tloc tname
   if length ps /= length targs
   then throwError $ TypeError tloc $
-       "Type constructor " ++ pretty tname ++ " requires " ++ show (length ps) ++
-       " arguments, but application at " ++ locStr tloc ++ " provides " ++ show (length targs)
+       "Type constructor " ++ quote (pretty tname) ++ " requires " ++ show (length ps) ++
+       " arguments, but provided " ++ show (length targs) ++ "."
   else do
     (targs', substs) <- unzip <$> zipWithM checkArgApply ps targs
     return (foldl (\x y -> TEApply x y tloc) (TEVar tname' tname_loc) targs',
@@ -292,15 +290,15 @@ checkShapeParamUses getUses tps ps = do
               pos_uses' = pos <> pos_uses
           forM_ neg $ \pv ->
             unless ((pv `notElem` tp_names) || (pv `elem` pos_uses')) $
-            throwError $ TypeError (srclocOf p) $ "Shape parameter `" ++
-            pretty (baseName pv) ++ "` must first be given in " ++
+            throwError $ TypeError (srclocOf p) $ "Shape parameter " ++
+            quote (prettyName pv) ++ " must first be given in " ++
             "a positive position (non-functional parameter)."
           return pos_uses'
         checkUsed uses (TypeParamDim pv loc)
           | pv `elem` uses = return ()
           | otherwise =
-              throwError $ TypeError loc $ "Size parameter `" ++
-              pretty (baseName pv) ++ "` unused."
+              throwError $ TypeError loc $ "Size parameter " ++
+              quote (prettyName pv) ++ " unused."
         checkUsed _ _ = return ()
 
 checkTypeParams :: MonadTypeChecker m =>
@@ -462,4 +460,4 @@ substTypesAny lookupSubst ot = case ot of
           TypeArgType (substTypesAny lookupSubst' t) loc
         subsTypeArg t = t
 
-        lookupSubst' = fmap (fmap $ bimap id (const ())) . lookupSubst
+        lookupSubst' = fmap (fmap $ second (const ())) . lookupSubst

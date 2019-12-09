@@ -8,10 +8,13 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Futhark.Representation.Kernels.Kernel
-       ( GenReduceOp(..)
+       ( HistOp(..)
+       , histType
        , SegRedOp(..)
        , segRedResults
        , KernelBody(..)
+       , aliasAnalyseKernelBody
+       , consumedInKernelBody
        , KernelResult(..)
        , kernelResultSubExp
        , SplitOrdering(..)
@@ -34,6 +37,9 @@ module Futhark.Representation.Kernels.Kernel
        , SegOpWalker(..)
        , identitySegOpWalker
        , walkSegOpM
+
+       -- * Size operations
+       , SizeOp(..)
 
        -- * Host operations
        , HostOp(..)
@@ -96,19 +102,28 @@ instance Rename SplitOrdering where
   rename (SplitStrided stride) =
     SplitStrided <$> rename stride
 
-data GenReduceOp lore =
-  GenReduceOp { genReduceWidth :: SubExp
-              , genReduceDest :: [VName]
-              , genReduceNeutral :: [SubExp]
-              , genReduceShape :: Shape
-                -- ^ In case this operator is semantically a
-                -- vectorised operator (corresponding to a perfect map
-                -- nest in the SOACS representation), these are the
-                -- logical "dimensions".  This is used to generate
-                -- more efficient code.
-              , genReduceOp :: LambdaT lore
-              }
+data HistOp lore =
+  HistOp { histWidth :: SubExp
+         , histRaceFactor :: SubExp
+         , histDest :: [VName]
+         , histNeutral :: [SubExp]
+         , histShape :: Shape
+           -- ^ In case this operator is semantically a vectorised
+           -- operator (corresponding to a perfect map nest in the
+           -- SOACS representation), these are the logical
+           -- "dimensions".  This is used to generate more efficient
+           -- code.
+         , histOp :: Lambda lore
+         }
   deriving (Eq, Ord, Show)
+
+-- | The type of a histogram produced by a 'HistOp'.  This can be
+-- different from the type of the 'HistDest's in case we are
+-- dealing with a segmented histogram.
+histType :: HistOp lore -> [Type]
+histType op = map ((`arrayOfRow` histWidth op) .
+                        (`arrayOfShape` histShape op)) $
+                   lambdaReturnType $ histOp op
 
 data SegRedOp lore =
   SegRedOp { segRedComm :: Commutativity
@@ -367,20 +382,20 @@ data SegOp lore = SegMap SegLevel SegSpace [Type] (KernelBody lore)
                   -- ^ The KernelSpace must always have at least two dimensions,
                   -- implying that the result of a SegRed is always an array.
                 | SegScan SegLevel SegSpace (Lambda lore) [SubExp] [Type] (KernelBody lore)
-                | SegGenRed SegLevel SegSpace [GenReduceOp lore] [Type] (KernelBody lore)
+                | SegHist SegLevel SegSpace [HistOp lore] [Type] (KernelBody lore)
                 deriving (Eq, Ord, Show)
 
 segLevel :: SegOp lore -> SegLevel
 segLevel (SegMap lvl _ _ _) = lvl
 segLevel (SegRed lvl _ _ _ _) = lvl
 segLevel (SegScan lvl _ _ _ _ _) = lvl
-segLevel (SegGenRed lvl _ _ _ _) = lvl
+segLevel (SegHist lvl _ _ _ _) = lvl
 
 segSpace :: SegOp lore -> SegSpace
 segSpace (SegMap _ lvl _ _) = lvl
 segSpace (SegRed _ lvl _ _ _) = lvl
 segSpace (SegScan _ lvl _ _ _ _) = lvl
-segSpace (SegGenRed _ lvl _ _ _) = lvl
+segSpace (SegHist _ lvl _ _ _) = lvl
 
 segResultShape :: SegSpace -> Type -> KernelResult -> Type
 segResultShape _ t (WriteReturns rws _ _) =
@@ -411,10 +426,10 @@ segOpType (SegScan _ space _ nes ts kbody) =
   (drop (length scan_ts) $ kernelBodyResult kbody)
   where dims = segSpaceDims space
         (scan_ts, map_ts) = splitAt (length nes) ts
-segOpType (SegGenRed _ space ops _ _) = do
+segOpType (SegHist _ space ops _ _) = do
   op <- ops
-  let shape = Shape (segment_dims <> [genReduceWidth op]) <> genReduceShape op
-  map (`arrayOfShape` shape) (lambdaReturnType $ genReduceOp op)
+  let shape = Shape (segment_dims <> [histWidth op]) <> histShape op
+  map (`arrayOfShape` shape) (lambdaReturnType $ histOp op)
   where dims = segSpaceDims space
         segment_dims = init dims
 
@@ -430,8 +445,8 @@ instance (Attributes lore, Aliased lore) => AliasedOp (SegOp lore) where
     consumedInKernelBody kbody
   consumedInOp (SegScan _ _ _ _ _ kbody) =
     consumedInKernelBody kbody
-  consumedInOp (SegGenRed _ _ ops _ kbody) =
-    namesFromList (concatMap genReduceDest ops) <> consumedInKernelBody kbody
+  consumedInOp (SegHist _ _ ops _ kbody) =
+    namesFromList (concatMap histDest ops) <> consumedInKernelBody kbody
 
 checkSegLevel :: Maybe SegLevel -> SegLevel -> TC.TypeM lore ()
 checkSegLevel Nothing SegThreadScalar{} =
@@ -469,12 +484,13 @@ typeCheckSegOp cur_lvl (SegRed lvl space reds ts body) =
 typeCheckSegOp cur_lvl (SegScan lvl space scan_op nes ts body) =
   checkScanRed cur_lvl lvl space [(scan_op, nes, mempty)] ts body
 
-typeCheckSegOp cur_lvl (SegGenRed lvl space ops ts kbody) = do
+typeCheckSegOp cur_lvl (SegHist lvl space ops ts kbody) = do
   checkSegBasics cur_lvl lvl space ts
 
   TC.binding (scopeOfSegSpace space) $ do
-    nes_ts <- forM ops $ \(GenReduceOp dest_w dests nes shape op) -> do
+    nes_ts <- forM ops $ \(HistOp dest_w rf dests nes shape op) -> do
       TC.require [Prim int32] dest_w
+      TC.require [Prim int32] rf
       nes' <- mapM TC.checkArg nes
       mapM_ (TC.require [Prim int32]) $ shapeDims shape
 
@@ -483,7 +499,7 @@ typeCheckSegOp cur_lvl (SegGenRed lvl space ops ts kbody) = do
       TC.checkLambda op $ map (TC.noArgAliases . first stripVecDims) $ nes' ++ nes'
       let nes_t = map TC.argType nes'
       unless (nes_t == lambdaReturnType op) $
-        TC.bad $ TC.TypeError $ "SegGenRed operator has return type " ++
+        TC.bad $ TC.TypeError $ "SegHist operator has return type " ++
         prettyTuple (lambdaReturnType op) ++ " but neutral element has type " ++
         prettyTuple nes_t
 
@@ -501,7 +517,7 @@ typeCheckSegOp cur_lvl (SegGenRed lvl space ops ts kbody) = do
     -- operation followed by the values to write.
     let bucket_ret_t = replicate (length ops) (Prim int32) ++ concat nes_ts
     unless (bucket_ret_t == ts) $
-      TC.bad $ TC.TypeError $ "SegGenRed body has return type " ++
+      TC.bad $ TC.TypeError $ "SegHist body has return type " ++
       prettyTuple ts ++ " but should have type " ++
       prettyTuple bucket_ret_t
 
@@ -591,15 +607,16 @@ mapSegOpM tv (SegScan lvl space scan_op nes ts body) =
   <*> mapM (mapOnSegOpSubExp tv) nes
   <*> mapM (mapOnType $ mapOnSegOpSubExp tv) ts
   <*> mapOnSegOpBody tv body
-mapSegOpM tv (SegGenRed lvl space ops ts body) =
-  SegGenRed
+mapSegOpM tv (SegHist lvl space ops ts body) =
+  SegHist
   <$> mapOnSegLevel tv lvl
   <*> mapOnSegSpace tv space
-  <*> mapM onGenRedOp ops
+  <*> mapM onHistOp ops
   <*> mapM (mapOnType $ mapOnSegOpSubExp tv) ts
   <*> mapOnSegOpBody tv body
-  where onGenRedOp (GenReduceOp w arrs nes shape op) =
-          GenReduceOp <$> mapOnSegOpSubExp tv w
+  where onHistOp (HistOp w rf arrs nes shape op) =
+          HistOp <$> mapOnSegOpSubExp tv w
+          <*> mapOnSegOpSubExp tv rf
           <*> mapM (mapOnSegOpVName tv) arrs
           <*> mapM (mapOnSegOpSubExp tv) nes
           <*> (Shape <$> mapM (mapOnSegOpSubExp tv) (shapeDims shape))
@@ -694,9 +711,9 @@ instance OpMetrics (Op lore) => OpMetrics (SegOp lore) where
                          kernelBodyMetrics body
   opMetrics (SegScan _ _ scan_op _ _ body) =
     inside "SegScan" $ lambdaMetrics scan_op >> kernelBodyMetrics body
-  opMetrics (SegGenRed _ _ ops _ body) =
-    inside "SegGenRed" $ do mapM_ (lambdaMetrics . genReduceOp) ops
-                            kernelBodyMetrics body
+  opMetrics (SegHist _ _ ops _ body) =
+    inside "SegHist" $ do mapM_ (lambdaMetrics . histOp) ops
+                          kernelBodyMetrics body
 
 instance Pretty SegSpace where
   ppr (SegSpace phys dims) = parens (commasep $ do (i,d) <- dims
@@ -745,14 +762,14 @@ instance PrettyLore lore => PP.Pretty (SegOp lore) where
     PP.align (ppr space) <+> PP.colon <+> ppTuple' ts <+>
     PP.nestedBlock "{" "}" (ppr body)
 
-  ppr (SegGenRed lvl space ops ts body) =
-    text "seggenred_" <> ppr lvl </>
+  ppr (SegHist lvl space ops ts body) =
+    text "seghist_" <> ppr lvl </>
     ppSegLevel lvl </>
     PP.parens (PP.braces (mconcat $ intersperse (PP.comma <> PP.line) $ map ppOp ops)) </>
     PP.align (ppr space) <+> PP.colon <+> ppTuple' ts <+>
     PP.nestedBlock "{" "}" (ppr body)
-    where ppOp (GenReduceOp w dests nes shape op) =
-            ppr w <> PP.comma </>
+    where ppOp (HistOp w rf dests nes shape op) =
+            ppr w <> PP.comma <+> ppr rf <> PP.comma </>
             PP.braces (PP.commasep $ map ppr dests) <> PP.comma </>
             PP.braces (PP.commasep $ map ppr nes) <> PP.comma </>
             ppr shape <> PP.comma </>
@@ -824,8 +841,8 @@ instance Attributes lore => IsOp (SegOp lore) where
 
 --- Host operations
 
--- | A host-level operation; parameterised by what else it can do.
-data HostOp lore op
+-- | A simple size-level query or computation.
+data SizeOp
   = SplitSpace SplitOrdering SubExp SubExp SubExp
     -- ^ @SplitSpace o w i elems_per_thread@.
     --
@@ -853,17 +870,15 @@ data HostOp lore op
   | GetSizeMax SizeClass
     -- ^ The maximum size of some class.
   | CmpSizeLe Name SizeClass SubExp
-    -- ^ Compare size (likely a threshold) with some Int32 value.
-  | SegOp (SegOp lore)
-    -- ^ A segmented operation.
-  | OtherOp op
+    -- ^ Compare size (likely a threshold) with some integer value.
+  | CalcNumGroups SubExp Name SubExp
+    -- ^ @CalcNumGroups w max_num_groups group_size@ calculates the
+    -- number of GPU workgroups to use for an input of the given size.
+    -- The @Name@ is a size name.  Note that @w@ is an i64 to avoid
+    -- overflow issues.
   deriving (Eq, Ord, Show)
 
-instance (Attributes lore, Substitute op) => Substitute (HostOp lore op) where
-  substituteNames substs (SegOp op) =
-    SegOp $ substituteNames substs op
-  substituteNames substs (OtherOp op) =
-    OtherOp $ substituteNames substs op
+instance Substitute SizeOp where
   substituteNames subst (SplitSpace o w i elems_per_thread) =
     SplitSpace
     (substituteNames subst o)
@@ -871,117 +886,56 @@ instance (Attributes lore, Substitute op) => Substitute (HostOp lore op) where
     (substituteNames subst i)
     (substituteNames subst elems_per_thread)
   substituteNames substs (CmpSizeLe name sclass x) =
-    CmpSizeLe name sclass $ substituteNames substs x
-  substituteNames _ x = x
+    CmpSizeLe name sclass (substituteNames substs x)
+  substituteNames substs (CalcNumGroups w max_num_groups group_size) =
+    CalcNumGroups
+    (substituteNames substs w)
+    max_num_groups
+    (substituteNames substs group_size)
+  substituteNames _ op = op
 
-instance (Attributes lore, Rename op) => Rename (HostOp lore op) where
+instance Rename SizeOp where
   rename (SplitSpace o w i elems_per_thread) =
     SplitSpace
     <$> rename o
     <*> rename w
     <*> rename i
     <*> rename elems_per_thread
-  rename (SegOp op) = SegOp <$> rename op
-  rename (OtherOp op) = OtherOp <$> rename op
-  rename (CmpSizeLe name sclass x) = CmpSizeLe name sclass <$> rename x
+  rename (CmpSizeLe name sclass x) =
+    CmpSizeLe name sclass <$> rename x
+  rename (CalcNumGroups w max_num_groups group_size) =
+    CalcNumGroups <$> rename w <*> pure max_num_groups <*> rename group_size
   rename x = pure x
 
-instance (Attributes lore, IsOp op) => IsOp (HostOp lore op) where
-  safeOp (SegOp op) = safeOp op
-  safeOp (OtherOp op) = safeOp op
+instance IsOp SizeOp where
   safeOp _ = True
-  cheapOp (SegOp op) = cheapOp op
-  cheapOp (OtherOp op) = cheapOp op
   cheapOp _ = True
 
-instance TypedOp op => TypedOp (HostOp lore op) where
+instance TypedOp SizeOp where
   opType SplitSpace{} = pure [Prim int32]
-  opType GetSize{} = pure [Prim int32]
-  opType GetSizeMax{} = pure [Prim int32]
+  opType (GetSize _ _) = pure [Prim int32]
+  opType (GetSizeMax _) = pure [Prim int32]
   opType CmpSizeLe{} = pure [Prim Bool]
-  opType (SegOp op) = opType op
-  opType (OtherOp op) = opType op
+  opType CalcNumGroups{} = pure [Prim int32]
 
-instance (Aliased lore, AliasedOp op, Attributes lore) => AliasedOp (HostOp lore op) where
-  opAliases (SegOp op) = opAliases op
-  opAliases (OtherOp op) = opAliases op
+instance AliasedOp SizeOp where
   opAliases _ = [mempty]
-
-  consumedInOp (SegOp op) = consumedInOp op
-  consumedInOp (OtherOp op) = consumedInOp op
   consumedInOp _ = mempty
 
-instance (Attributes lore, RangedOp op) => RangedOp (HostOp lore op) where
+instance RangedOp SizeOp where
   opRanges (SplitSpace _ _ _ elems_per_thread) =
     [(Just (ScalarBound 0),
       Just (ScalarBound (SE.subExpToScalExp elems_per_thread int32)))]
-  opRanges (SegOp op) = opRanges op
-  opRanges (OtherOp op) = opRanges op
   opRanges _ = [unknownRange]
 
-instance (Attributes lore, FreeIn op) => FreeIn (HostOp lore op) where
+instance FreeIn SizeOp where
   freeIn' (SplitSpace o w i elems_per_thread) =
     freeIn' o <> freeIn' [w, i, elems_per_thread]
-  freeIn' (SegOp op) = freeIn' op
-  freeIn' (OtherOp op) = freeIn' op
   freeIn' (CmpSizeLe _ _ x) = freeIn' x
+  freeIn' (CalcNumGroups w _ group_size) = freeIn' w <> freeIn' group_size
   freeIn' _ = mempty
 
-instance (CanBeAliased (Op lore), CanBeAliased op, Attributes lore) => CanBeAliased (HostOp lore op) where
-  type OpWithAliases (HostOp lore op) = HostOp (Aliases lore) (OpWithAliases op)
-
-  addOpAliases (SplitSpace o w i elems_per_thread) =
-    SplitSpace o w i elems_per_thread
-  addOpAliases (SegOp op) = SegOp $ addOpAliases op
-  addOpAliases (OtherOp op) = OtherOp $ addOpAliases op
-  addOpAliases (GetSize name sclass) = GetSize name sclass
-  addOpAliases (GetSizeMax sclass) = GetSizeMax sclass
-  addOpAliases (CmpSizeLe name sclass x) = CmpSizeLe name sclass x
-
-  removeOpAliases (SplitSpace o w i elems_per_thread) =
-    SplitSpace o w i elems_per_thread
-  removeOpAliases (SegOp op) = SegOp $ removeOpAliases op
-  removeOpAliases (OtherOp op) = OtherOp $ removeOpAliases op
-  removeOpAliases (GetSize name sclass) = GetSize name sclass
-  removeOpAliases (GetSizeMax sclass) = GetSizeMax sclass
-  removeOpAliases (CmpSizeLe name sclass x) = CmpSizeLe name sclass x
-
-instance (CanBeRanged (Op lore), CanBeRanged op, Attributes lore) => CanBeRanged (HostOp lore op) where
-  type OpWithRanges (HostOp lore op) = HostOp (Ranges lore) (OpWithRanges op)
-
-  addOpRanges (SplitSpace o w i elems_per_thread) =
-    SplitSpace o w i elems_per_thread
-  addOpRanges (SegOp op) = SegOp $ addOpRanges op
-  addOpRanges (OtherOp op) = OtherOp $ addOpRanges op
-  addOpRanges (GetSize name sclass) = GetSize name sclass
-  addOpRanges (GetSizeMax sclass) = GetSizeMax sclass
-  addOpRanges (CmpSizeLe name sclass x) = CmpSizeLe name sclass x
-
-  removeOpRanges (SplitSpace o w i elems_per_thread) =
-    SplitSpace o w i elems_per_thread
-  removeOpRanges (SegOp op) = SegOp $ removeOpRanges op
-  removeOpRanges (OtherOp op) = OtherOp $ removeOpRanges op
-  removeOpRanges (GetSize name sclass) = GetSize name sclass
-  removeOpRanges (GetSizeMax sclass) = GetSizeMax sclass
-  removeOpRanges (CmpSizeLe name sclass x) = CmpSizeLe name sclass x
-
-instance (CanBeWise (Op lore), CanBeWise op, Attributes lore) => CanBeWise (HostOp lore op) where
-  type OpWithWisdom (HostOp lore op) = HostOp (Wise lore) (OpWithWisdom op)
-
-  removeOpWisdom (SplitSpace o w i elems_per_thread) =
-    SplitSpace o w i elems_per_thread
-  removeOpWisdom (SegOp op) = SegOp $ removeOpWisdom op
-  removeOpWisdom (GetSize name sclass) = GetSize name sclass
-  removeOpWisdom (GetSizeMax sclass) = GetSizeMax sclass
-  removeOpWisdom (CmpSizeLe name sclass x) = CmpSizeLe name sclass x
-  removeOpWisdom (OtherOp op) = OtherOp $ removeOpWisdom op
-
-instance (Attributes lore, ST.IndexOp op) => ST.IndexOp (HostOp lore op) where
-  indexOp vtable k (SegOp op) is = ST.indexOp vtable k op is
-  indexOp vtable k (OtherOp op) is = ST.indexOp vtable k op is
-  indexOp _ _ _ _ = Nothing
-
-instance (PrettyLore lore, PP.Pretty op) => PP.Pretty (HostOp lore op) where
+instance PP.Pretty SizeOp where
   ppr (SplitSpace o w i elems_per_thread) =
     text "splitSpace" <> suff <>
     parens (commasep [ppr w, ppr i, ppr elems_per_thread])
@@ -992,23 +946,131 @@ instance (PrettyLore lore, PP.Pretty op) => PP.Pretty (HostOp lore op) where
     text "get_size" <> parens (commasep [ppr name, ppr size_class])
 
   ppr (GetSizeMax size_class) =
-    text "get_size_max" <> parens (ppr size_class)
+    text "get_size_max" <> parens (commasep [ppr size_class])
 
   ppr (CmpSizeLe name size_class x) =
     text "get_size" <> parens (commasep [ppr name, ppr size_class]) <+>
     text "<=" <+> ppr x
 
-  ppr (SegOp op) = ppr op
+  ppr (CalcNumGroups w max_num_groups group_size) =
+    text "calc_num_groups" <> parens (commasep [ppr w, ppr max_num_groups, ppr group_size])
 
-  ppr (OtherOp op) = ppr op
-
-instance (OpMetrics (Op lore), OpMetrics op) => OpMetrics (HostOp lore op) where
+instance OpMetrics SizeOp where
   opMetrics SplitSpace{} = seen "SplitSpace"
   opMetrics GetSize{} = seen "GetSize"
   opMetrics GetSizeMax{} = seen "GetSizeMax"
   opMetrics CmpSizeLe{} = seen "CmpSizeLe"
+  opMetrics CalcNumGroups{} = seen "CalcNumGroups"
+
+typeCheckSizeOp :: TC.Checkable lore => SizeOp -> TC.TypeM lore ()
+typeCheckSizeOp (SplitSpace o w i elems_per_thread) = do
+  case o of
+    SplitContiguous     -> return ()
+    SplitStrided stride -> TC.require [Prim int32] stride
+  mapM_ (TC.require [Prim int32]) [w, i, elems_per_thread]
+typeCheckSizeOp GetSize{} = return ()
+typeCheckSizeOp GetSizeMax{} = return ()
+typeCheckSizeOp (CmpSizeLe _ _ x) = TC.require [Prim int32] x
+typeCheckSizeOp (CalcNumGroups w _ group_size) = do TC.require [Prim int64] w
+                                                    TC.require [Prim int32] group_size
+
+-- | A host-level operation; parameterised by what else it can do.
+data HostOp lore op
+  = SegOp (SegOp lore)
+    -- ^ A segmented operation.
+  | SizeOp SizeOp
+  | OtherOp op
+  deriving (Eq, Ord, Show)
+
+instance (Attributes lore, Substitute op) => Substitute (HostOp lore op) where
+  substituteNames substs (SegOp op) =
+    SegOp $ substituteNames substs op
+  substituteNames substs (OtherOp op) =
+    OtherOp $ substituteNames substs op
+  substituteNames substs (SizeOp op) =
+    SizeOp $ substituteNames substs op
+
+instance (Attributes lore, Rename op) => Rename (HostOp lore op) where
+  rename (SegOp op) = SegOp <$> rename op
+  rename (OtherOp op) = OtherOp <$> rename op
+  rename (SizeOp op) = SizeOp <$> rename op
+
+instance (Attributes lore, IsOp op) => IsOp (HostOp lore op) where
+  safeOp (SegOp op) = safeOp op
+  safeOp (OtherOp op) = safeOp op
+  safeOp (SizeOp op) = safeOp op
+
+  cheapOp (SegOp op) = cheapOp op
+  cheapOp (OtherOp op) = cheapOp op
+  cheapOp (SizeOp op) = cheapOp op
+
+instance TypedOp op => TypedOp (HostOp lore op) where
+  opType (SegOp op) = opType op
+  opType (OtherOp op) = opType op
+  opType (SizeOp op) = opType op
+
+instance (Aliased lore, AliasedOp op, Attributes lore) => AliasedOp (HostOp lore op) where
+  opAliases (SegOp op) = opAliases op
+  opAliases (OtherOp op) = opAliases op
+  opAliases (SizeOp op) = opAliases op
+
+  consumedInOp (SegOp op) = consumedInOp op
+  consumedInOp (OtherOp op) = consumedInOp op
+  consumedInOp (SizeOp op) = consumedInOp op
+
+instance (Attributes lore, RangedOp op) => RangedOp (HostOp lore op) where
+  opRanges (SegOp op) = opRanges op
+  opRanges (OtherOp op) = opRanges op
+  opRanges (SizeOp op) = opRanges op
+
+instance (Attributes lore, FreeIn op) => FreeIn (HostOp lore op) where
+  freeIn' (SegOp op) = freeIn' op
+  freeIn' (OtherOp op) = freeIn' op
+  freeIn' (SizeOp op) = freeIn' op
+
+instance (CanBeAliased (Op lore), CanBeAliased op, Attributes lore) => CanBeAliased (HostOp lore op) where
+  type OpWithAliases (HostOp lore op) = HostOp (Aliases lore) (OpWithAliases op)
+
+  addOpAliases (SegOp op) = SegOp $ addOpAliases op
+  addOpAliases (OtherOp op) = OtherOp $ addOpAliases op
+  addOpAliases (SizeOp op) = SizeOp op
+
+  removeOpAliases (SegOp op) = SegOp $ removeOpAliases op
+  removeOpAliases (OtherOp op) = OtherOp $ removeOpAliases op
+  removeOpAliases (SizeOp op) = SizeOp op
+
+instance (CanBeRanged (Op lore), CanBeRanged op, Attributes lore) => CanBeRanged (HostOp lore op) where
+  type OpWithRanges (HostOp lore op) = HostOp (Ranges lore) (OpWithRanges op)
+
+  addOpRanges (SegOp op) = SegOp $ addOpRanges op
+  addOpRanges (OtherOp op) = OtherOp $ addOpRanges op
+  addOpRanges (SizeOp op) = SizeOp op
+
+  removeOpRanges (SegOp op) = SegOp $ removeOpRanges op
+  removeOpRanges (OtherOp op) = OtherOp $ removeOpRanges op
+  removeOpRanges (SizeOp op) = SizeOp op
+
+instance (CanBeWise (Op lore), CanBeWise op, Attributes lore) => CanBeWise (HostOp lore op) where
+  type OpWithWisdom (HostOp lore op) = HostOp (Wise lore) (OpWithWisdom op)
+
+  removeOpWisdom (SegOp op) = SegOp $ removeOpWisdom op
+  removeOpWisdom (OtherOp op) = OtherOp $ removeOpWisdom op
+  removeOpWisdom (SizeOp op) = SizeOp op
+
+instance (Attributes lore, ST.IndexOp op) => ST.IndexOp (HostOp lore op) where
+  indexOp vtable k (SegOp op) is = ST.indexOp vtable k op is
+  indexOp vtable k (OtherOp op) is = ST.indexOp vtable k op is
+  indexOp _ _ _ _ = Nothing
+
+instance (PrettyLore lore, PP.Pretty op) => PP.Pretty (HostOp lore op) where
+  ppr (SegOp op) = ppr op
+  ppr (OtherOp op) = ppr op
+  ppr (SizeOp op) = ppr op
+
+instance (OpMetrics (Op lore), OpMetrics op) => OpMetrics (HostOp lore op) where
   opMetrics (SegOp op) = opMetrics op
   opMetrics (OtherOp op) = opMetrics op
+  opMetrics (SizeOp op) = opMetrics op
 
 typeCheckHostOp :: TC.Checkable lore =>
                    (SegLevel -> OpWithAliases (Op lore) -> TC.TypeM lore ())
@@ -1016,15 +1078,8 @@ typeCheckHostOp :: TC.Checkable lore =>
                 -> (op -> TC.TypeM lore ())
                 -> HostOp (Aliases lore) op
                 -> TC.TypeM lore ()
-typeCheckHostOp _ _ _ (SplitSpace o w i elems_per_thread) = do
-  case o of
-    SplitContiguous     -> return ()
-    SplitStrided stride -> TC.require [Prim int32] stride
-  mapM_ (TC.require [Prim int32]) [w, i, elems_per_thread]
-typeCheckHostOp _ _ _ GetSize{} = return ()
-typeCheckHostOp _ _ _ GetSizeMax{} = return ()
-typeCheckHostOp _ _ _ (CmpSizeLe _ _ x) = TC.require [Prim int32] x
 typeCheckHostOp checker lvl _ (SegOp op) =
   TC.checkOpWith (checker $ segLevel op) $
   typeCheckSegOp lvl op
 typeCheckHostOp _ _ f (OtherOp op) = f op
+typeCheckHostOp _ _ _ (SizeOp op) = typeCheckSizeOp op

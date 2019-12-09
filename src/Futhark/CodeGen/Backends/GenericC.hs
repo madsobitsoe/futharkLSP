@@ -51,7 +51,7 @@ module Futhark.CodeGen.Backends.GenericC
   , headerDecl
   , publicDef
   , publicDef_
-  , debugReport
+  , profileReport
   , HeaderSection(..)
   , libDecl
   , earlyDecls
@@ -101,7 +101,7 @@ data CompilerState s = CompilerState {
   , compHeaderDecls :: M.Map HeaderSection (DL.DList C.Definition)
   , compLibDecls :: DL.DList C.Definition
   , compCtxFields :: DL.DList (String, C.Type, Maybe C.Exp)
-  , compDebugItems :: DL.DList C.BlockItem
+  , compProfileItems :: DL.DList C.BlockItem
   , compDeclaredMem :: [(VName,Space)]
   }
 
@@ -116,7 +116,7 @@ newCompilerState src s = CompilerState { compTypeStructs = []
                                        , compHeaderDecls = mempty
                                        , compLibDecls = mempty
                                        , compCtxFields = mempty
-                                       , compDebugItems = mempty
+                                       , compProfileItems = mempty
                                        , compDeclaredMem = mempty
                                        }
 
@@ -200,23 +200,23 @@ defaultOperations = Operations { opsWriteScalar = defWriteScalar
                                , opsFatMemory = True
                                }
   where defWriteScalar _ _ _ _ _ =
-          fail "Cannot write to non-default memory space because I am dumb"
+          error "Cannot write to non-default memory space because I am dumb"
         defReadScalar _ _ _ _ =
-          fail "Cannot read from non-default memory space"
+          error "Cannot read from non-default memory space"
         defAllocate _ _ _ =
-          fail "Cannot allocate in non-default memory space"
+          error "Cannot allocate in non-default memory space"
         defDeallocate _ _ =
-          fail "Cannot deallocate in non-default memory space"
+          error "Cannot deallocate in non-default memory space"
         defCopy destmem destoffset DefaultSpace srcmem srcoffset DefaultSpace size =
           copyMemoryDefaultSpace destmem destoffset srcmem srcoffset size
         defCopy _ _ _ _ _ _ _ =
-          fail "Cannot copy to or from non-default memory space"
+          error "Cannot copy to or from non-default memory space"
         defStaticArray _ _ _ _ =
-          fail "Cannot create static array in non-default memory space"
+          error "Cannot create static array in non-default memory space"
         defMemoryType _ =
-          fail "Has no type for non-default memory space"
+          error "Has no type for non-default memory space"
         defCompiler _ =
-          fail "The default compiler cannot compile extended operations"
+          error "The default compiler cannot compile extended operations"
 
 data CompilerEnv op s = CompilerEnv {
     envOperations :: Operations op s
@@ -408,9 +408,9 @@ contextField :: String -> C.Type -> Maybe C.Exp -> CompilerM op s ()
 contextField name ty initial = modify $ \s ->
   s { compCtxFields = compCtxFields s <> DL.singleton (name,ty,initial) }
 
-debugReport :: C.BlockItem -> CompilerM op s ()
-debugReport x = modify $ \s ->
-  s { compDebugItems = compDebugItems s <> DL.singleton x }
+profileReport :: C.BlockItem -> CompilerM op s ()
+profileReport x = modify $ \s ->
+  s { compProfileItems = compProfileItems s <> DL.singleton x }
 
 stm :: C.Stm -> CompilerM op s ()
 stm (C.Block items _) = mapM_ item items
@@ -656,7 +656,7 @@ paramsTypes :: [Param] -> [Type]
 paramsTypes = map paramType
   -- Let's hope we don't need the size for anything, because we are
   -- just making something up.
-  where paramType (MemParam _ space) = Mem (ConstSize 0) space
+  where paramType (MemParam _ space) = Mem space
         paramType (ScalarParam _ t) = Scalar t
 
 --- Entry points.
@@ -792,10 +792,12 @@ arrayLibraryFunctions space pt signed shape = do
           }
 
           $ty:memty $id:values_raw_array($ty:ctx_ty *ctx, $ty:array_type *arr) {
+            (void)ctx;
             return $exp:arr_raw_mem;
           }
 
           typename int64_t* $id:shape_array($ty:ctx_ty *ctx, $ty:array_type *arr) {
+            (void)ctx;
             return arr->shape;
           }
           |]
@@ -1081,7 +1083,7 @@ readInput i (TransparentValue vd@(ArrayValue _ _ t ept dims)) = do
   ty <- valueDescToCType vd
   item [C.citem|$ty:ty *$id:dest;|]
 
-  let t' = primTypeToCType t
+  let t' = signedPrimTypeToCType ept t
       rank = length dims
       name = arrayName t ept rank
       dims_exps = [ [C.cexp|$id:shape[$int:j]|] | j <- [0..rank-1] ]
@@ -1158,11 +1160,18 @@ cliEntryPoint fname (Function _ _ _ _ results args) = do
       cli_entry_point_function_name = "futrts_cli_entry_" ++ entry_point_name
   entry_point_function_name <- publicName $ "entry_" ++ entry_point_name
 
+  pause_profiling <- publicName "context_pause_profiling"
+  unpause_profiling <- publicName "context_unpause_profiling"
+
   let run_it = [C.citems|
                   int r;
                   /* Run the program once. */
                   $stms:pack_input
                   assert($id:sync_ctx(ctx) == 0);
+                  // Only profile last run.
+                  if (profile_run) {
+                    $id:unpause_profiling(ctx);
+                  }
                   t_start = get_wall_time();
                   r = $id:entry_point_function_name(ctx,
                                                     $args:(map addrOf output_vals),
@@ -1171,6 +1180,9 @@ cliEntryPoint fname (Function _ _ _ _ results args) = do
                     panic(1, "%s", $id:error_ctx(ctx));
                   }
                   assert($id:sync_ctx(ctx) == 0);
+                  if (profile_run) {
+                    $id:pause_profiling(ctx);
+                  }
                   t_end = get_wall_time();
                   long int elapsed_usec = t_end - t_start;
                   if (time_runs && runtime_file != NULL) {
@@ -1181,7 +1193,10 @@ cliEntryPoint fname (Function _ _ _ _ results args) = do
 
   return ([C.cedecl|static void $id:cli_entry_point_function_name($ty:ctx_ty *ctx) {
     typename int64_t t_start, t_end;
-    int time_runs;
+    int time_runs = 0, profile_run = 0;
+
+    // We do not want to profile all the initialisation.
+    $id:pause_profiling(ctx);
 
     /* Declare and read input. */
     set_binary_mode(stdin);
@@ -1190,13 +1205,14 @@ cliEntryPoint fname (Function _ _ _ _ results args) = do
 
     /* Warmup run */
     if (perform_warmup) {
-      time_runs = 0;
       $items:run_it
       $stms:free_outputs
     }
     time_runs = 1;
     /* Proper run. */
     for (int run = 0; run < num_runs; run++) {
+      // Only profile last run.
+      profile_run = run == num_runs -1;
       $items:run_it
       if (run < num_runs-1) {
         $stms:free_outputs
@@ -1280,7 +1296,7 @@ data CParts = CParts { cHeader :: String
 
 -- | Produce header and implementation files.
 asLibrary :: CParts -> (String, String)
-asLibrary parts = (cHeader parts, cUtils parts <> cLib parts)
+asLibrary parts = ("#pragma once\n\n" <> cHeader parts, cUtils parts <> cLib parts)
 
 -- | As executable with command-line interface.
 asExecutable :: CParts -> String
@@ -1305,7 +1321,6 @@ compileProg ops extra header_extra spaces options prog@(Functions funs) = do
       option_parser = generateOptionParser "parse_options" $ benchmarkOptions++options
 
   let headerdefs = [C.cunit|
-$esc:("#pragma once\n")
 $esc:("/*\n * Headers\n*/\n")
 $esc:("#include <stdint.h>")
 $esc:("#include <stddef.h>")
@@ -1472,16 +1487,16 @@ $edecls:entry_point_decls
           entry_points <- mapM (uncurry onEntryPoint) $ filter (functionEntry . snd) funs
           extra
           mapM_ libDecl $ concat memfuns
-          debugreport <- gets $ DL.toList . compDebugItems
+          profilereport <- gets $ DL.toList . compProfileItems
 
           ctx_ty <- contextType
           headerDecl MiscDecl [C.cedecl|void futhark_debugging_report($ty:ctx_ty *ctx);|]
           libDecl [C.cedecl|void futhark_debugging_report($ty:ctx_ty *ctx) {
-                      if (ctx->detail_memory) {
+                      if (ctx->detail_memory || ctx->profiling) {
                         $items:memreport
                       }
-                      if (ctx->debugging) {
-                        $items:debugreport
+                      if (ctx->profiling) {
+                        $items:profilereport
                       }
                     }|]
 
@@ -1708,11 +1723,16 @@ compileCode (Comment s code) = do
               { $items:items }
              |]
 
-compileCode (DebugPrint s (Just (_, e))) = do
+compileCode (DebugPrint s (Just e)) = do
   e' <- compileExp e
   stm [C.cstm|if (ctx->debugging) {
-          fprintf(stderr, "%s: %d\n", $exp:s, (int)$exp:e');
+          fprintf(stderr, $string:fmtstr, $exp:s, ($ty:ety)$exp:e', '\n');
        }|]
+  where (fmt, ety) = case primExpType e of
+                       IntType _ -> ("llu", [C.cty|long long int|])
+                       FloatType _ -> ("f", [C.cty|double|])
+                       _ -> ("d", [C.cty|int|])
+        fmtstr = "%s: %" ++ fmt ++ "%c"
 
 compileCode (DebugPrint s Nothing) =
   stm [C.cstm|if (ctx->debugging) {
@@ -1734,13 +1754,13 @@ compileCode (Assert e (ErrorMsg parts) (loc, locs)) = do
   let onPart (ErrorString s) = return ("%s", [C.cexp|$string:s|])
       onPart (ErrorInt32 x) = ("%d",) <$> compileExp x
   (formatstrs, formatargs) <- unzip <$> mapM onPart parts
-  let formatstr = "Error at %s:\n" <> concat formatstrs <> "\n"
+  let formatstr = "Error at\n%s\n" <> concat formatstrs <> "\n"
   stm [C.cstm|if (!$exp:e') {
                    ctx->error = msgprintf($string:formatstr, $string:stacktrace, $args:formatargs);
                    $items:free_all_mem
                    return 1;
                  }|]
-  where stacktrace = intercalate " -> " (reverse $ map locStr $ loc:locs)
+  where stacktrace = prettyStacktrace $ reverse $ map locStr $ loc:locs
 
 compileCode (Allocate name (Count e) space) = do
   size <- compileExp e

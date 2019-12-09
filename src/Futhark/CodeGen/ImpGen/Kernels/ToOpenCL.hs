@@ -30,7 +30,6 @@ import qualified Futhark.CodeGen.ImpCode.OpenCL as ImpOpenCL
 import Futhark.MonadFreshNames
 import Futhark.Representation.ExplicitMemory (allScalarMemory)
 import Futhark.Util (zEncodeString)
-import Futhark.Util.Pretty (pretty)
 
 kernelsToCUDA, kernelsToOpenCL :: ImpKernels.Program
                                -> Either InternalError ImpOpenCL.Program
@@ -49,10 +48,20 @@ translateKernels target (ImpKernels.Functions funs) = do
       opencl_code = openClCode $ M.elems kernels
       opencl_prelude = pretty $ genPrelude target requirements
   return $ ImpOpenCL.Program opencl_code opencl_prelude kernel_names
-    (S.toList $ openclUsedTypes requirements) sizes $
+    (S.toList $ openclUsedTypes requirements) (cleanSizes sizes) $
     ImpOpenCL.Functions (M.toList extra_funs) <> prog'
   where genPrelude TargetOpenCL = genOpenClPrelude
         genPrelude TargetCUDA = genCUDAPrelude
+
+-- | Due to simplifications after kernel extraction, some threshold
+-- parameters may contain KernelPaths that reference threshold
+-- parameters that no longer exist.  We remove these here.
+cleanSizes :: M.Map Name SizeClass -> M.Map Name SizeClass
+cleanSizes m = M.map clean m
+  where known = M.keys m
+        clean (SizeThreshold path) =
+          SizeThreshold $ filter ((`elem` known) . fst) path
+        clean s = s
 
 pointerQuals ::  Monad m => String -> m [C.TypeQual]
 pointerQuals "global"     = return [C.ctyquals|__global|]
@@ -62,7 +71,10 @@ pointerQuals "constant"   = return [C.ctyquals|__constant|]
 pointerQuals "write_only" = return [C.ctyquals|__write_only|]
 pointerQuals "read_only"  = return [C.ctyquals|__read_only|]
 pointerQuals "kernel"     = return [C.ctyquals|__kernel|]
-pointerQuals s            = fail $ "'" ++ s ++ "' is not an OpenCL kernel address space."
+pointerQuals s            = error $ "'" ++ s ++ "' is not an OpenCL kernel address space."
+
+-- In-kernel name and per-workgroup size in bytes.
+type LocalMemoryUse = (VName, Count Bytes Exp)
 
 newtype KernelRequirements =
   KernelRequirements { kernelLocalMemory :: [LocalMemoryUse] }
@@ -166,25 +178,16 @@ onKernel target kernel = do
         num_groups = kernelNumGroups kernel
         group_size = kernelGroupSize kernel
 
-        prepareLocalMemory TargetOpenCL (mem, Left size) = do
+        prepareLocalMemory TargetOpenCL (mem, size) = do
           mem_aligned <- newVName $ baseString mem ++ "_aligned"
           return (Just $ SharedMemoryKArg size,
                   Just [C.cparam|__local volatile typename int64_t* $id:mem_aligned|],
                   [C.citem|__local volatile char* restrict $id:mem = (__local volatile char*)$id:mem_aligned;|])
-        prepareLocalMemory TargetOpenCL (mem, Right size) = do
-          let size' = compilePrimExp size
-          return (Nothing, Nothing,
-                  [C.citem|ALIGNED_LOCAL_MEMORY($id:mem, $exp:size');|])
-        prepareLocalMemory TargetCUDA (mem, Left size) = do
+        prepareLocalMemory TargetCUDA (mem, size) = do
           param <- newVName $ baseString mem ++ "_offset"
           return (Just $ SharedMemoryKArg size,
                   Just [C.cparam|uint $id:param|],
                   [C.citem|volatile char *$id:mem = &shared_mem[$id:param];|])
-        prepareLocalMemory TargetCUDA (mem, Right size) = do
-          -- We declare the shared memory array as int64_t to force alignment.
-          let size' = compilePrimExp size
-          return (Nothing, Nothing,
-                  [CUDAC.citem|__shared__ volatile typename int64_t $id:mem[(($exp:size' + 7) & ~7)/8];|])
 
 useAsParam :: KernelUse -> Maybe C.Param
 useAsParam (ScalarUse name bt) =
@@ -238,9 +241,6 @@ typedef uchar uint8_t;
 typedef ushort uint16_t;
 typedef uint uint32_t;
 typedef ulong uint64_t;
-
-// We declare the shared memory array as int64_t to force alignment.
-$esc:("#define ALIGNED_LOCAL_MEMORY(m,size) __local int64_t m[((size + 7) & ~7)/8]")
 
 // NVIDIAs OpenCL does not create device-wide memory fences (see #734), so we
 // use inline assembly if we detect we are on an NVIDIA GPU.
@@ -500,19 +500,19 @@ inKernelOperations = GenericC.Operations
 
         cannotAllocate :: GenericC.Allocate KernelOp KernelRequirements
         cannotAllocate _ =
-          fail "Cannot allocate memory in kernel"
+          error "Cannot allocate memory in kernel"
 
         cannotDeallocate :: GenericC.Deallocate KernelOp KernelRequirements
         cannotDeallocate _ _ =
-          fail "Cannot deallocate memory in kernel"
+          error "Cannot deallocate memory in kernel"
 
         copyInKernel :: GenericC.Copy KernelOp KernelRequirements
         copyInKernel _ _ _ _ _ _ _ =
-          fail "Cannot bulk copy in kernel."
+          error "Cannot bulk copy in kernel."
 
         noStaticArrays :: GenericC.StaticArray KernelOp KernelRequirements
         noStaticArrays _ _ _ _ =
-          fail "Cannot create static array in kernel."
+          error "Cannot create static array in kernel."
 
         kernelMemoryType space
           | Just t <- M.lookup space allScalarMemory =
@@ -566,7 +566,7 @@ typesInCode (If e c1 c2) =
   typesInExp e <> typesInCode c1 <> typesInCode c2
 typesInCode (Assert e _ _) = typesInExp e
 typesInCode (Comment _ c) = typesInCode c
-typesInCode (DebugPrint _ v) = maybe mempty (typesInExp . snd) v
+typesInCode (DebugPrint _ v) = maybe mempty typesInExp v
 typesInCode Op{} = mempty
 
 typesInExp :: Exp -> S.Set PrimType
