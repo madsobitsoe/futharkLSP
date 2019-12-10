@@ -79,9 +79,9 @@ library:
     - haskeline
     - utf8-string >= 1
     - terminal-size >= 0.3
-    - haskell-lsp
+    - haskell-lsp 
     - rope-utf16-splay >= 0.3
-    - hslogger >= 1.2
+    - hslogger 
     - unordered-containers >= 0.2.2
     - data-default >= 0.7
     - stm >= 2.5

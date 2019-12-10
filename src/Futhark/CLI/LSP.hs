@@ -29,8 +29,12 @@ import           System.Exit
 import qualified System.Log.Logger                     as L
 import qualified Data.Rope.UTF16                       as Rope
 -- Mads adding imports
-import Futhark.Compiler (readProgram)
+import Futhark.Compiler (readProgram, readProgramOrDie)
 import Futhark.Pipeline (runFutharkM, Verbosity(..))
+import Data.Loc
+import Language.Futhark.Query
+import Language.Futhark.Syntax
+import Text.Read (readMaybe)
 import Debug.Trace
 import System.IO
 --  Mads done importing stuff
@@ -48,7 +52,7 @@ main = mainWithOptions () [] "" $ \args () -> do
 -- dump the warnings from the compiler
 
 dump :: String -> IO ()
-dump s = hPutStr stderr s
+dump s = hPutStrLn stderr s
 
 dumpStatus :: Maybe String -> IO ()
 dumpStatus file = 
@@ -199,7 +203,7 @@ reactor lf inp = do
                                  . to J.toNormalizedUri
         mdoc <- liftIO $ Core.getVirtualFileFunc lf doc
         case mdoc of
-          Just (VirtualFile _version str _) -> do
+          Just (VirtualFile _version str) -> do
             liftIO $ U.logs $ "reactor:processing NotDidChangeTextDocument: vf got:" ++ (show $ Rope.toString str)
           Nothing -> do
             liftIO $ U.logs "reactor:processing NotDidChangeTextDocument: vf returned Nothing"
@@ -244,27 +248,34 @@ reactor lf inp = do
 
       HandlerRequest (ReqHover req) -> do
         liftIO $ U.logs $ "reactor:got HoverRequest:" ++ show req
-        let J.TextDocumentPositionParams _doc pos = req ^. J.params
+        -- The third argument, Nothing, is an optional "_workDoneToken" 
+        let J.TextDocumentPositionParams _doc pos Nothing = req ^. J.params
             J.Position _l _c' = pos
+            J.TextDocumentIdentifier _uri = _doc
+        liftIO $ dump $ show $  J.uriToFilePath _uri
 
-
-        let
-          ht = Just $ J.Hover ms (Just range)
-          -- We assume ms is short for message or the like
-          -- We need to use <> for string concatenation, since T.Text values are not strings
-          -- T.pack has type string -> T.Text and can be used to convert a string
-          -- show can convert ints to strings
-          -- Instead of using the IO monad to print values, we can use Trace.Debug. traceShowId is (almost) equivalent to show. 
-          -- It calls show on our value, prints it as a sideffect, and passes that value on
-          ms = J.HoverContents $ J.markedUpContent ("Line: " <> T.pack (show $ _l + 1) <> "\tColumn: " <> T.pack (show $ _c') <> "\nlsp-hover-request") "TYPE INFO GOES HERE"   --"lsp-hello" "TYPE INFO"
-          range = J.Range pos pos
+        do
+          lf <- ask
+          liftIO $ getHoverInfo (J.uriToFilePath _uri) _l _c' req lf
+        -- let
+        --   ht = Just $ J.Hover ms (Just range)
+        --   -- We assume ms is short for message or the like
+        --   -- We need to use <> for string concatenation, since T.Text values are not strings
+        --   -- T.pack has type string -> T.Text and can be used to convert a string
+        --   -- show can convert ints to strings
+        --   -- Instead of using the IO monad to print values, we can use Trace.Debug. traceShowId is (almost) equivalent to show. 
+        --   -- It calls show on our value, prints it as a sideffect, and passes that value on
+        --   ms = J.HoverContents $ J.markedUpContent ("Line: " <> T.pack (show $ _l + 1) <> "\tColumn: " <> T.pack (show $ _c') <> "\nlsp-hover-request") "TYPE INFO GOES HERE"   
+        --   range = J.Range pos pos
           -- Builds the response and sends it back to the client.
           -- traceShowId ht will debug-print all messages to stderr
 
         -- dump compile status to stderr
---        liftIO dumpStatus
 
-        reactorSend $ RspHover $ Core.makeResponseMessage req $ traceShowId ht
+
+        -- get info at point, make it T.Text and use the reactor to fire it into the atmosphere (of visual studio code, the deadest place of all)
+--        reactorSend $ RspHover $ Core.makeResponseMessage req $ traceShowId ht
+
 
       -- -------------------------------
 
@@ -366,6 +377,43 @@ getStatus file =
         Left _ -> return $ T.pack $ "Failed to compile " ++ filename ++ "\n"
         Right (w,_,_) -> return $ T.pack $ show w
 
+
+getHoverInfo :: Maybe FilePath -> Int -> Int -> J.HoverRequest -> Core.LspFuncs () -> IO ()
+getHoverInfo filename line col req lf = do
+  case filename of
+    Nothing -> dump "No file was supplied\n"
+    Just filename -> do
+      res <- runFutharkM (readProgram filename) NotVerbose
+      case res of
+        Left _ -> do dump "compilation failed on hover request.\n"
+        Right (_,imports,_) -> do
+          case atPos imports $ Pos filename (line+1) col 0 of
+            --      case atPos imports pos of
+            Nothing -> dump "No information available\n"
+            Just (AtName qn def loc) -> do
+              -- dump $ "Name: " ++ pretty qn ++ "\n"
+              -- dump $ "Position: " ++ locStr loc ++ "\n"
+              case def of
+                Nothing -> return ()
+                Just (BoundTerm t defloc) -> do
+                  -- dump $ "Type: " ++ pretty t ++ "\n"
+                  -- dump $ "Definition: " ++ locStr (srclocOf defloc) ++ "\n"
+                  let
+                    ht = Just $ J.Hover ms (Just range)
+                    ms = J.HoverContents $ J.markedUpContent  ""
+                        (T.pack ( "Name: " ++ pretty qn ++ "\n" ++
+                        "Position: " ++ locStr loc ++ "\n" ++
+                        "Type: " ++ pretty t ++ "\n" ++
+                        "Definition: " ++locStr (srclocOf defloc) ++ "\n")) 
+                    range = J.Range (J.Position line col) (J.Position line col) 
+
+                  Core.sendFunc lf $ RspHover $ Core.makeResponseMessage req $ traceShowId ht
+--                  return ()
+      
+
+                  
+  
+
 getAndPublishStatus :: J.NormalizedUri -> Maybe Int -> Maybe String -> Core.LspFuncs () -> IO ()
 getAndPublishStatus uri version fileName lf =
   do
@@ -377,21 +425,22 @@ getAndPublishStatus uri version fileName lf =
         dump $ "filename: " ++ filename
         res <- runFutharkM (readProgram filename) NotVerbose
         case res of
-          Left _ -> dump "compilation failed.\n"
+          Left _ -> dump "compilation failed.\n" -- dump to stderr (debug)
           Right (w,_,_) -> do
-            dump $ show w
+            dump $ show w -- dump to stderr (debug)
             let diags =
                   [J.Diagnostic
                    (J.Range (J.Position 0 1) (J.Position 0 5))
                    (Just J.DsWarning)  -- severity
                    Nothing  -- code
                    (Just "lsp-hello") -- source
-                   (T.pack $ show w)
+                   (T.pack $ show w) -- Convert the warnings to T.text and put them in diags
                    (Just (J.List []))
                   ]
-
+            -- lf is the LSP server Method
+            -- (Core.publishDiagnosticsFunc lf) gives us a function that can send diagnostics to the client
+            -- 100 is max_warnings. TODO Replace with variable
             (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
-        --        Core.publishDiagnosticsFunc lf 100 uri version (partitionBySource diags)
     
 
 syncOptions :: J.TextDocumentSyncOptions
@@ -405,7 +454,7 @@ syncOptions = J.TextDocumentSyncOptions
 
 lspOptions :: Core.Options
 lspOptions = def { Core.textDocumentSync = Just syncOptions
-                 , Core.executeCommandProvider = Just (J.ExecuteCommandOptions (J.List ["lsp-hello-command"]))
+--                 , Core.executeCommandProvider = Just (J.ExecuteCommandOptions (J.List ["lsp-hello-command"]))
                  }
 
 lspHandlers :: TChan ReactorInput -> Core.Handlers
@@ -420,7 +469,7 @@ lspHandlers rin =
       , Core.cancelNotificationHandler                = Just $ passHandler rin NotCancelRequestFromClient
       , Core.responseHandler                          = Just $ responseHandlerCb rin
       , Core.codeActionHandler                        = Just $ passHandler rin ReqCodeAction
-      , Core.executeCommandHandler                    = Just $ passHandler rin ReqExecuteCommand
+--      , Core.executeCommandHandler                    = Just $ passHandler rin ReqExecuteCommand
       }
 
 passHandler :: TChan ReactorInput -> (a -> FromClientMessage) -> Core.Handler a
