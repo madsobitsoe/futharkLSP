@@ -24,11 +24,11 @@ import Futhark.CodeGen.ImpGen.Kernels.Base
 import Futhark.CodeGen.ImpGen.Kernels.SegMap
 import Futhark.CodeGen.ImpGen.Kernels.SegRed
 import Futhark.CodeGen.ImpGen.Kernels.SegScan
-import Futhark.CodeGen.ImpGen.Kernels.SegGenRed
+import Futhark.CodeGen.ImpGen.Kernels.SegHist
 import Futhark.CodeGen.ImpGen.Kernels.Transpose
 import qualified Futhark.Representation.ExplicitMemory.IndexFunction as IxFun
 import Futhark.CodeGen.SetDefaultSpace
-import Futhark.Util.IntegralExp (quot, IntegralExp)
+import Futhark.Util.IntegralExp (quot, quotRoundingUp, IntegralExp)
 
 callKernelOperations :: Operations ExplicitMemory Imp.HostOp
 callKernelOperations =
@@ -46,21 +46,49 @@ compileProg prog =
 
 opCompiler :: Pattern ExplicitMemory -> Op ExplicitMemory
            -> CallKernelGen ()
+
 opCompiler dest (Alloc e space) =
   compileAlloc dest e space
-opCompiler (Pattern _ [pe]) (Inner (GetSize key size_class)) = do
+
+opCompiler (Pattern _ [pe]) (Inner (SizeOp (GetSize key size_class))) = do
   fname <- asks envFunction
   sOp $ Imp.GetSize (patElemName pe) (keyWithEntryPoint fname key) $
     sizeClassWithEntryPoint fname size_class
-opCompiler (Pattern _ [pe]) (Inner (CmpSizeLe key size_class x)) = do
+
+opCompiler (Pattern _ [pe]) (Inner (SizeOp (CmpSizeLe key size_class x))) = do
   fname <- asks envFunction
   let size_class' = sizeClassWithEntryPoint fname size_class
   sOp . Imp.CmpSizeLe (patElemName pe) (keyWithEntryPoint fname key) size_class'
     =<< toExp x
-opCompiler (Pattern _ [pe]) (Inner (GetSizeMax size_class)) =
+
+opCompiler (Pattern _ [pe]) (Inner (SizeOp (GetSizeMax size_class))) =
   sOp $ Imp.GetSizeMax (patElemName pe) size_class
+
+opCompiler (Pattern _ [pe]) (Inner (SizeOp (CalcNumGroups w64 max_num_groups_key group_size))) = do
+  fname <- asks envFunction
+  max_num_groups <- dPrim "max_num_groups" int32
+  sOp $ Imp.GetSize max_num_groups (keyWithEntryPoint fname max_num_groups_key) $
+    sizeClassWithEntryPoint fname SizeNumGroups
+
+  -- If 'w' is small, we launch fewer groups than we normally would.
+  -- We don't want any idle groups.
+  --
+  -- The calculations are done with 64-bit integers to avoid overflow
+  -- issues.
+  let num_groups_maybe_zero = BinOpExp (SMin Int64)
+                              (toExp' int64 w64 `quotRoundingUp`
+                               i64 (toExp' int32 group_size)) $
+                              i64 (Imp.vi32 max_num_groups)
+  -- We also don't want zero groups.
+  let num_groups = BinOpExp (SMax Int64) 1 num_groups_maybe_zero
+  patElemName pe <-- i32 num_groups
+
+  where i64 = ConvOpExp (SExt Int32 Int64)
+        i32 = ConvOpExp (SExt Int64 Int32)
+
 opCompiler dest (Inner (SegOp op)) =
   segOpCompiler dest op
+
 opCompiler pat e =
   compilerBugS $ "opCompiler: Invalid pattern\n  " ++
   pretty pat ++ "\nfor expression\n  " ++ pretty e
@@ -78,8 +106,8 @@ segOpCompiler pat (SegRed lvl@SegThread{} space reds _ kbody) =
   compileSegRed pat lvl space reds kbody
 segOpCompiler pat (SegScan lvl@SegThread{} space scan_op nes _ kbody) =
   compileSegScan pat lvl space scan_op nes kbody
-segOpCompiler pat (SegGenRed (SegThread num_groups group_size _) space ops _ kbody) =
-  compileSegGenRed pat num_groups group_size space ops kbody
+segOpCompiler pat (SegHist (SegThread num_groups group_size _) space ops _ kbody) =
+  compileSegHist pat num_groups group_size space ops kbody
 segOpCompiler pat segop =
   compilerBugS $ "segOpCompiler: unexpected " ++ pretty (segLevel segop) ++ " for rhs of pattern " ++ pretty pat
 
@@ -93,8 +121,8 @@ expCompiler (Pattern _ [pe]) (BasicOp (Iota n x s et)) = do
 
   sIota (patElemName pe) n' x' s' et
 
-expCompiler (Pattern _ [pe]) (BasicOp (Replicate shape se)) =
-  sReplicate (patElemName pe) shape se
+expCompiler (Pattern _ [pe]) (BasicOp (Replicate _ se)) =
+  sReplicate (patElemName pe) se
 
 -- Allocation in the "local" space is just a placeholder.
 expCompiler _ (Op (Alloc _ (Space "local"))) =
@@ -138,9 +166,9 @@ callKernelCopy bt
 
   | otherwise = sCopy bt destloc srcloc n
 
-mapTransposeForType :: PrimType -> ImpM ExplicitMemory Imp.HostOp Name
+mapTransposeForType :: PrimType -> CallKernelGen Name
 mapTransposeForType bt = do
-  -- XXX: The leading underscore is to avoid clashes with a
+  -- FIXME: The leading underscore is to avoid clashes with a
   -- programmer-defined function of the same name (this is a bad
   -- solution...).
   let fname = nameFromString $ "_" <> mapTransposeName bt

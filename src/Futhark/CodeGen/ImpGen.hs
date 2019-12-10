@@ -82,6 +82,8 @@ module Futhark.CodeGen.ImpGen
   , sWrite, sUpdate
   , sLoopNest
   , (<--)
+
+  , function
   )
   where
 
@@ -99,8 +101,7 @@ import Data.List
 
 import qualified Futhark.CodeGen.ImpCode as Imp
 import Futhark.CodeGen.ImpCode
-  (Count (..),
-   Bytes, Elements,
+  (Bytes, Elements,
    bytes, elements, withElemType)
 import Futhark.Representation.ExplicitMemory
 import Futhark.Representation.SOACS (SOACS)
@@ -596,7 +597,7 @@ defCompileExp pat (DoLoop ctx val form body) = do
                 return ()
 
       dLParams $ map fst loopvars
-      sFor i it (toExp' (IntType it) bound) $
+      sFor' i it (toExp' (IntType it) bound) $
         mapM_ setLoopParam loopvars >> doBody
     WhileLoop cond ->
       sWhile (Imp.var cond Bool) doBody
@@ -663,17 +664,14 @@ defCompileBasicOp (Pattern _ [pe]) (Replicate (Shape ds) se) = do
 defCompileBasicOp _ Scratch{} =
   return ()
 
-defCompileBasicOp (Pattern [] [pe]) (Iota n e s et) = do
-  i <- newVName "i"
-  x <- newVName "x"
+defCompileBasicOp (Pattern [] [pe]) (Iota n e s it) = do
   n' <- toExp n
   e' <- toExp e
   s' <- toExp s
-  let i' = ConvOpExp (SExt Int32 et) $ Imp.var i $ IntType Int32
-  dPrim_ x $ IntType et
-  sFor i Int32 n' $ do
-    x <-- e' + i' * s'
-    copyDWIM (patElemName pe) [Imp.vi32 i] (Var x) []
+  sFor "i" n' $ \i -> do
+    let i' = ConvOpExp (SExt Int32 it) i
+    x <- dPrimV "x" $ e' + i' * s'
+    copyDWIM (patElemName pe) [i] (Var x) []
 
 defCompileBasicOp (Pattern _ [pe]) (Copy src) =
   copyDWIM (patElemName pe) [] (Var src) []
@@ -747,7 +745,7 @@ addArrays = mapM_ addArray
           , entryArrayElemType = bt
           }
 
--- | Like 'daringFParams', but does not create new declarations.
+-- | Like 'dFParams', but does not create new declarations.
 -- Note: a hack to be used only for functions.
 addFParams :: ExplicitMemorish lore => [FParam lore] -> ImpM lore op ()
 addFParams = mapM_ addFParam
@@ -1190,11 +1188,21 @@ typeSize t = Imp.bytes $ Imp.LeafExp (Imp.SizeOf $ elemType t) int32 *
 
 --- Building blocks for constructing code.
 
-sFor :: VName -> IntType -> Imp.Exp -> ImpM lore op () -> ImpM lore op ()
-sFor i it bound body = do
+sFor' :: VName -> IntType -> Imp.Exp -> ImpM lore op () -> ImpM lore op ()
+sFor' i it bound body = do
   addLoopVar i it
   body' <- collect body
   emit $ Imp.For i it bound body'
+
+sFor :: String -> Imp.Exp -> (Imp.Exp -> ImpM lore op ()) -> ImpM lore op ()
+sFor i bound body = do
+  i' <- newVName i
+  it <- case primExpType bound of
+          IntType it -> return it
+          t -> compilerBugS $ "sFor: bound " ++ pretty bound ++ " is of type " ++ pretty t
+  addLoopVar i' it
+  body' <- collect $ body $ Imp.var i' $ IntType it
+  emit $ Imp.For i' it bound body'
 
 sWhile :: Imp.Exp -> ImpM lore op () -> ImpM lore op ()
 sWhile cond body = do
@@ -1290,11 +1298,22 @@ sLoopNest :: Shape
 sLoopNest = sLoopNest' [] . shapeDims
   where sLoopNest' is [] f = f $ reverse is
         sLoopNest' is (d:ds) f = do
-          i <- newVName "nest_i"
           d' <- toExp d
-          sFor i Int32 d' $ sLoopNest' (Imp.var i int32:is) ds f
+          sFor "nest_i" d' $ \i -> sLoopNest' (i:is) ds f
 
 -- | ASsignment.
 (<--) :: VName -> Imp.Exp -> ImpM lore op ()
 x <-- e = emit $ Imp.SetScalar x e
 infixl 3 <--
+
+-- | Constructing a non-entry point function.
+function :: [Imp.Param] -> [Imp.Param] -> ImpM lore op () -> ImpM lore op (Imp.Function op)
+function outputs inputs m = do
+  body <- collect $ do
+    mapM_ addParam $ outputs ++ inputs
+    m
+  return $ Imp.Function False outputs inputs body [] []
+  where addParam (Imp.MemParam name space) =
+          addVar name $ MemVar Nothing $ MemEntry space
+        addParam (Imp.ScalarParam name bt) =
+          addVar name $ ScalarVar Nothing $ ScalarEntry bt

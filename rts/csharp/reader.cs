@@ -564,13 +564,24 @@ private (T[], int[]) ReadStrArrayEmpty<T>(int rank, string typeName, Func<T> Rea
 {
     ParseSpecificString("empty");
     ParseSpecificChar('(');
-    for (int i = 0; i < rank-1; i++) {
-        ParseSpecificString("[]");
+    int[] shape = new int[rank];
+    for (int i = 0; i < rank; i++) {
+        ParseSpecificString("[");
+        shape[i] = Convert.ToInt32(ParseIntSigned());
+        ParseSpecificString("]");
     }
     ParseSpecificString(typeName);
     ParseSpecificChar(')');
 
-    return (new T[1], new int[rank]);
+    // Check whether the array really is empty.
+    for (int i = 0; i < rank; i++) {
+        if (shape[i] == 0) {
+            return (new T[1], shape);
+        }
+    }
+
+    // Not an empty array!
+    throw new Exception("empty() used with nonempty shape");
 }
 
 private (T[], int[]) ReadStrArray<T>(int rank, string typeName, Func<T> ReadStrScalar)

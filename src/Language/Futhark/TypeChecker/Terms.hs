@@ -149,28 +149,36 @@ data ValBinding = BoundV Locality [TypeParam] PatternType
                 deriving (Show)
 
 -- | Type checking happens with access to this environment.  The
--- tables will be extended during type-checking as bindings come into
+-- 'TermScope' will be extended during type-checking as bindings come into
 -- scope.
+data TermEnv = TermEnv { termScope :: TermScope
+                       , termBreadCrumbs :: [BreadCrumb]
+                         -- ^ Most recent first.
+                       }
+
 data TermScope = TermScope { scopeVtable  :: M.Map VName ValBinding
                            , scopeTypeTable :: M.Map VName TypeBinding
+                           , scopeModTable :: M.Map VName Mod
                            , scopeNameMap :: NameMap
-                           , scopeBreadCrumbs :: [BreadCrumb]
-                             -- ^ Most recent first.
                            } deriving (Show)
 
 instance Semigroup TermScope where
-  TermScope vt1 tt1 nt1 bc1 <> TermScope vt2 tt2 nt2 bc2 =
-    TermScope (vt2 `M.union` vt1) (tt2 `M.union` tt1) (nt2 `M.union` nt1) (bc1 <> bc2)
-
-instance Monoid TermScope where
-  mempty = TermScope mempty mempty mempty mempty
+  TermScope vt1 tt1 mt1 nt1 <> TermScope vt2 tt2 mt2 nt2 =
+    TermScope (vt2 `M.union` vt1) (tt2 `M.union` tt1) (mt1 `M.union` mt2) (nt2 `M.union` nt1)
 
 envToTermScope :: Env -> TermScope
-envToTermScope env = TermScope vtable (envTypeTable env) (envNameMap env) mempty
+envToTermScope env = TermScope { scopeVtable = vtable
+                               , scopeTypeTable = envTypeTable env
+                               , scopeNameMap = envNameMap env
+                               , scopeModTable = envModTable env
+                               }
   where vtable = M.mapWithKey valBinding $ envVtable env
         valBinding k (TypeM.BoundV tps v) =
           BoundV Global tps $ v `setAliases`
           (if arrayRank v > 0 then S.singleton (AliasBound k) else mempty)
+
+withEnv :: TermEnv -> Env -> TermEnv
+withEnv tenv env = tenv { termScope = termScope tenv <> envToTermScope env }
 
 constraintTypeVars :: Constraints -> Names
 constraintTypeVars = mconcat . map f . M.elems
@@ -194,13 +202,13 @@ expType = normaliseType . typeOf
 type TermTypeState = (Constraints, Int)
 
 newtype TermTypeM a = TermTypeM (RWST
-                                 TermScope
+                                 TermEnv
                                  Occurences
                                  TermTypeState
                                  TypeM
                                  a)
   deriving (Monad, Functor, Applicative,
-            MonadReader TermScope,
+            MonadReader TermEnv,
             MonadWriter Occurences,
             MonadState TermTypeState,
             MonadError TypeError)
@@ -215,21 +223,27 @@ instance MonadUnify TermTypeM where
   newTypeVar loc desc = do
     i <- incCounter
     v <- newID $ mkTypeVarName desc i
-    modifyConstraints $ M.insert v $ NoConstraint Nothing $ mkUsage' loc
+    modifyConstraints $ M.insert v $ NoConstraint Lifted $ mkUsage' loc
     return $ Scalar $ TypeVar mempty Nonunique (typeName v) []
 
 instance MonadBreadCrumbs TermTypeM where
   breadCrumb bc = local $ \env ->
-    env { scopeBreadCrumbs = bc : scopeBreadCrumbs env }
-  getBreadCrumbs = asks scopeBreadCrumbs
+    env { termBreadCrumbs = bc : termBreadCrumbs env }
+  getBreadCrumbs = asks termBreadCrumbs
 
 runTermTypeM :: TermTypeM a -> TypeM (a, Occurences)
 runTermTypeM (TermTypeM m) = do
-  initial_scope <- (initialTermScope <>) <$> (envToTermScope <$> askEnv)
-  evalRWST m initial_scope (mempty, 0)
+  initial_scope <- (initialTermScope <>) . envToTermScope <$> askEnv
+  let initial_tenv = TermEnv { termScope = initial_scope
+                             , termBreadCrumbs = mempty
+                             }
+  evalRWST m initial_tenv (mempty, 0)
 
 liftTypeM :: TypeM a -> TermTypeM a
 liftTypeM = TermTypeM . lift
+
+localScope :: (TermScope -> TermScope) -> TermTypeM a -> TermTypeM a
+localScope f = local $ \tenv -> tenv { termScope = f $ termScope tenv }
 
 incCounter :: TermTypeM Int
 incCounter = do (x, i) <- get
@@ -237,14 +251,21 @@ incCounter = do (x, i) <- get
                 return i
 
 initialTermScope :: TermScope
-initialTermScope = TermScope initialVtable mempty topLevelNameMap mempty
+initialTermScope = TermScope { scopeVtable = initialVtable
+                             , scopeTypeTable = mempty
+                             , scopeNameMap = topLevelNameMap
+                             , scopeModTable = mempty
+                             }
   where initialVtable = M.fromList $ mapMaybe addIntrinsicF $ M.toList intrinsics
 
-        funF ts t = foldr (arrow . Scalar . Prim) (Scalar $ Prim t) ts
+        prim = Scalar . Prim
         arrow x y = Scalar $ Arrow mempty Unnamed x y
 
-        addIntrinsicF (name, IntrinsicMonoFun ts t) =
-          Just (name, BoundV Global [] $ funF ts t)
+        addIntrinsicF (name, IntrinsicMonoFun pts t) =
+          Just (name, BoundV Global [] $ arrow pts' $ prim t)
+          where pts' = case pts of [pt] -> prim pt
+                                   _    -> tupleRecord $ map prim pts
+
         addIntrinsicF (name, IntrinsicOverloadedFun ts pts rts) =
           Just (name, OverloadedF ts pts rts)
         addIntrinsicF (name, IntrinsicPolyFun tvs pts rt) =
@@ -266,34 +287,29 @@ instance MonadTypeChecker TermTypeM where
 
   checkQualName space name loc = snd <$> checkQualNameWithEnv space name loc
 
-  bindNameMap m = local $ \scope ->
+  bindNameMap m = localScope $ \scope ->
     scope { scopeNameMap = m <> scopeNameMap scope }
 
-  localEnv env (TermTypeM m) = do
-    cur_state <- get
-    cur_scope <- ask
-    let cur_scope' =
-          cur_scope { scopeNameMap = scopeNameMap cur_scope `M.difference` envNameMap env }
-    (x,new_state,occs) <- liftTypeM $ localTmpEnv env $
-                          runRWST m cur_scope' cur_state
-    tell occs
-    put new_state
-    return x
+  bindVal v (TypeM.BoundV tps t) = localScope $ \scope ->
+    scope { scopeVtable = M.insert v vb $ scopeVtable scope }
+    where vb = BoundV Local tps $ fromStruct t
 
   lookupType loc qn = do
-    outer_env <- liftTypeM askRootEnv
+    outer_env <- liftTypeM askEnv
     (scope, qn'@(QualName qs name)) <- checkQualNameWithEnv Type qn loc
     case M.lookup name $ scopeTypeTable scope of
       Nothing -> undefinedType loc qn
       Just (TypeAbbr l ps def) ->
         return (qn', ps, qualifyTypeVars outer_env (map typeParamName ps) qs def, l)
 
-  lookupMod loc name = liftTypeM $ TypeM.lookupMod loc name
-  lookupMTy loc name = liftTypeM $ TypeM.lookupMTy loc name
-  lookupImport loc name = liftTypeM $ TypeM.lookupImport loc name
+  lookupMod loc qn = do
+    (scope, qn'@(QualName _ name)) <- checkQualNameWithEnv Term qn loc
+    case M.lookup name $ scopeModTable scope of
+      Nothing -> unknownVariableError Term qn loc
+      Just m  -> return (qn', m)
 
   lookupVar loc qn = do
-    outer_env <- liftTypeM askRootEnv
+    outer_env <- liftTypeM askEnv
     (scope, qn'@(QualName qs name)) <- checkQualNameWithEnv Term qn loc
     let usage = mkUsage loc $ "use of " ++ quote (pretty qn)
 
@@ -342,20 +358,29 @@ instance MonadTypeChecker TermTypeM where
     return v'
 
 checkQualNameWithEnv :: Namespace -> QualName Name -> SrcLoc -> TermTypeM (TermScope, QualName VName)
-checkQualNameWithEnv space qn@(QualName [q] _) loc
-  | nameToString q == "intrinsics" = do
-      -- Check if we are referring to the magical intrinsics
-      -- module.
-      (_, QualName _ q') <- liftTypeM $ TypeM.checkQualNameWithEnv Term (qualName q) loc
-      if baseTag q' <= maxIntrinsicTag
-        then checkIntrinsic space qn loc
-        else checkReallyQualName space qn loc
 checkQualNameWithEnv space qn@(QualName quals name) loc = do
-  scope <- ask
-  case quals of
-    [] | Just name' <- M.lookup (space, name) $ scopeNameMap scope ->
-           return (scope, name')
-    _ -> checkReallyQualName space qn loc
+  scope <- asks termScope
+  descend scope quals
+  where descend scope []
+          | Just name' <- M.lookup (space, name) $ scopeNameMap scope =
+              return (scope, name')
+          | otherwise =
+              unknownVariableError space qn loc
+
+        descend scope (q:qs)
+          | Just (QualName _ q') <- M.lookup (Term, q) $ scopeNameMap scope,
+            Just res <- M.lookup q' $ scopeModTable scope =
+              case res of
+                -- Check if we are referring to the magical intrinsics
+                -- module.
+                _ | baseTag q' <= maxIntrinsicTag ->
+                      checkIntrinsic space qn loc
+                ModEnv q_scope -> do
+                  (scope', QualName qs' name') <- descend (envToTermScope q_scope) qs
+                  return (scope', QualName (q':qs') name')
+                ModFun{} -> unappliedFunctor loc
+          | otherwise =
+              unknownVariableError space qn loc
 
 checkIntrinsic :: Namespace -> QualName Name -> SrcLoc -> TermTypeM (TermScope, QualName VName)
 checkIntrinsic space qn@(QualName _ name) loc
@@ -363,15 +388,10 @@ checkIntrinsic space qn@(QualName _ name) loc
       me <- liftTypeM askImportName
       unless ("/futlib" `isPrefixOf` includeToString me) $
         warn loc "Using intrinsic functions directly can easily crash the compiler or result in wrong code generation."
-      scope <- ask
+      scope <- asks termScope
       return (scope, v)
   | otherwise =
       unknownVariableError space qn loc
-
-checkReallyQualName :: Namespace -> QualName Name -> SrcLoc -> TermTypeM (TermScope, QualName VName)
-checkReallyQualName space qn loc = do
-  (env, name') <- liftTypeM $ TypeM.checkQualNameWithEnv space qn loc
-  return (envToTermScope env, name')
 
 -- | Wrap 'Types.checkTypeDecl' to also perform an observation of
 -- every size in the type.
@@ -403,7 +423,7 @@ instantiateTypeParam :: Monoid as => SrcLoc -> TypeParam -> TermTypeM (VName, Su
 instantiateTypeParam loc tparam = do
   i <- incCounter
   v <- newID $ mkTypeVarName (takeWhile isAlpha (baseString (typeParamName tparam))) i
-  modifyConstraints $ M.insert v $ NoConstraint (Just l) $ mkUsage' loc
+  modifyConstraints $ M.insert v $ NoConstraint l $ mkUsage' loc
   return (v, Subst $ Scalar $ TypeVar mempty Nonunique (typeName v) [])
   where l = case tparam of TypeParamType x _ _ -> x
                            _                   -> Lifted
@@ -411,7 +431,7 @@ instantiateTypeParam loc tparam = do
 newArrayType :: SrcLoc -> String -> Int -> TermTypeM (TypeBase () (), TypeBase () ())
 newArrayType loc desc r = do
   v <- newID $ nameFromString desc
-  modifyConstraints $ M.insert v $ NoConstraint Nothing $ mkUsage' loc
+  modifyConstraints $ M.insert v $ NoConstraint Unlifted $ mkUsage' loc
   let rowt = TypeVar () Nonunique (typeName v) []
   return (Array () Nonunique rowt (ShapeDecl $ replicate r ()),
           Scalar rowt)
@@ -498,10 +518,10 @@ checkPattern' (Id name _ loc) _
   where name' = nameToString name
 
 checkPattern' (Id name NoInfo loc) (Ascribed t) = do
-  name' <- checkName Term name loc
+  name' <- newID name
   return $ Id name' (Info t) loc
 checkPattern' (Id name NoInfo loc) NoneInferred = do
-  name' <- checkName Term name loc
+  name' <- newID name
   t <- newTypeVar loc "t"
   return $ Id name' (Info t) loc
 
@@ -603,19 +623,19 @@ checkPattern' (PatternConstr n NoInfo ps loc) NoneInferred = do
   return $ PatternConstr n (Info t) ps' loc
   where usage = mkUsage loc "matching against constructor"
 
-bindPatternNames :: PatternBase NoInfo Name -> TermTypeM a -> TermTypeM a
-bindPatternNames = bindSpaced . map asTerm . S.toList . patternIdents
-  where asTerm v = (Term, identName v)
+patternNameMap :: Pattern -> NameMap
+patternNameMap = M.fromList . map asTerm . S.toList . patternIdents
+  where asTerm v = ((Term, baseName $ identName v), qualName $ identName v)
 
 checkPattern :: UncheckedPattern -> InferredType -> (Pattern -> TermTypeM a)
              -> TermTypeM a
 checkPattern p t m = do
   checkForDuplicateNames [p]
-  bindPatternNames p $
-    m =<< checkPattern' p t
+  p' <- checkPattern' p t
+  bindNameMap (patternNameMap p') $ m p'
 
 binding :: [Ident] -> TermTypeM a -> TermTypeM a
-binding bnds = check . local (`bindVars` bnds)
+binding bnds = check . localScope (`bindVars` bnds)
   where bindVars :: TermScope -> [Ident] -> TermScope
         bindVars = foldl bindVar
 
@@ -668,7 +688,7 @@ binding bnds = check . local (`bindVars` bnds)
 bindingTypes :: [(VName, (TypeBinding, Constraint))] -> TermTypeM a -> TermTypeM a
 bindingTypes types m = do
   modifyConstraints (<>M.map snd (M.fromList types))
-  local extend m
+  localScope extend m
   where extend scope = scope {
           scopeTypeTable = M.map fst (M.fromList types) <> scopeTypeTable scope
           }
@@ -767,7 +787,7 @@ unifies why t e = do
 -- it references, and which local to the current top-level function.
 lexicalClosure :: [Pattern] -> Occurences -> TermTypeM Aliasing
 lexicalClosure params closure = do
-  vtable <- asks scopeVtable
+  vtable <- asks $ scopeVtable . termScope
   let isLocal v = case v `M.lookup` vtable of
                     Just (BoundV Local _ _) -> True
                     _ -> False
@@ -874,17 +894,18 @@ checkExp (Ascript e decl NoInfo loc) = do
     typeError loc $ "Type " ++ quote (pretty t') ++ " is not a subtype of " ++
     quote (pretty decl_t') ++ "."
 
-  return $ Ascript e' decl' (Info (combineTypeShapes t $ fromStruct decl_t)) loc
+  let t'' = flip unifyTypeAliases t' $ combineTypeShapes t' $ fromStruct decl_t'
+  return $ Ascript e' decl' (Info t'') loc
 
-checkExp (BinOp op NoInfo (e1,_) (e2,_) NoInfo loc) = do
-  (op', ftype) <- lookupVar loc op
+checkExp (BinOp (op, oploc) NoInfo (e1,_) (e2,_) NoInfo loc) = do
+  (op', ftype) <- lookupVar oploc op
   (e1', e1_arg) <- checkArg e1
   (e2', e2_arg) <- checkArg e2
 
   (p1_t, rt) <- checkApply loc ftype e1_arg
   (p2_t, rt') <- checkApply loc rt e2_arg
 
-  return $ BinOp op' (Info ftype)
+  return $ BinOp (op', oploc) (Info ftype)
     (e1', Info $ toStruct p1_t) (e2', Info $ toStruct p2_t)
     (Info rt') loc
 
@@ -912,7 +933,7 @@ checkExp (Parens e loc) =
 checkExp (QualParens modname e loc) = do
   (modname',mod) <- lookupMod loc modname
   case mod of
-    ModEnv env -> localEnv (qualifyEnv modname' env) $ do
+    ModEnv env -> local (`withEnv` qualifyEnv modname' env) $ do
       e' <- checkExp e
       return $ QualParens modname' e' loc
     ModFun{} ->
@@ -992,7 +1013,7 @@ checkExp (LetFun name (tparams, params, maybe_retdecl, NoInfo, e) body loc) =
           bindF scope = scope { scopeVtable = M.insert name' entry $ scopeVtable scope
                               , scopeNameMap = M.insert (Term, name) (qualName name') $
                                                scopeNameMap scope }
-      body' <- local bindF $ checkExp body
+      body' <- localScope bindF $ checkExp body
 
       return $ LetFun name' (tparams', params', maybe_retdecl', Info rettype, e') body' loc
 
@@ -1006,7 +1027,7 @@ checkExp (LetWith dest src idxes ve body NoInfo loc) = do
     unless (unique $ unInfo $ identType src') $
       typeError loc $ "Source " ++ quote (pretty (identName src)) ++
       " has type " ++ pretty (unInfo $ identType src') ++ ", which is not unique."
-    vtable <- asks scopeVtable
+    vtable <- asks $ scopeVtable . termScope
     forM_ (aliases $ unInfo $ identType src') $ \v ->
       case aliasVar v `M.lookup` vtable of
         Just (BoundV Local _ v_t)
@@ -1222,6 +1243,7 @@ checkExp (DoLoop mergepat mergeexp form loopbody loc) =
     convergePattern pat body_cons body_t body_loc = do
       let consumed_merge = S.map identName (patternIdents pat) `S.intersection`
                            body_cons
+
           uniquePat (Wildcard (Info t) wloc) =
             Wildcard (Info $ t `setUniqueness` Nonunique) wloc
           uniquePat (PatternParens p ploc) =
@@ -1259,40 +1281,68 @@ checkExp (DoLoop mergepat mergeexp form loopbody loc) =
       -- Check that the new values of consumed merge parameters do not
       -- alias something bound outside the loop, AND that anything
       -- returned for a unique merge parameter does not alias anything
-      -- else returned.
-      bound_outside <- asks $ S.fromList . M.keys . scopeVtable
-      let checkMergeReturn (Id pat_v (Info pat_v_t) _) t
+      -- else returned.  We also update the aliases for the pattern.
+      bound_outside <- asks $ S.fromList . M.keys . scopeVtable . termScope
+      let combAliases t1 t2 =
+            case t1 of Scalar Record{} -> t1
+                       _ -> t1 `addAliases` (<>aliases t2)
+
+          checkMergeReturn (Id pat_v (Info pat_v_t) patloc) t
             | unique pat_v_t,
-              v:_ <- S.toList $ S.map aliasVar (aliases t) `S.intersection` bound_outside =
-                lift $ typeError loc $ "Loop return value corresponding to merge parameter " ++
+              v:_ <- S.toList $
+                     S.map aliasVar (aliases t) `S.intersection` bound_outside =
+                lift $ typeError loc $
+                "Loop return value corresponding to merge parameter " ++
                 quote (prettyName pat_v) ++ " aliases " ++ prettyName v ++ "."
+
             | otherwise = do
                 (cons,obs) <- get
                 unless (S.null $ aliases t `S.intersection` cons) $
-                  lift $ typeError loc $ "Loop return value for merge parameter " ++
-                  quote (prettyName pat_v) ++ " aliases other consumed merge parameter."
+                  lift $ typeError loc $
+                  "Loop return value for merge parameter " ++
+                  quote (prettyName pat_v) ++
+                  " aliases other consumed merge parameter."
                 when (unique pat_v_t &&
                       not (S.null (aliases t `S.intersection` (cons<>obs)))) $
-                  lift $ typeError loc $ "Loop return value for consuming merge parameter " ++
+                  lift $ typeError loc $
+                  "Loop return value for consuming merge parameter " ++
                   quote (prettyName pat_v) ++ " aliases previously returned value."
                 if unique pat_v_t
                   then put (cons<>aliases t, obs)
                   else put (cons, obs<>aliases t)
+
+                return $ Id pat_v (Info (combAliases pat_v_t t)) patloc
+
+          checkMergeReturn (Wildcard (Info pat_v_t) patloc) t =
+            return $ Wildcard (Info (combAliases pat_v_t t)) patloc
+
           checkMergeReturn (PatternParens p _) t =
             checkMergeReturn p t
+
           checkMergeReturn (PatternAscription p _ _) t =
             checkMergeReturn p t
-          checkMergeReturn (RecordPattern pfs _) (Scalar (Record tfs)) =
-            sequence_ $ M.elems $ M.intersectionWith checkMergeReturn (M.fromList pfs) tfs
-          checkMergeReturn (TuplePattern pats _) t | Just ts <- isTupleRecord t =
-            zipWithM_ checkMergeReturn pats ts
-          checkMergeReturn _ _ =
-            return ()
-      (pat_cons, _) <- execStateT (checkMergeReturn pat' body_t') (mempty, mempty)
+
+          checkMergeReturn (RecordPattern pfs patloc) (Scalar (Record tfs)) =
+            RecordPattern . M.toList <$> sequence pfs' <*> pure patloc
+            where pfs' = M.intersectionWith checkMergeReturn
+                         (M.fromList pfs) tfs
+
+          checkMergeReturn (TuplePattern pats patloc) t
+            | Just ts <- isTupleRecord t =
+                TuplePattern
+                <$> zipWithM checkMergeReturn pats ts
+                <*> pure patloc
+
+          checkMergeReturn p _ =
+            return p
+
+      (pat'', (pat_cons, _)) <-
+        runStateT (checkMergeReturn pat' body_t') (mempty, mempty)
+
       let body_cons' = body_cons <> S.map aliasVar pat_cons
-      if body_cons' == body_cons && patternType pat' == patternType pat
+      if body_cons' == body_cons && patternType pat'' == patternType pat
         then return pat'
-        else convergePattern pat' body_cons' body_t' body_loc
+        else convergePattern pat'' body_cons' body_t' body_loc
 
 checkExp (Constr name es NoInfo loc) = do
   t <- newTypeVar loc "t"
@@ -1832,7 +1882,7 @@ warnOnDubiousShapeAnnotations loc params rettype =
 
 checkGlobalAliases :: [Pattern] -> PatternType -> SrcLoc -> TermTypeM ()
 checkGlobalAliases params body_t loc = do
-  vtable <- asks scopeVtable
+  vtable <- asks $ scopeVtable . termScope
   let isLocal v = case v `M.lookup` vtable of
                     Just (BoundV Local _ _) -> True
                     _ -> False
@@ -1973,7 +2023,7 @@ closeOverTypes substs tparams t =
         closeOver (k, _)
           | k `elem` map typeParamName tparams =
               return Nothing
-        closeOver (k, NoConstraint (Just Unlifted) usage) =
+        closeOver (k, NoConstraint Unlifted usage) =
           return $ Just $ TypeParamType Unlifted k $ srclocOf usage
         closeOver (k, NoConstraint _ usage) =
           return $ Just $ TypeParamType Lifted k $ srclocOf usage
@@ -1996,7 +2046,7 @@ observe (Ident nm (Info t) loc) =
 -- | Proclaim that we have written to the given variable.
 consume :: SrcLoc -> Aliasing -> TermTypeM ()
 consume loc als = do
-  vtable <- asks scopeVtable
+  vtable <- asks $ scopeVtable . termScope
   let consumable v = case M.lookup v vtable of
                        Just (BoundV Local _ t)
                          | arrayRank t > 0 -> unique t
@@ -2013,7 +2063,7 @@ consume loc als = do
 consuming :: Ident -> TermTypeM a -> TermTypeM a
 consuming (Ident name (Info t) loc) m = do
   consume loc $ AliasBound name `S.insert` aliases t
-  local consume' m
+  localScope consume' m
   where consume' scope =
           scope { scopeVtable = M.insert name (WasConsumed loc) $ scopeVtable scope }
 
@@ -2047,7 +2097,7 @@ alternative m1 m2 = pass $ do
 
 -- | Make all bindings nonunique.
 noUnique :: TermTypeM a -> TermTypeM a
-noUnique = local (\scope -> scope { scopeVtable = M.map set $ scopeVtable scope})
+noUnique = localScope (\scope -> scope { scopeVtable = M.map set $ scopeVtable scope})
   where set (BoundV l tparams t)    = BoundV l tparams $ t `setUniqueness` Nonunique
         set (OverloadedF ts pts rt) = OverloadedF ts pts rt
         set EqualityF               = EqualityF
@@ -2055,7 +2105,7 @@ noUnique = local (\scope -> scope { scopeVtable = M.map set $ scopeVtable scope}
         set (WasConsumed loc)       = WasConsumed loc
 
 onlySelfAliasing :: TermTypeM a -> TermTypeM a
-onlySelfAliasing = local (\scope -> scope { scopeVtable = M.mapWithKey set $ scopeVtable scope})
+onlySelfAliasing = localScope (\scope -> scope { scopeVtable = M.mapWithKey set $ scopeVtable scope})
   where set k (BoundV l tparams t)    = BoundV l tparams $
                                         t `addAliases` S.intersection (S.singleton (AliasBound k))
         set _ (OverloadedF ts pts rt) = OverloadedF ts pts rt

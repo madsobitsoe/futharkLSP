@@ -155,7 +155,7 @@ transformType t = do
   -- As an attempt at an optimisation, only transform the aliases if
   -- they refer to a variable we have record-replaced.
   return $ if any ((`M.member` rrs) . aliasVar) $ aliases t
-           then bimap id (mconcat . map replace . S.toList) t
+           then second (mconcat . map replace . S.toList) t
            else t
 
 -- | Monomorphization of expressions.
@@ -205,8 +205,10 @@ transformExp (Var (QualName qs fname) (Info t) loc) = do
       t' <- transformType t
       return $ Var (QualName qs fname') (Info t') loc
 
-transformExp (Ascript e tp t loc) =
-  Ascript <$> transformExp e <*> pure tp <*> pure t <*> pure loc
+transformExp (Ascript e tp t loc) = do
+  noticeDims $ unInfo t
+  Ascript <$> transformExp e <*> pure tp <*>
+    traverse transformType t <*> pure loc
 
 transformExp (LetPat pat e1 e2 (Info t) loc) = do
   (pat', rr) <- transformPattern pat
@@ -282,11 +284,11 @@ transformExp (DoLoop pat e1 form e3 loc) = do
   e3' <- transformExp e3
   return $ DoLoop pat e1' form' e3' loc
 
-transformExp (BinOp (QualName qs fname) (Info t) (e1, d1) (e2, d2) tp loc) = do
+transformExp (BinOp (QualName qs fname, oploc) (Info t) (e1, d1) (e2, d2) tp loc) = do
   fname' <- transformFName fname (toStructural t)
   e1' <- transformExp e1
   e2' <- transformExp e2
-  return $ BinOp (QualName qs fname') (Info t) (e1', d1) (e2', d2) tp loc
+  return $ BinOp (QualName qs fname', oploc) (Info t) (e1', d1) (e2', d2) tp loc
 
 transformExp (Project n e tp loc) = do
   maybe_fs <- case e of
@@ -346,7 +348,7 @@ desugarBinOpSection :: QualName VName -> Maybe Exp -> Maybe Exp
 desugarBinOpSection qn e_left e_right t xtype ytype rettype loc = do
   (e1, p1) <- makeVarParam e_left $ fromStruct xtype
   (e2, p2) <- makeVarParam e_right $ fromStruct ytype
-  let body = BinOp qn (Info t) (e1, Info xtype) (e2, Info ytype) (Info rettype) loc
+  let body = BinOp (qn, loc) (Info t) (e1, Info xtype) (e2, Info ytype) (Info rettype) loc
       rettype' = toStruct rettype
   return $ Lambda (p1 ++ p2) body Nothing (Info (mempty, rettype')) loc
 

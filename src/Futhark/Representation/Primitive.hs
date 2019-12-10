@@ -81,6 +81,7 @@ module Futhark.Representation.Primitive
 import           Control.Applicative
 import           Data.Binary.IEEE754 (floatToWord, wordToFloat, doubleToWord, wordToDouble)
 import           Data.Bits
+import           Data.Fixed (mod') -- Weird location.
 import           Data.Int            (Int16, Int32, Int64, Int8)
 import qualified Data.Map as M
 import           Data.Word
@@ -88,7 +89,9 @@ import           Data.Word
 import           Prelude
 
 import           Futhark.Util.Pretty
-import           Futhark.Util (roundFloat, roundDouble, lgamma, lgammaf, tgamma, tgammaf)
+import           Futhark.Util (roundFloat, ceilFloat, floorFloat,
+                               roundDouble, ceilDouble, floorDouble,
+                               lgamma, lgammaf, tgamma, tgammaf)
 
 -- | An integer type, ordered by size.  Note that signedness is not a
 -- property of the type, but a property of the operations performed on
@@ -290,6 +293,7 @@ data BinOp = Add IntType -- ^ Integer addition.
              -- negativity infinity.  Note: this is different
              -- from LLVM.
            | FDiv FloatType -- ^ Floating-point division.
+           | FMod FloatType -- ^ Floating-point modulus.
 
            | UMod IntType
              -- ^ Unsigned integer modulus; the countepart to 'UDiv'.
@@ -401,6 +405,7 @@ allBinOps = concat [ map Add allIntTypes
                    , map UDiv allIntTypes
                    , map SDiv allIntTypes
                    , map FDiv allFloatTypes
+                   , map FMod allFloatTypes
                    , map UMod allIntTypes
                    , map SMod allIntTypes
                    , map SQuot allIntTypes
@@ -485,6 +490,7 @@ doBinOp FMul{}   = doFloatBinOp (*) (*)
 doBinOp UDiv{}   = doRiskyIntBinOp doUDiv
 doBinOp SDiv{}   = doRiskyIntBinOp doSDiv
 doBinOp FDiv{}   = doFloatBinOp (/) (/)
+doBinOp FMod{}   = doFloatBinOp mod' mod'
 doBinOp UMod{}   = doRiskyIntBinOp doUMod
 doBinOp SMod{}   = doRiskyIntBinOp doSMod
 doBinOp SQuot{}  = doRiskyIntBinOp doSQuot
@@ -782,6 +788,7 @@ binOpType (FAdd t)  = FloatType t
 binOpType (FSub t)  = FloatType t
 binOpType (FMul t)  = FloatType t
 binOpType (FDiv t)  = FloatType t
+binOpType (FMod t)  = FloatType t
 
 -- | The operand types of a comparison operator.
 cmpOpType :: CmpOp -> PrimType
@@ -833,8 +840,20 @@ primFuns = M.fromList
   , f32 "acos32" acos, f64 "acos64" acos
   , f32 "atan32" atan, f64 "atan64" atan
   , f32 "round32" roundFloat, f64 "round64" roundDouble
+  , f32 "ceil32" ceilFloat, f64 "ceil64" ceilDouble
+  , f32 "floor32" floorFloat, f64 "floor64" floorDouble
   , f32 "gamma32" tgammaf, f64 "gamma64" tgamma
   , f32 "lgamma32" lgammaf, f64 "lgamma64" lgamma
+
+  , i8 "clz8" $ IntValue . Int32Value . fromIntegral . countLeadingZeros
+  , i16 "clz16" $ IntValue . Int32Value . fromIntegral . countLeadingZeros
+  , i32 "clz32" $ IntValue . Int32Value . fromIntegral . countLeadingZeros
+  , i64 "clz64" $ IntValue . Int32Value . fromIntegral . countLeadingZeros
+
+  , i8 "popc8" $ IntValue . Int32Value . fromIntegral . popCount
+  , i16 "popc16" $ IntValue . Int32Value . fromIntegral . popCount
+  , i32 "popc32" $ IntValue . Int32Value . fromIntegral . popCount
+  , i64 "popc64" $ IntValue . Int32Value . fromIntegral . popCount
 
   , ("atan2_32",
      ([FloatType Float32, FloatType Float32], FloatType Float32,
@@ -896,9 +915,48 @@ primFuns = M.fromList
         [IntValue (Int64Value x)] ->
           Just $ FloatValue $ Float64Value $ wordToDouble $ fromIntegral x
         _ -> Nothing))
+
+  , ("lerp32",
+     ([FloatType Float32, FloatType Float32, FloatType Float32], FloatType Float32,
+      \case
+        [FloatValue (Float32Value v0),
+         FloatValue (Float32Value v1),
+         FloatValue (Float32Value t)] ->
+          Just $ FloatValue $ Float32Value $
+          v0 + (v1-v0)*max 0 (min 1 t)
+        _ -> Nothing))
+  , ("lerp64",
+     ([FloatType Float64, FloatType Float64, FloatType Float64], FloatType Float64,
+      \case
+        [FloatValue (Float64Value v0),
+         FloatValue (Float64Value v1),
+         FloatValue (Float64Value t)] ->
+          Just $ FloatValue $ Float64Value $
+          v0 + (v1-v0)*max 0 (min 1 t)
+        _ -> Nothing))
   ]
-  where f32 s f = (s, ([FloatType Float32], FloatType Float32, f32PrimFun f))
+  where i8 s f = (s, ([IntType Int8], IntType Int32, i8PrimFun f))
+        i16 s f = (s, ([IntType Int16], IntType Int32, i16PrimFun f))
+        i32 s f = (s, ([IntType Int32], IntType Int32, i32PrimFun f))
+        i64 s f = (s, ([IntType Int64], IntType Int32, i64PrimFun f))
+        f32 s f = (s, ([FloatType Float32], FloatType Float32, f32PrimFun f))
         f64 s f = (s, ([FloatType Float64], FloatType Float64, f64PrimFun f))
+
+        i8PrimFun f [IntValue (Int8Value x)] =
+          Just $ f x
+        i8PrimFun _ _ = Nothing
+
+        i16PrimFun f [IntValue (Int16Value x)] =
+          Just $ f x
+        i16PrimFun _ _ = Nothing
+
+        i32PrimFun f [IntValue (Int32Value x)] =
+          Just $ f x
+        i32PrimFun _ _ = Nothing
+
+        i64PrimFun f [IntValue (Int64Value x)] =
+          Just $ f x
+        i64PrimFun _ _ = Nothing
 
         f32PrimFun f [FloatValue (Float32Value x)] =
           Just $ FloatValue $ Float32Value $ f x
@@ -1007,6 +1065,7 @@ instance Pretty BinOp where
   ppr (SQuot t) = taggedI "squot" t
   ppr (SRem t)  = taggedI "srem" t
   ppr (FDiv t)  = taggedF "fdiv" t
+  ppr (FMod t)  = taggedF "fmod" t
   ppr (SMin t)  = taggedI "smin" t
   ppr (UMin t)  = taggedI "umin" t
   ppr (FMin t)  = taggedF "fmin" t

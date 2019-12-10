@@ -13,6 +13,18 @@ read :ref:`windows-installation`.  If you are using macOS, read
 Futhark is also available via `Nix <https://nixos.org/nix/>`_.  If you
 are using Nix, simply install the ``futhark`` derivation from Nixpkgs.
 
+Dependencies
+------------
+
+On non-Windows, you will need to have the ``gmp`` and ``tinfo``
+libraries installed.  These are pretty common, so you may already have
+them.  On Debian-like systems (e.g. Ubuntu), use::
+
+  sudo apt install libtinfo-dev libgmp-dev
+
+If you install Futhark via a package manager (e.g. Homebrew, Nix, or
+AUR), you shouldn't need to worry about this.
+
 Compiling from source
 ---------------------
 
@@ -113,6 +125,23 @@ above.
 
 .. _macos-installation:
 
+Using OpenCL or CUDA
+~~~~~~~~~~~~~~~~~~~~
+
+If you wish to use ``futhark opencl`` or ``futhark cuda``, you must
+have the OpenCL or CUDA libraries installed, respectively.  Consult
+your favourite search engine for instructions on how to do this on
+your distribution.  It is usually not terribly difficult if you
+already have working GPU drivers.
+
+For OpenCL, note that there is a distinction between the general
+OpenCL host library (``OpenCL.so``) that Futhark links against, and
+the *Installable Client Driver* (ICD) that OpenCL uses to actually
+talk to the hardware.  You will need both.  Working display drivers
+for the GPU does not imply that an ICD has been installed - they are
+usually in a separate package.  Consult your favourite search engine
+for details.
+
 Installing Futhark on macOS
 ---------------------------
 
@@ -147,11 +176,15 @@ generated Futhark executable.
 Setting up Futhark on Windows
 -----------------------------
 
-While the Futhark compiler itself is easily installed on Windows via
-``stack`` (see above), it takes a little more work to make the OpenCL
-and PyOpenCL backends functional.  This guide was last updated on the
-5th of May 2016, and is for computers using 64-bit Windows along with
-`CUDA 7.5`_ and Python 2.7 (`Anaconda`_ preferred).
+The Futhark compiler itself is easily installed on Windows via
+``stack`` (see above).  If you are using the default Windows console,
+you may need to run ``chcp 65001`` to make Unicode characters show up
+correctly.
+
+It takes a little more work to make the OpenCL and PyOpenCL backends
+functional.  This guide was last updated on the 5th of May 2016, and
+is for computers using 64-bit Windows along with `CUDA 7.5`_ and
+Python 2.7 (`Anaconda`_ preferred).
 
 Also `Git for Windows`_ is required for its Linux command line tools.
 If you have not marked the option to add them to path, there are

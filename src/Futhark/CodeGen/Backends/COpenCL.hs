@@ -26,9 +26,14 @@ compileProg prog = do
   res <- ImpGen.compileProg prog
   case res of
     Left err -> return $ Left err
-    Right (Program opencl_code opencl_prelude kernel_names types sizes prog') ->
+    Right (Program opencl_code opencl_prelude kernel_names types sizes prog') -> do
+      let cost_centres =
+            [copyDevToDev, copyDevToHost, copyHostToDev,
+             copyScalarToDev, copyScalarFromDev]
+            ++ kernel_names
       Right <$> GC.compileProg operations
-                (generateBoilerplate opencl_code opencl_prelude kernel_names types sizes)
+                (generateBoilerplate opencl_code opencl_prelude
+                 cost_centres kernel_names types sizes)
                 include_opencl_h [Space "device", DefaultSpace]
                 cliOptions prog'
   where operations :: GC.Operations OpenCL ()
@@ -50,6 +55,20 @@ compileProg prog = do
                                     "#else",
                                     "#include <CL/cl.h>",
                                     "#endif"]
+
+copyDevToDev, copyDevToHost, copyHostToDev, copyScalarToDev, copyScalarFromDev :: String
+copyDevToDev = "copy_dev_to_dev"
+copyDevToHost = "copy_dev_to_host"
+copyHostToDev = "copy_host_to_dev"
+copyScalarToDev = "copy_scalar_to_dev"
+copyScalarFromDev = "copy_scalar_from_dev"
+
+profilingEvent :: String -> C.Exp
+profilingEvent name =
+  [C.cexp|ctx->profiling_paused ? NULL
+          : opencl_get_event(&ctx->opencl,
+                             &ctx->$id:(kernelRuns name),
+                             &ctx->$id:(kernelRuntime name))|]
 
 cliOptions :: [Option]
 cliOptions = [ Option { optionLongName = "platform"
@@ -148,6 +167,11 @@ cliOptions = [ Option { optionLongName = "platform"
                             panic(1, "When loading tuning from '%s': %s\n", optarg, ret);
                           }}|]
                       }
+            , Option { optionLongName = "profile"
+                     , optionShortName = Just 'P'
+                     , optionArgument = NoArgument
+                     , optionAction = [C.cstm|futhark_context_config_set_profiling(cfg, 1);|]
+                     }
              ]
 
 -- We detect the special case of writing a constant and turn it into a
@@ -168,10 +192,10 @@ writeOpenCLScalar mem i t "device" _ val = do
                     clEnqueueWriteBuffer(ctx->opencl.queue, $exp:mem, $exp:blocking,
                                          $exp:i * sizeof($ty:t), sizeof($ty:t),
                                          &$id:val',
-                                         0, NULL, NULL));
+                                         0, NULL, $exp:(profilingEvent copyScalarToDev)));
                 }|]
 writeOpenCLScalar _ _ _ space _ _ =
-  fail $ "Cannot write to '" ++ space ++ "' memory space."
+  error $ "Cannot write to '" ++ space ++ "' memory space."
 
 readOpenCLScalar :: GC.ReadScalar OpenCL ()
 readOpenCLScalar mem i t "device" _ = do
@@ -181,24 +205,23 @@ readOpenCLScalar mem i t "device" _ = do
                    clEnqueueReadBuffer(ctx->opencl.queue, $exp:mem, CL_TRUE,
                                        $exp:i * sizeof($ty:t), sizeof($ty:t),
                                        &$id:val,
-                                       0, NULL, NULL));
+                                       0, NULL, $exp:(profilingEvent copyScalarFromDev)));
               |]
   return [C.cexp|$id:val|]
 readOpenCLScalar _ _ _ space _ =
-  fail $ "Cannot read from '" ++ space ++ "' memory space."
+  error $ "Cannot read from '" ++ space ++ "' memory space."
 
 allocateOpenCLBuffer :: GC.Allocate OpenCL ()
 allocateOpenCLBuffer mem size tag "device" =
   GC.stm [C.cstm|OPENCL_SUCCEED_OR_RETURN(opencl_alloc(&ctx->opencl, $exp:size, $exp:tag, &$exp:mem));|]
 allocateOpenCLBuffer _ _ _ space =
-  fail $ "Cannot allocate in '" ++ space ++ "' space."
+  error $ "Cannot allocate in '" ++ space ++ "' space."
 
 deallocateOpenCLBuffer :: GC.Deallocate OpenCL ()
 deallocateOpenCLBuffer mem tag "device" =
   GC.stm [C.cstm|OPENCL_SUCCEED_OR_RETURN(opencl_free(&ctx->opencl, $exp:mem, $exp:tag));|]
 deallocateOpenCLBuffer _ _ space =
-  fail $ "Cannot deallocate in '" ++ space ++ "' space"
-
+  error $ "Cannot deallocate in '" ++ space ++ "' space"
 
 copyOpenCLMemory :: GC.Copy OpenCL ()
 -- The read/write/copy-buffer functions fail if the given offset is
@@ -211,7 +234,7 @@ copyOpenCLMemory destmem destidx DefaultSpace srcmem srcidx (Space "device") nby
         clEnqueueReadBuffer(ctx->opencl.queue, $exp:srcmem, CL_TRUE,
                             $exp:srcidx, $exp:nbytes,
                             $exp:destmem + $exp:destidx,
-                            0, NULL, NULL));
+                            0, NULL, $exp:(profilingEvent copyHostToDev)));
    }
   |]
 copyOpenCLMemory destmem destidx (Space "device") srcmem srcidx DefaultSpace nbytes =
@@ -221,7 +244,7 @@ copyOpenCLMemory destmem destidx (Space "device") srcmem srcidx DefaultSpace nby
         clEnqueueWriteBuffer(ctx->opencl.queue, $exp:destmem, CL_TRUE,
                              $exp:destidx, $exp:nbytes,
                              $exp:srcmem + $exp:srcidx,
-                             0, NULL, NULL));
+                             0, NULL, $exp:(profilingEvent copyDevToHost)));
     }
   |]
 copyOpenCLMemory destmem destidx (Space "device") srcmem srcidx (Space "device") nbytes =
@@ -234,7 +257,7 @@ copyOpenCLMemory destmem destidx (Space "device") srcmem srcidx (Space "device")
                             $exp:srcmem, $exp:destmem,
                             $exp:srcidx, $exp:destidx,
                             $exp:nbytes,
-                            0, NULL, NULL));
+                            0, NULL, $exp:(profilingEvent copyDevToDev)));
       if (ctx->debugging) {
         OPENCL_SUCCEED_FATAL(clFinish(ctx->opencl.queue));
       }
@@ -248,7 +271,7 @@ copyOpenCLMemory _ _ destspace _ _ srcspace _ =
 openclMemoryType :: GC.MemoryType OpenCL ()
 openclMemoryType "device" = pure [C.cty|typename cl_mem|]
 openclMemoryType space =
-  fail $ "OpenCL backend does not support '" ++ space ++ "' memory space."
+  error $ "OpenCL backend does not support '" ++ space ++ "' memory space."
 
 staticOpenCLArray :: GC.StaticArray OpenCL ()
 staticOpenCLArray name "device" t vs = do
@@ -285,7 +308,7 @@ staticOpenCLArray name "device" t vs = do
   GC.item [C.citem|struct memblock_device $id:name = ctx->$id:name;|]
 
 staticOpenCLArray _ space _ _ =
-  fail $ "OpenCL backend cannot create static array in memory space '" ++ space ++ "'"
+  error $ "OpenCL backend cannot create static array in memory space '" ++ space ++ "'"
 
 callKernel :: GC.OpCompiler OpenCL ()
 callKernel (GetSize v key) =
@@ -299,8 +322,6 @@ callKernel (CmpSizeLe v key x) = do
 callKernel (GetSizeMax v size_class) =
   let field = "max_" ++ pretty size_class
   in GC.stm [C.cstm|$id:v = ctx->opencl.$id:field;|]
-callKernel (HostCode c) =
-  GC.compileCode c
 
 callKernel (LaunchKernel name args num_workgroups workgroup_size) = do
   zipWithM_ setKernelArg [(0::Int)..] args
@@ -350,19 +371,17 @@ launchKernel kernel_name num_workgroups workgroup_dims local_bytes = do
         $stms:(printKernelSize global_work_size)
         fprintf(stderr, "] and local work size [");
         $stms:(printKernelSize local_work_size)
-        fprintf(stderr, "]; local memory parameters sum to %d bytes.\n", $exp:local_bytes);
+        fprintf(stderr, "]; local memory parameters sum to %d bytes.\n", (int)$exp:local_bytes);
         $id:time_start = get_wall_time();
       }
       OPENCL_SUCCEED_OR_RETURN(
         clEnqueueNDRangeKernel(ctx->opencl.queue, ctx->$id:kernel_name, $int:kernel_rank, NULL,
                                $id:global_work_size, $id:local_work_size,
-                               0, NULL, NULL));
+                               0, NULL, $exp:(profilingEvent kernel_name)));
       if (ctx->debugging) {
         OPENCL_SUCCEED_FATAL(clFinish(ctx->opencl.queue));
         $id:time_end = get_wall_time();
         long int $id:time_diff = $id:time_end - $id:time_start;
-        ctx->$id:(kernelRuntime kernel_name) += $id:time_diff;
-        ctx->$id:(kernelRuns kernel_name)++;
         fprintf(stderr, "kernel %s runtime: %ldus\n",
                 $string:kernel_name, $id:time_diff);
       }

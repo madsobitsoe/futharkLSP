@@ -86,10 +86,10 @@ internaliseValBind fb@(E.ValBind entry fname retdecl (Info rettype) tparams para
 
     body' <- localScope constscope $ do
       msg <- case retdecl of
-               Just dt -> ErrorMsg .
+               Just dt -> errorMsg .
                           ("Function return value does not match shape of type ":) <$>
                           typeExpForError rcm dt
-               Nothing -> return $ ErrorMsg ["Function return value does not match shape of declared return type."]
+               Nothing -> return $ errorMsg ["Function return value does not match shape of declared return type."]
       internaliseBody body >>=
         ensureResultExtShape asserting msg loc (map I.fromDecl rettype')
 
@@ -303,7 +303,7 @@ internaliseExp desc (E.ArrayLit es (Info arr_t) loc)
       forM flat_arrs $ \flat_arr -> do
         flat_arr_t <- lookupType flat_arr
         let new_shape' = reshapeOuter (map (DimNew . constant) new_shape)
-                         1 $ arrayShape flat_arr_t
+                         1 $ I.arrayShape flat_arr_t
         letSubExp desc $ I.BasicOp $ I.Reshape new_shape' flat_arr
 
   | otherwise = do
@@ -433,7 +433,7 @@ internaliseExp desc (E.Ascript e (TypeDecl dt (Info et)) _ loc) = do
     let parts = ["Value of (core language) shape ("] ++
                 intersperse ", " (map ErrorInt32 dims) ++
                 [") cannot match shape of type `"] ++ dt' ++ ["`."]
-    ensureExtShape asserting (ErrorMsg parts) loc (I.fromDecl t') desc e'
+    ensureExtShape asserting (errorMsg parts) loc (I.fromDecl t') desc e'
 
 internaliseExp desc (E.Negate e _) = do
   e' <- internaliseExp1 "negate_arg" e
@@ -508,6 +508,7 @@ internaliseExp desc (E.DoLoop mergepat mergeexp form loopbody loc) = do
         merge_ts = existentialiseExtTypes merge_names $
                    staticShapes $ map (I.paramType . fst) merge
     loopbody'' <- localScope (scopeOfFParams $ map fst merge) $
+                  inScopeOf form' $
                   ensureResultExtShapeNoCtx asserting
                   "shape of loop result does not match shapes in loop parameters"
                   loc merge_ts loopbody'
@@ -658,7 +659,7 @@ internaliseExp desc (E.Unsafe e _) =
 internaliseExp desc (E.Assert e1 e2 (Info check) loc) = do
   e1' <- internaliseExp1 "assert_cond" e1
   c <- assertingOne $ letExp "assert_c" $
-       I.BasicOp $ I.Assert e1' (ErrorMsg [ErrorString check]) (loc, mempty)
+       I.BasicOp $ I.Assert e1' (errorMsg [ErrorString check]) (loc, mempty)
   -- Make sure there are some bindings to certify.
   certifying c $ mapM rebind =<< internaliseExp desc e2
   where rebind v = do
@@ -734,14 +735,14 @@ internaliseExp desc (E.If ce te fe _ _) =
 
 -- Builtin operators are handled specially because they are
 -- overloaded.
-internaliseExp desc (E.BinOp op _ (xe,_) (ye,_) _ loc)
+internaliseExp desc (E.BinOp (op, _) _ (xe,_) (ye,_) _ loc)
   | Just internalise <- isOverloadedFunction op [xe, ye] loc =
       internalise desc
 
 -- User-defined operators are just the same as a function call.
-internaliseExp desc (E.BinOp op (Info t) (xarg, Info xt) (yarg, Info yt) _ loc) =
+internaliseExp desc (E.BinOp (op, oploc) (Info t) (xarg, Info xt) (yarg, Info yt) _ loc) =
   internaliseExp desc $
-  E.Apply (E.Apply (E.Var op (Info t) loc) xarg (Info $ E.diet xt)
+  E.Apply (E.Apply (E.Var op (Info t) oploc) xarg (Info $ E.diet xt)
            (Info $ foldFunType [E.fromStruct yt] t) loc)
           yarg (Info $ E.diet yt) (Info t) loc
 
@@ -867,7 +868,7 @@ internaliseSlice loc dims idxs = do
  (idxs', oks, parts) <- unzip3 <$> zipWithM internaliseDimIndex dims idxs
  c <- assertingOne $ do
    ok <- letSubExp "index_ok" =<< foldBinOp I.LogAnd (constant True) oks
-   let msg = ErrorMsg $ ["Index ["] ++ intercalate [", "] parts ++
+   let msg = errorMsg $ ["Index ["] ++ intercalate [", "] parts ++
              ["] out of bounds for array of shape ["] ++
              intersperse "][" (map ErrorInt32 $ take (length idxs) dims) ++ ["]."]
    letExp "index_certs" $ I.BasicOp $ I.Assert ok msg (loc, mempty)
@@ -972,22 +973,23 @@ internaliseScanOrReduce desc what f (lam, ne, arr, loc) = do
   w <- arraysSize 0 <$> mapM lookupType arrs
   letTupExp' desc . I.Op =<< f w lam' nes' arrs
 
-internaliseGenReduce :: String
-                     -> E.Exp -> E.Exp -> E.Exp -> E.Exp -> E.Exp -> SrcLoc
-                     -> InternaliseM [SubExp]
-internaliseGenReduce desc hist op ne buckets img loc = do
-  ne' <- internaliseExp "gen_reduce_ne" ne
-  hist' <- internaliseExpToVars "gen_reduce_hist" hist
-  buckets' <- letExp "gen_reduce_buckets" . BasicOp . SubExp =<<
-              internaliseExp1 "gen_reduce_buckets" buckets
-  img' <- internaliseExpToVars "gen_reduce_img" img
+internaliseHist :: String
+                -> E.Exp -> E.Exp -> E.Exp -> E.Exp -> E.Exp -> E.Exp -> SrcLoc
+                -> InternaliseM [SubExp]
+internaliseHist desc rf hist op ne buckets img loc = do
+  rf' <- internaliseExp1 "hist_rf" rf
+  ne' <- internaliseExp "hist_ne" ne
+  hist' <- internaliseExpToVars "hist_hist" hist
+  buckets' <- letExp "hist_buckets" . BasicOp . SubExp =<<
+              internaliseExp1 "hist_buckets" buckets
+  img' <- internaliseExpToVars "hist_img" img
 
   -- reshape neutral element to have same size as the destination array
   ne_shp <- forM (zip ne' hist') $ \(n, h) -> do
     rowtype <- I.stripArray 1 <$> lookupType h
     ensureShape asserting
       "Row shape of destination array does not match shape of neutral element"
-      loc rowtype "gen_reduce_ne_right_shape" n
+      loc rowtype "hist_ne_right_shape" n
   ne_ts <- mapM I.subExpType ne_shp
   his_ts <- mapM lookupType hist'
   op' <- internaliseFoldLambda internaliseLambda op ne_ts his_ts
@@ -1001,7 +1003,7 @@ internaliseGenReduce desc hist op ne buckets img loc = do
       body = mkBody mempty $ map (I.Var . paramName) params
   body' <- localScope (scopeOfLParams params) $
            ensureResultShape asserting
-           "Row shape of value array does not match row shape of gen_reduce target"
+           "Row shape of value array does not match row shape of hist target"
            (srclocOf img) rettype body
 
   -- get sizes of histogram and image arrays
@@ -1010,7 +1012,7 @@ internaliseGenReduce desc hist op ne buckets img loc = do
 
   -- Generate an assertion and reshapes to ensure that buckets' and
   -- img' are the same size.
-  b_shape <- arrayShape <$> lookupType buckets'
+  b_shape <- I.arrayShape <$> lookupType buckets'
   let b_w = shapeSize 0 b_shape
   cmp <- letSubExp "bucket_cmp" $ I.BasicOp $ I.CmpOp (I.CmpEq I.int32) b_w w_img
   c <- assertingOne $
@@ -1020,7 +1022,7 @@ internaliseGenReduce desc hist op ne buckets img loc = do
     I.BasicOp $ I.Reshape (reshapeOuter [DimCoercion w_img] 1 b_shape) buckets'
 
   letTupExp' desc $ I.Op $
-    I.GenReduce w_img [GenReduceOp w_hist hist' ne_shp op'] (I.Lambda params body' rettype) $ buckets'' : img'
+    I.Hist w_img [HistOp w_hist rf' hist' ne_shp op'] (I.Lambda params body' rettype) $ buckets'' : img'
 
 internaliseStreamMap :: String -> StreamOrd -> E.Exp -> E.Exp
                      -> InternaliseM [SubExp]
@@ -1157,6 +1159,8 @@ internaliseBinOp desc E.Mod x y (E.Signed t) _ =
   simpleBinOp desc (I.SMod t) x y
 internaliseBinOp desc E.Mod x y (E.Unsigned t) _ =
   simpleBinOp desc (I.UMod t) x y
+internaliseBinOp desc E.Mod x y (E.FloatType t) _ =
+  simpleBinOp desc (I.FMod t) x y
 internaliseBinOp desc E.Quot x y (E.Signed t) _ =
   simpleBinOp desc (I.SQuot t) x y
 internaliseBinOp desc E.Quot x y (E.Unsigned t) _ =
@@ -1302,7 +1306,7 @@ isOverloadedFunction qname args loc = do
           x' <- internaliseExp1 "x" x
           fmap pure $ letSubExp desc $ I.BasicOp $ I.UnOp unop x'
 
-    handle [x,y] s
+    handle [TupLit [x,y] _] s
       | Just bop <- find ((==s) . pretty) allBinOps = Just $ \desc -> do
           x' <- internaliseExp1 "x" x
           y' <- internaliseExp1 "y" y
@@ -1409,7 +1413,7 @@ isOverloadedFunction qname args loc = do
       certifying dim_ok $ forM arrs $ \arr' -> do
         arr_t <- lookupType arr'
         letSubExp desc $ I.BasicOp $
-          I.Reshape (reshapeOuter [DimNew n', DimNew m'] 1 $ arrayShape arr_t) arr'
+          I.Reshape (reshapeOuter [DimNew n', DimNew m'] 1 $ I.arrayShape arr_t) arr'
 
     handle [arr] "flatten" = Just $ \desc -> do
       arrs <- internaliseExpToVars "flatten_arr" arr
@@ -1419,7 +1423,7 @@ isOverloadedFunction qname args loc = do
             m = arraySize 1 arr_t
         k <- letSubExp "flat_dim" $ I.BasicOp $ I.BinOp (Mul Int32) n m
         letSubExp desc $ I.BasicOp $
-          I.Reshape (reshapeOuter [DimNew k] 2 $ arrayShape arr_t) arr'
+          I.Reshape (reshapeOuter [DimNew k] 2 $ I.arrayShape arr_t) arr'
 
     handle [TupLit [x, y] _] "concat" = Just $ \desc -> do
       xs <- internaliseExpToVars "concat_x" x
@@ -1502,8 +1506,8 @@ isOverloadedFunction qname args loc = do
     handle [TupLit [f, arr] _] "map_stream_per" = Just $ \desc ->
       internaliseStreamMap desc Disorder f arr
 
-    handle [TupLit [dest, op, ne, buckets, img] _] "gen_reduce" = Just $ \desc ->
-      internaliseGenReduce desc dest op ne buckets img loc
+    handle [TupLit [rf, dest, op, ne, buckets, img] _] "hist" = Just $ \desc ->
+      internaliseHist desc rf dest op ne buckets img loc
 
     handle [x] "unzip" = Just $ flip internaliseExp x
     handle [x] "trace" = Just $ flip internaliseExp x
@@ -1793,3 +1797,12 @@ dimDeclForError cm (NamedDim d) = do
 dimDeclForError _ (ConstDim d) =
   return $ ErrorString $ pretty d
 dimDeclForError _ AnyDim = return ""
+
+-- A smart constructor that compacts neighbouring literals for easier
+-- reading in the IR.
+errorMsg :: [ErrorMsgPart a] -> ErrorMsg a
+errorMsg = ErrorMsg . compact
+  where compact [] = []
+        compact (ErrorString x : ErrorString y : parts) =
+          compact (ErrorString (x++y) : parts)
+        compact (x:y) = x : compact y

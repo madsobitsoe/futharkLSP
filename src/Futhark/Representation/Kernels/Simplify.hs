@@ -87,12 +87,13 @@ simplifyKernelOp _ (SegOp (SegScan lvl space scan_op nes ts kbody)) = do
   return (SegOp $ SegScan lvl' space' scan_op' nes' ts' kbody',
           hoisted)
 
-simplifyKernelOp _ (SegOp (SegGenRed lvl space ops ts kbody)) = do
+simplifyKernelOp _ (SegOp (SegHist lvl space ops ts kbody)) = do
   (lvl', space', ts') <- Engine.simplify (lvl, space, ts)
 
   (ops', ops_hoisted) <- fmap unzip $ forM ops $
-    \(GenReduceOp w arrs nes dims lam) -> do
+    \(HistOp w rf arrs nes dims lam) -> do
       w' <- Engine.simplify w
+      rf' <- Engine.simplify rf
       arrs' <- Engine.simplify arrs
       nes' <- Engine.simplify nes
       dims' <- Engine.simplify dims
@@ -100,28 +101,32 @@ simplifyKernelOp _ (SegOp (SegGenRed lvl space ops ts kbody)) = do
         Engine.localVtable (<>scope_vtable) $
         Engine.simplifyLambda lam $
         replicate (length nes * 2) Nothing
-      return (GenReduceOp w' arrs' nes' dims' lam',
+      return (HistOp w' rf' arrs' nes' dims' lam',
               op_hoisted)
 
   (kbody', body_hoisted) <- simplifyKernelBody space kbody
 
-  return (SegOp $ SegGenRed lvl' space' ops' ts' kbody',
+  return (SegOp $ SegHist lvl' space' ops' ts' kbody',
           mconcat ops_hoisted <> body_hoisted)
 
   where scope = scopeOfSegSpace space
         scope_vtable = ST.fromScope scope
 
-simplifyKernelOp _ (SplitSpace o w i elems_per_thread) =
-  (,) <$> (SplitSpace <$> Engine.simplify o <*> Engine.simplify w
-           <*> Engine.simplify i <*> Engine.simplify elems_per_thread)
+simplifyKernelOp _ (SizeOp (SplitSpace o w i elems_per_thread)) =
+  (,) <$> (SizeOp <$>
+           (SplitSpace <$> Engine.simplify o <*> Engine.simplify w
+            <*> Engine.simplify i <*> Engine.simplify elems_per_thread))
       <*> pure mempty
-simplifyKernelOp _ (GetSize key size_class) =
-  return (GetSize key size_class, mempty)
-simplifyKernelOp _ (GetSizeMax size_class) =
-  return (GetSizeMax size_class, mempty)
-simplifyKernelOp _ (CmpSizeLe key size_class x) = do
+simplifyKernelOp _ (SizeOp (GetSize key size_class)) =
+  return (SizeOp $ GetSize key size_class, mempty)
+simplifyKernelOp _ (SizeOp (GetSizeMax size_class)) =
+  return (SizeOp $ GetSizeMax size_class, mempty)
+simplifyKernelOp _ (SizeOp (CmpSizeLe key size_class x)) = do
   x' <- Engine.simplify x
-  return (CmpSizeLe key size_class x', mempty)
+  return (SizeOp $ CmpSizeLe key size_class x', mempty)
+simplifyKernelOp _ (SizeOp (CalcNumGroups w max_num_groups group_size)) = do
+  w' <- Engine.simplify w
+  return (SizeOp $ CalcNumGroups w' max_num_groups group_size, mempty)
 
 simplifyRedOrScan :: (Engine.SimplifiableLore lore, BodyAttr lore ~ ()) =>
                      SegSpace
