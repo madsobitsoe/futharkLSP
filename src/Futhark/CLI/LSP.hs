@@ -29,8 +29,12 @@ import           System.Exit
 import qualified System.Log.Logger                     as L
 import qualified Data.Rope.UTF16                       as Rope
 -- Mads adding imports
-import Futhark.Compiler (readProgram)
+import Futhark.Compiler (readProgram, readProgramOrDie)
 import Futhark.Pipeline (runFutharkM, Verbosity(..))
+import Data.Loc
+import Language.Futhark.Query
+import Language.Futhark.Syntax
+import Text.Read (readMaybe)
 import Debug.Trace
 import System.IO
 --  Mads done importing stuff
@@ -48,7 +52,7 @@ main = mainWithOptions () [] "" $ \args () -> do
 -- dump the warnings from the compiler
 
 dump :: String -> IO ()
-dump s = hPutStr stderr s
+dump s = hPutStrLn stderr s
 
 dumpStatus :: Maybe String -> IO ()
 dumpStatus file = 
@@ -247,25 +251,31 @@ reactor lf inp = do
         -- The third argument, Nothing, is an optional "_workDoneToken" 
         let J.TextDocumentPositionParams _doc pos Nothing = req ^. J.params
             J.Position _l _c' = pos
+            J.TextDocumentIdentifier _uri = _doc
+        liftIO $ dump $ show $  J.uriToFilePath _uri
 
-
-        let
-          ht = Just $ J.Hover ms (Just range)
-          -- We assume ms is short for message or the like
-          -- We need to use <> for string concatenation, since T.Text values are not strings
-          -- T.pack has type string -> T.Text and can be used to convert a string
-          -- show can convert ints to strings
-          -- Instead of using the IO monad to print values, we can use Trace.Debug. traceShowId is (almost) equivalent to show. 
-          -- It calls show on our value, prints it as a sideffect, and passes that value on
-          ms = J.HoverContents $ J.markedUpContent ("Line: " <> T.pack (show $ _l + 1) <> "\tColumn: " <> T.pack (show $ _c') <> "\nlsp-hover-request") "TYPE INFO GOES HERE"   --"lsp-hello" "TYPE INFO"
-          range = J.Range pos pos
+        do
+          lf <- ask
+          liftIO $ getHoverInfo (J.uriToFilePath _uri) _l _c' req lf
+        -- let
+        --   ht = Just $ J.Hover ms (Just range)
+        --   -- We assume ms is short for message or the like
+        --   -- We need to use <> for string concatenation, since T.Text values are not strings
+        --   -- T.pack has type string -> T.Text and can be used to convert a string
+        --   -- show can convert ints to strings
+        --   -- Instead of using the IO monad to print values, we can use Trace.Debug. traceShowId is (almost) equivalent to show. 
+        --   -- It calls show on our value, prints it as a sideffect, and passes that value on
+        --   ms = J.HoverContents $ J.markedUpContent ("Line: " <> T.pack (show $ _l + 1) <> "\tColumn: " <> T.pack (show $ _c') <> "\nlsp-hover-request") "TYPE INFO GOES HERE"   
+        --   range = J.Range pos pos
           -- Builds the response and sends it back to the client.
           -- traceShowId ht will debug-print all messages to stderr
 
         -- dump compile status to stderr
---        liftIO dumpStatus
 
-        reactorSend $ RspHover $ Core.makeResponseMessage req $ traceShowId ht
+
+        -- get info at point, make it T.Text and use the reactor to fire it into the atmosphere (of visual studio code, the deadest place of all)
+--        reactorSend $ RspHover $ Core.makeResponseMessage req $ traceShowId ht
+
 
       -- -------------------------------
 
@@ -366,6 +376,43 @@ getStatus file =
       case res of
         Left _ -> return $ T.pack $ "Failed to compile " ++ filename ++ "\n"
         Right (w,_,_) -> return $ T.pack $ show w
+
+
+getHoverInfo :: Maybe FilePath -> Int -> Int -> J.HoverRequest -> Core.LspFuncs () -> IO ()
+getHoverInfo filename line col req lf = do
+  case filename of
+    Nothing -> dump "No file was supplied\n"
+    Just filename -> do
+      res <- runFutharkM (readProgram filename) NotVerbose
+      case res of
+        Left _ -> do dump "compilation failed on hover request.\n"
+        Right (_,imports,_) -> do
+          case atPos imports $ Pos filename (line+1) col 0 of
+            --      case atPos imports pos of
+            Nothing -> dump "No information available\n"
+            Just (AtName qn def loc) -> do
+              -- dump $ "Name: " ++ pretty qn ++ "\n"
+              -- dump $ "Position: " ++ locStr loc ++ "\n"
+              case def of
+                Nothing -> return ()
+                Just (BoundTerm t defloc) -> do
+                  -- dump $ "Type: " ++ pretty t ++ "\n"
+                  -- dump $ "Definition: " ++ locStr (srclocOf defloc) ++ "\n"
+                  let
+                    ht = Just $ J.Hover ms (Just range)
+                    ms = J.HoverContents $ J.markedUpContent  ""
+                        (T.pack ( "Name: " ++ pretty qn ++ "\n" ++
+                        "Position: " ++ locStr loc ++ "\n" ++
+                        "Type: " ++ pretty t ++ "\n" ++
+                        "Definition: " ++locStr (srclocOf defloc) ++ "\n")) 
+                    range = J.Range (J.Position line col) (J.Position line col) 
+
+                  Core.sendFunc lf $ RspHover $ Core.makeResponseMessage req $ traceShowId ht
+--                  return ()
+      
+
+                  
+  
 
 getAndPublishStatus :: J.NormalizedUri -> Maybe Int -> Maybe String -> Core.LspFuncs () -> IO ()
 getAndPublishStatus uri version fileName lf =
