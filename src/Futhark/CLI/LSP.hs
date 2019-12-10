@@ -199,7 +199,7 @@ reactor lf inp = do
                                  . to J.toNormalizedUri
         mdoc <- liftIO $ Core.getVirtualFileFunc lf doc
         case mdoc of
-          Just (VirtualFile _version str _) -> do
+          Just (VirtualFile _version str) -> do
             liftIO $ U.logs $ "reactor:processing NotDidChangeTextDocument: vf got:" ++ (show $ Rope.toString str)
           Nothing -> do
             liftIO $ U.logs "reactor:processing NotDidChangeTextDocument: vf returned Nothing"
@@ -244,7 +244,8 @@ reactor lf inp = do
 
       HandlerRequest (ReqHover req) -> do
         liftIO $ U.logs $ "reactor:got HoverRequest:" ++ show req
-        let J.TextDocumentPositionParams _doc pos = req ^. J.params
+        -- The third argument, Nothing, is an optional "_workDoneToken" 
+        let J.TextDocumentPositionParams _doc pos Nothing = req ^. J.params
             J.Position _l _c' = pos
 
 
@@ -406,7 +407,7 @@ syncOptions = J.TextDocumentSyncOptions
 
 lspOptions :: Core.Options
 lspOptions = def { Core.textDocumentSync = Just syncOptions
-                 , Core.executeCommandProvider = Just (J.ExecuteCommandOptions (J.List ["lsp-hello-command"]))
+--                 , Core.executeCommandProvider = Just (J.ExecuteCommandOptions (J.List ["lsp-hello-command"]))
                  }
 
 lspHandlers :: TChan ReactorInput -> Core.Handlers
@@ -421,7 +422,7 @@ lspHandlers rin =
       , Core.cancelNotificationHandler                = Just $ passHandler rin NotCancelRequestFromClient
       , Core.responseHandler                          = Just $ responseHandlerCb rin
       , Core.codeActionHandler                        = Just $ passHandler rin ReqCodeAction
-      , Core.executeCommandHandler                    = Just $ passHandler rin ReqExecuteCommand
+--      , Core.executeCommandHandler                    = Just $ passHandler rin ReqExecuteCommand
       }
 
 passHandler :: TChan ReactorInput -> (a -> FromClientMessage) -> Core.Handler a
