@@ -426,6 +426,10 @@ getAndPublishStatus uri version fileName lf =
           Left e -> do
             dump $ show e -- dump to stderr (debug)
               -- TODO: Parse "show e" for error message, line and column numbers.
+              -- /:(\d+):(\d+)-(\d+): ?\n? +(.+)/
+              -- group1 + group2 = startPos
+              -- group1 + group3 = endPos
+              -- group4          = message
             let diags =
                   [J.Diagnostic
                     (J.Range (J.Position 0 1) (J.Position 0 5))
@@ -439,6 +443,10 @@ getAndPublishStatus uri version fileName lf =
           Right (w,_,_) -> do
             dump $ show w -- dump to stderr (debug)
               -- TODO: Parse "show w" for warning message, line and column numbers.
+              -- /:(\d+):(\d+)-(\d+): ?\n? +(.+)/
+              -- group1 + group2 = startPos
+              -- group1 + group3 = endPos
+              -- group4          = message
             let diags =
                   [J.Diagnostic
                    (J.Range (J.Position 0 1) (J.Position 0 5))
