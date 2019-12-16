@@ -388,9 +388,9 @@ getHoverInfo filename line col req lf = do
       case res of
         Left _ -> do dump "compilation failed on hover request.\n"
         Right (_,imports,_) -> do
-          case atPos imports $ Pos filename (line+1) col 0 of
+          case atPos imports $ Pos filename (line+1) (col+1) 0 of
             --      case atPos imports pos of
-            Nothing -> dump "No information available\n"
+            Nothing -> return ()-- dump "No information available\n"
             Just (AtName qn def loc) -> do
               -- dump $ "Name: " ++ pretty qn ++ "\n"
               -- dump $ "Position: " ++ locStr loc ++ "\n"
@@ -410,10 +410,7 @@ getHoverInfo filename line col req lf = do
 
                   Core.sendFunc lf $ RspHover $ Core.makeResponseMessage req $ traceShowId ht
 --                  return ()
-      
-
-                  
-  
+ 
 
 getAndPublishStatus :: J.NormalizedUri -> Maybe Int -> Maybe String -> Core.LspFuncs () -> IO ()
 getAndPublishStatus uri version fileName lf =
@@ -426,21 +423,35 @@ getAndPublishStatus uri version fileName lf =
         dump $ "filename: " ++ filename
         res <- runFutharkM (readProgram filename) NotVerbose
         case res of
-          Left e -> dump $ show e --dump "compilation failed.\n" -- dump to stderr (debug)
+          Left e -> do
+            dump $ show e -- dump to stderr (debug)
+              -- TODO: Parse "show e" for error message, line and column numbers.
+            let diags =
+                  [J.Diagnostic
+                    (J.Range (J.Position 0 1) (J.Position 0 5))
+                    (Just J.DsError)  -- severity
+                    Nothing  -- code
+                    (Just "error?") -- source
+                    (T.pack $ show e) -- Convert the warnings to T.text and put them in diags
+                    (Just (J.List []))
+                  ]
+            (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
           Right (w,_,_) -> do
             dump $ show w -- dump to stderr (debug)
+              -- TODO: Parse "show w" for warning message, line and column numbers.
             let diags =
                   [J.Diagnostic
                    (J.Range (J.Position 0 1) (J.Position 0 5))
                    (Just J.DsWarning)  -- severity
                    Nothing  -- code
-                   (Just "lsp-hello") -- source
+                   (Just "warning?") -- source
                    (T.pack $ show w) -- Convert the warnings to T.text and put them in diags
                    (Just (J.List []))
                   ]
-            -- lf is the LSP server Method
-            -- (Core.publishDiagnosticsFunc lf) gives us a function that can send diagnostics to the client
-            -- 100 is max_warnings. TODO Replace with variable
+            -- * lf is the LSP server Method
+            -- * (Core.publishDiagnosticsFunc lf) gives us a function that can 
+            --   send diagnostics to the client
+            -- * 100 is max_warnings. TODO Replace with variable
             (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
     
 
@@ -455,7 +466,7 @@ syncOptions = J.TextDocumentSyncOptions
 
 lspOptions :: Core.Options
 lspOptions = def { Core.textDocumentSync = Just syncOptions
---                 , Core.executeCommandProvider = Just (J.ExecuteCommandOptions (J.List ["lsp-hello-command"]))
+-- deprecated (?)                , Core.executeCommandProvider = Just (J.ExecuteCommandOptions (J.List ["lsp-hello-command"]))
                  }
 
 lspHandlers :: TChan ReactorInput -> Core.Handlers
@@ -470,7 +481,7 @@ lspHandlers rin =
       , Core.cancelNotificationHandler                = Just $ passHandler rin NotCancelRequestFromClient
       , Core.responseHandler                          = Just $ responseHandlerCb rin
       , Core.codeActionHandler                        = Just $ passHandler rin ReqCodeAction
---      , Core.executeCommandHandler                    = Just $ passHandler rin ReqExecuteCommand
+-- deprecated (?) , Core.executeCommandHandler                    = Just $ passHandler rin ReqExecuteCommand
       }
 
 passHandler :: TChan ReactorInput -> (a -> FromClientMessage) -> Core.Handler a
