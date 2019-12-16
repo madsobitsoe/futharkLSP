@@ -39,6 +39,7 @@ import Debug.Trace
 import System.IO
 --  Mads done importing stuff
 import           Futhark.Util.Options (mainWithOptions)
+import Futhark.Error
 
 main :: String -> [String] -> IO ()
 main = mainWithOptions () [] "" $ \args () -> do
@@ -425,7 +426,7 @@ getAndPublishStatus uri version fileName lf =
         dump $ "filename: " ++ filename
         res <- runFutharkM (readProgram filename) NotVerbose
         case res of
-          Left _ -> dump "compilation failed.\n" -- dump to stderr (debug)
+          Left e -> dump $ show e --dump "compilation failed.\n" -- dump to stderr (debug)
           Right (w,_,_) -> do
             dump $ show w -- dump to stderr (debug)
             let diags =
