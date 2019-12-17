@@ -40,6 +40,7 @@ import System.IO
 --  Mads done importing stuff
 import           Futhark.Util.Options (mainWithOptions)
 import Futhark.Error
+import Text.Regex
 
 main :: String -> [String] -> IO ()
 main = mainWithOptions () [] "" $ \args () -> do
@@ -193,6 +194,8 @@ reactor lf inp = do
             fileName =  J.uriToFilePath doc
         liftIO $ U.logs $ "********* fileName=" ++ show fileName
         sendDiagnostics (J.toNormalizedUri doc) (Just 0)
+        lf <- ask
+        liftIO $ getAndPublishStatus (J.toNormalizedUri doc) Nothing fileName lf
 
       -- -------------------------------
 
@@ -221,8 +224,8 @@ reactor lf inp = do
                                  . J.uri
             fileName = J.uriToFilePath doc
         liftIO $ U.logs $ "********* fileName=" ++ show fileName
-        liftIO $ hPutStr stderr $ show fileName
-        liftIO $ dumpStatus fileName
+        --liftIO $ hPutStr stderr $ show fileName
+        --liftIO $ dumpStatus fileName
         -- Here we should have a call to a function that
         -- gets warnings from the compiler and publishes them
         lf <- ask
@@ -253,7 +256,7 @@ reactor lf inp = do
         let J.TextDocumentPositionParams _doc pos Nothing = req ^. J.params
             J.Position _l _c' = pos
             J.TextDocumentIdentifier _uri = _doc
-        liftIO $ dump $ show $  J.uriToFilePath _uri
+        --liftIO $ dump $ show $  J.uriToFilePath _uri
 
         do
           lf <- ask
@@ -331,6 +334,18 @@ reactor lf inp = do
             reply (J.Object mempty)
 
       -- -------------------------------
+      
+      HandlerRequest (ReqDefinition req) -> do
+        liftIO $ U.logs "reactor:got GotoDefinitionRequest:"
+        let params = req ^. J.params
+            doc = params ^. J.textDocument
+        
+        --response:
+        --         J.Position start = 
+        --         J.Position end   = 
+        --         J.Location (J.toNormalizedUri doc) (J.Range start end)
+        return ()
+      -- -------------------------------
 
       HandlerRequest om -> do
         liftIO $ U.logs $ "reactor:got HandlerRequest:" ++ show om
@@ -402,10 +417,9 @@ getHoverInfo filename line col req lf = do
                   let
                     ht = Just $ J.Hover ms (Just range)
                     ms = J.HoverContents $ J.markedUpContent  ""
-                        (T.pack ( "Name: " ++ pretty qn ++ "\n" ++
-                        "Position: " ++ locStr loc ++ "\n" ++
-                        "Type: " ++ pretty t ++ "\n" ++
-                        "Definition: " ++locStr (srclocOf defloc) ++ "\n")) 
+                        (T.pack ( pretty qn ++ " :: " ++ pretty t ++ "\n" ++
+                        --"Position: " ++ locStr loc ++ "\n" ++
+                        "Defined at: " ++locStr (srclocOf defloc) ++ "\n")) 
                     range = J.Range (J.Position line col) (J.Position line col) 
 
                   Core.sendFunc lf $ RspHover $ Core.makeResponseMessage req $ traceShowId ht
@@ -420,47 +434,47 @@ getAndPublishStatus uri version fileName lf =
     case fileName of
       Nothing -> dump "No file was supplied.."
       Just filename -> do 
-        dump $ "filename: " ++ filename
+        --dump $ "filename: " ++ filename
         res <- runFutharkM (readProgram filename) NotVerbose
         case res of
           Left e -> do
-            dump $ show e -- dump to stderr (debug)
-              -- TODO: Parse "show e" for error message, line and column numbers.
               -- /:(\d+):(\d+)-(\d+): ?\n? +(.+)/
               -- group1 + group2 = startPos
               -- group1 + group3 = endPos
               -- group4          = message
-            let diags =
-                  [J.Diagnostic
-                    (J.Range (J.Position 0 1) (J.Position 0 5))
-                    (Just J.DsError)  -- severity
-                    Nothing  -- code
-                    (Just "error?") -- source
-                    (T.pack $ show e) -- Convert the warnings to T.text and put them in diags
-                    (Just (J.List []))
-                  ]
-            (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
+            let regex = mkRegexWithOpts ":([0-9]+):([0-9]+)-([0-9]+):[ |\n +](.+)" True False
+            case matchRegexAll regex $ show e of
+              Nothing -> dump "Something went wrong while checking for errors"
+              Just (_,_,_,strs) -> do
+                let diags =
+                      [J.Diagnostic
+                        (J.Range (J.Position ((read $ strs!!0 :: Int) - 1) ((read $ strs!!1 :: Int) - 1)) (J.Position ((read $ strs!!0 :: Int) - 1) (read $ strs!!2 :: Int)))
+                        (Just J.DsError)  -- severity
+                        Nothing  -- code
+                        (Just $ T.pack $ show e) -- source
+                        (T.pack $ strs!!3) -- Convert the warnings to T.text and put them in diags
+                        (Just (J.List []))
+                      ]
+                (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
           Right (w,_,_) -> do
-            dump $ show w -- dump to stderr (debug)
-              -- TODO: Parse "show w" for warning message, line and column numbers.
-              -- /:(\d+):(\d+)-(\d+): ?\n? +(.+)/
-              -- group1 + group2 = startPos
-              -- group1 + group3 = endPos
-              -- group4          = message
-            let diags =
-                  [J.Diagnostic
-                   (J.Range (J.Position 0 1) (J.Position 0 5))
-                   (Just J.DsWarning)  -- severity
-                   Nothing  -- code
-                   (Just "warning?") -- source
-                   (T.pack $ show w) -- Convert the warnings to T.text and put them in diags
-                   (Just (J.List []))
-                  ]
-            -- * lf is the LSP server Method
-            -- * (Core.publishDiagnosticsFunc lf) gives us a function that can 
-            --   send diagnostics to the client
-            -- * 100 is max_warnings. TODO Replace with variable
-            (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
+            let regex = mkRegexWithOpts ":([0-9]+):([0-9]+)-([0-9]+):[ |\n +](.+)" True False
+            case matchRegexAll regex $ show w of
+              Nothing -> dump "Something went wrong while checking for warnings"
+              Just (_,_,_,strs) -> do
+                let diags =
+                      [J.Diagnostic
+                        (J.Range (J.Position ((read $ strs!!0 :: Int) - 1) ((read $ strs!!1 :: Int) - 1)) (J.Position ((read $ strs!!0 :: Int) - 1) (read $ strs!!2 :: Int)))
+                        (Just J.DsWarning)  -- severity
+                        Nothing  -- code
+                        (Just $ T.pack $ show w) -- source
+                        (T.pack $ strs!!3) -- Convert the warnings to T.text and put them in diags
+                        (Just (J.List []))
+                      ]
+                -- * lf is the LSP server Method
+                -- * (Core.publishDiagnosticsFunc lf) gives us a function that can 
+                --   send diagnostics to the client
+                -- * 100 is max_warnings. TODO Replace with variable
+                (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
     
 
 syncOptions :: J.TextDocumentSyncOptions
@@ -489,6 +503,7 @@ lspHandlers rin =
       , Core.cancelNotificationHandler                = Just $ passHandler rin NotCancelRequestFromClient
       , Core.responseHandler                          = Just $ responseHandlerCb rin
       , Core.codeActionHandler                        = Just $ passHandler rin ReqCodeAction
+      , Core.definitionHandler                        = Just $ passHandler rin ReqDefinition
 -- deprecated (?) , Core.executeCommandHandler                    = Just $ passHandler rin ReqExecuteCommand
       }
 
