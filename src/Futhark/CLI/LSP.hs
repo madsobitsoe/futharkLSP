@@ -29,7 +29,7 @@ import           System.Exit
 import qualified System.Log.Logger                     as L
 import qualified Data.Rope.UTF16                       as Rope
 -- Mads adding imports
-import Futhark.Compiler (readProgram, readProgramOrDie)
+import Futhark.Compiler (readProgram, readProgramOrDie, Imports)
 import Futhark.Pipeline (runFutharkM, Verbosity(..))
 import Data.Loc
 import Language.Futhark.Query
@@ -41,7 +41,7 @@ import System.IO
 import           Futhark.Util.Options (mainWithOptions)
 import qualified System.Random                         as Rng
 import Text.Regex
-import Control.Monad.State
+import Control.Monad.State (StateT, get, put, modify, evalStateT)
 
 main :: String -> [String] -> IO ()
 main = mainWithOptions () [] "" $ \args () -> do
@@ -67,28 +67,6 @@ dumpStatus file =
         Left _ -> hPutStr stderr "failure\n"
         Right (w,_,_) -> hPutStr stderr $ (++) "Success!\n" $ show w
 
-type CountState = Int
-
-valFromState :: CountState -> Int
-valFromState s = s
-nextState :: CountState -> CountState
-nextState s = s+1
-
-putState :: Int -> State CountState ()
-putState i = do
-  s <- get
-  put (s+i)
-
-type CountStateMonad = State CountState
-
-getNext :: CountStateMonad Int
-getNext = state (\st -> let st' = nextState(st) in (valFromState(st'),st'))
-
-incCount :: CountStateMonad Int
-incCount = getNext >>= \v -> 
-           return v
-
-startState = 0
 
 run :: IO () -> IO Int
 run dispatcherProc = flip E.catches handlers $ do
@@ -131,8 +109,12 @@ data ReactorInput
     -- ^ injected into the reactor input by each of the individual
     -- callback handlers
 
+data State = State {stateCounter :: Int, stateProgram :: Maybe Imports}
+initialState :: State
+initialState = State 0 Nothing
+
 -- | The monad used in the reactor
-type R c a = ReaderT (Core.LspFuncs c) IO a
+type R c a = StateT State (ReaderT (Core.LspFuncs c) IO) a
 -- reactor monad functions
 reactorSend :: FromServerMessage -> R () ()
 reactorSend msg = do
@@ -156,7 +138,7 @@ nextLspReqId = do
 reactor :: Core.LspFuncs () -> TChan ReactorInput -> IO ()
 reactor lf inp = do
   liftIO $ U.logs "reactor:entered"
-  flip runReaderT lf $ forever $ do
+  flip runReaderT lf $ flip evalStateT initialState $ forever $ do
     inval <- liftIO $ atomically $ readTChan inp
     case inval of
 
@@ -251,7 +233,7 @@ reactor lf inp = do
         -- Here we should have a call to a function that
         -- gets warnings from the compiler and publishes them
         lf <- ask
-        liftIO $ getAndPublishStatus (J.toNormalizedUri doc) (Just $ (evalState getNext startState)) fileName lf
+        liftIO $ getAndPublishStatus (J.toNormalizedUri doc) Nothing fileName lf
          
 
       -- -------------------------------
@@ -359,14 +341,19 @@ reactor lf inp = do
       
       HandlerRequest (ReqDefinition req) -> do
         liftIO $ U.logs "reactor:got GotoDefinitionRequest:"
-        let params = req ^. J.params
-            doc = params ^. J.textDocument
-        
+        -- The third argument, Nothing, is an optional "_workDoneToken" 
+        let J.TextDocumentPositionParams _doc pos Nothing = req ^. J.params
+            J.Position _l _c' = pos
+            J.TextDocumentIdentifier _uri = _doc
+            --reply v = reactorSend $ RspDefinition $ Core.makeResponseMessage req v
+            --test = (J.Location (J.fromNormalizedUri $ J.toNormalizedUri _doc) (J.Range (J.Position 0 0) (J.Position 0 0)))
+        --liftIO $ dump $ show $  J.uriToFilePath _uri
+        --reply test
+        return ()
         --response:
         --         J.Position start = 
         --         J.Position end   = 
         --         J.Location (J.toNormalizedUri doc) (J.Range start end)
-        return ()
       -- -------------------------------
 
       HandlerRequest om -> do
