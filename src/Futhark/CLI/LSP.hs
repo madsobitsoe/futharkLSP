@@ -39,8 +39,9 @@ import Debug.Trace
 import System.IO
 --  Mads done importing stuff
 import           Futhark.Util.Options (mainWithOptions)
-import Futhark.Error
+import qualified System.Random                         as Rng
 import Text.Regex
+import Control.Monad.State
 
 main :: String -> [String] -> IO ()
 main = mainWithOptions () [] "" $ \args () -> do
@@ -66,7 +67,28 @@ dumpStatus file =
         Left _ -> hPutStr stderr "failure\n"
         Right (w,_,_) -> hPutStr stderr $ (++) "Success!\n" $ show w
 
+type CountState = Int
 
+valFromState :: CountState -> Int
+valFromState s = s
+nextState :: CountState -> CountState
+nextState s = s+1
+
+putState :: Int -> State CountState ()
+putState i = do
+  s <- get
+  put (s+i)
+
+type CountStateMonad = State CountState
+
+getNext :: CountStateMonad Int
+getNext = state (\st -> let st' = nextState(st) in (valFromState(st'),st'))
+
+incCount :: CountStateMonad Int
+incCount = getNext >>= \v -> 
+           return v
+
+startState = 0
 
 run :: IO () -> IO Int
 run dispatcherProc = flip E.catches handlers $ do
@@ -195,7 +217,7 @@ reactor lf inp = do
         liftIO $ U.logs $ "********* fileName=" ++ show fileName
         sendDiagnostics (J.toNormalizedUri doc) (Just 0)
         lf <- ask
-        liftIO $ getAndPublishStatus (J.toNormalizedUri doc) Nothing fileName lf
+        liftIO $ getAndPublishStatus (J.toNormalizedUri doc) (Just 0) fileName lf
 
       -- -------------------------------
 
@@ -229,7 +251,7 @@ reactor lf inp = do
         -- Here we should have a call to a function that
         -- gets warnings from the compiler and publishes them
         lf <- ask
-        liftIO $ getAndPublishStatus (J.toNormalizedUri doc) Nothing fileName lf
+        liftIO $ getAndPublishStatus (J.toNormalizedUri doc) (Just $ (evalState getNext startState)) fileName lf
          
 
       -- -------------------------------
@@ -430,6 +452,7 @@ getAndPublishStatus :: J.NormalizedUri -> Maybe Int -> Maybe String -> Core.LspF
 getAndPublishStatus uri version fileName lf =
   do
     dump "entered getAndPublishStatus"
+    dump $ "Version: " ++ show version
     -- dump the filename
     case fileName of
       Nothing -> dump "No file was supplied.."
@@ -446,6 +469,7 @@ getAndPublishStatus uri version fileName lf =
             case matchRegexAll regex $ show e of
               Nothing -> dump "Something went wrong while checking for errors"
               Just (_,_,_,strs) -> do
+                dump $ show $ length strs
                 let diags =
                       [J.Diagnostic
                         (J.Range (J.Position ((read $ strs!!0 :: Int) - 1) ((read $ strs!!1 :: Int) - 1)) (J.Position ((read $ strs!!0 :: Int) - 1) (read $ strs!!2 :: Int)))
@@ -461,6 +485,7 @@ getAndPublishStatus uri version fileName lf =
             case matchRegexAll regex $ show w of
               Nothing -> dump "Something went wrong while checking for warnings"
               Just (_,_,_,strs) -> do
+                dump $ show $ length strs
                 let diags =
                       [J.Diagnostic
                         (J.Range (J.Position ((read $ strs!!0 :: Int) - 1) ((read $ strs!!1 :: Int) - 1)) (J.Position ((read $ strs!!0 :: Int) - 1) (read $ strs!!2 :: Int)))
