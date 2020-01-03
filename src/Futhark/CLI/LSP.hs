@@ -197,7 +197,7 @@ reactor lf inp = do
                                  . J.uri
             fileName =  J.uriToFilePath doc
         liftIO $ U.logs $ "********* fileName=" ++ show fileName
-        sendDiagnostics (J.toNormalizedUri doc) (Just 0)
+--        sendDiagnostics (J.toNormalizedUri doc) (Just 0)
         lf <- ask
         liftIO $ getAndPublishStatus (J.toNormalizedUri doc) (Just 0) fileName lf
 
