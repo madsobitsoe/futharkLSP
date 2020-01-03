@@ -240,7 +240,7 @@ reactor lf inp = do
         -- Here we should have a call to a function that
         -- gets warnings from the compiler and publishes them
         lf <- ask
-        liftIO $ getAndPublishStatus (J.toNormalizedUri doc) Nothing fileName lf
+        liftIO $ getAndPublishStatus (J.toNormalizedUri doc) (Just $ stateCounter s) fileName lf
          
 
       -- -------------------------------
