@@ -239,6 +239,14 @@ reactor lf inp = do
         --liftIO $ dumpStatus fileName
         -- Here we should have a call to a function that
         -- gets warnings from the compiler and publishes them
+        do 
+          case fileName of
+            Nothing -> return ()
+            Just filename -> do
+              res <- liftIO $ runFutharkM (readProgram filename) NotVerbose
+              case res of
+                Left _ -> return ()
+                Right (_,imports,_) -> put $ s { stateProgram = Just imports}
         lf <- ask
         liftIO $ getAndPublishStatus (J.toNormalizedUri doc) (Just $ stateCounter s) fileName lf
          
@@ -271,7 +279,8 @@ reactor lf inp = do
 
         do
           lf <- ask
-          liftIO $ getHoverInfo (J.uriToFilePath _uri) _l _c' req lf
+          s <- get
+          liftIO $ getHoverInfo s (J.uriToFilePath _uri) _l _c' req lf
         -- let
         --   ht = Just $ J.Hover ms (Just range)
         --   -- We assume ms is short for message or the like
@@ -410,15 +419,18 @@ getStatus file =
         Right (w,_,_) -> return $ T.pack $ show w
 
 
-getHoverInfo :: Maybe FilePath -> Int -> Int -> J.HoverRequest -> Core.LspFuncs () -> IO ()
-getHoverInfo filename line col req lf = do
+getHoverInfo :: State -> Maybe FilePath -> Int -> Int -> J.HoverRequest -> Core.LspFuncs () -> IO ()
+getHoverInfo stateProg filename line col req lf = do
   case filename of
     Nothing -> dump "No file was supplied\n"
     Just filename -> do
-      res <- runFutharkM (readProgram filename) NotVerbose
-      case res of
-        Left _ -> do dump "compilation failed on hover request.\n"
-        Right (_,imports,_) -> do
+      --res <- runFutharkM (readProgram filename) NotVerbose
+      --case res of
+        --Left _ -> do dump "compilation failed on hover request.\n"
+        --Right (_,imports,_) -> do
+      case (stateProgram stateProg) of
+        Nothing -> return ()
+        Just imports -> do
           case atPos imports $ Pos filename (line+1) (col+1) 0 of
             --      case atPos imports pos of
             Nothing -> return ()-- dump "No information available\n"
