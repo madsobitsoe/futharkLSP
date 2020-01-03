@@ -228,6 +228,13 @@ reactor lf inp = do
                                  . J.uri
             fileName = J.uriToFilePath doc
         liftIO $ U.logs $ "********* fileName=" ++ show fileName
+        -- Get the state value
+        s <- get
+        -- Increment the state counter
+        put $ s { stateCounter = stateCounter s + 1 }
+        liftIO $ dump $ "Statecounter incremented to: " ++ (show $ stateCounter s)
+--        liftIO $ traceShowId a
+        -- liftIO $ dump $ show $ get
         --liftIO $ hPutStr stderr $ show fileName
         --liftIO $ dumpStatus fileName
         -- Here we should have a call to a function that
@@ -431,7 +438,8 @@ getHoverInfo filename line col req lf = do
                         "Defined at: " ++locStr (srclocOf defloc) ++ "\n")) 
                     range = J.Range (J.Position line col) (J.Position line col) 
 
-                  Core.sendFunc lf $ RspHover $ Core.makeResponseMessage req $ traceShowId ht
+                  Core.sendFunc lf $ RspHover $ Core.makeResponseMessage req ht
+                  --                  Core.sendFunc lf $ RspHover $ Core.makeResponseMessage req $ traceShowId ht
 --                  return ()
  
 
