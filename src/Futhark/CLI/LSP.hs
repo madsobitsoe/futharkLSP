@@ -232,6 +232,7 @@ reactor lf inp = do
         s <- get
         -- Increment the state counter
         put $ s { stateCounter = stateCounter s + 1 }
+        s <- get
         liftIO $ dump $ "Statecounter incremented to: " ++ (show $ stateCounter s)
 --        liftIO $ traceShowId a
         -- liftIO $ dump $ show $ get
@@ -246,7 +247,7 @@ reactor lf inp = do
               res <- liftIO $ runFutharkM (readProgram filename) NotVerbose
               case res of
                 Left _ -> return ()
-                Right (_,imports,_) -> put $ s { stateProgram = Just imports}
+                Right (_,imports,_) -> put $ s { stateProgram = Just imports }
         lf <- ask
         liftIO $ getAndPublishStatus (J.toNormalizedUri doc) (Just $ stateCounter s) fileName lf
          
