@@ -490,7 +490,9 @@ getAndPublishStatus uri version fileName lf =
           Right (w,_,_) -> do
             let regex = mkRegexWithOpts ":([0-9]+):([0-9]+)-([0-9]+):[ |\n +](.+)" True False
             case matchRegexAll regex $ show w of
-              Nothing -> dump "Something went wrong while checking for warnings"
+              Nothing -> do
+                let diags = []
+                (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
               Just (_,_,_,strs) -> do
                 dump $ show $ length strs
                 let diags =
