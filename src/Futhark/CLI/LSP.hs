@@ -362,11 +362,29 @@ reactor lf inp = do
         let J.TextDocumentPositionParams _doc pos Nothing = req ^. J.params
             J.Position _l _c' = pos
             J.TextDocumentIdentifier _uri = _doc
-            --reply v = reactorSend $ RspDefinition $ Core.makeResponseMessage req v
-            --test = (J.Location (J.fromNormalizedUri $ J.toNormalizedUri _doc) (J.Range (J.Position 0 0) (J.Position 0 0)))
-        --liftIO $ dump $ show $  J.uriToFilePath _uri
-        --reply test
-        return ()
+
+        do
+          lf <- ask
+          s <- get
+          liftIO $ do
+            case (J.uriToFilePath _uri) of
+              Nothing -> dump "No file was supplied\n"
+              Just filename -> do
+                case (stateProgram s) of
+                  Nothing -> return () --probaly return an error
+                  Just imports -> do
+                    case atPos imports $ Pos filename (_l+1) (_c'+1) 0 of
+                      Nothing -> return () --probaly return an error
+                      Just (AtName qn def loc) -> do
+                        case def of
+                          Nothing -> return () --probaly return an error
+                          Just (BoundTerm t defloc) -> do
+                            let
+                              ht = J.SingleLoc $ ms
+                              Loc a b = defloc
+                              ms = J.Location (J.Uri $ T.pack $ posFile a) $ J.Range (J.Position (posLine a) (posCol a)) (J.Position (posLine b) (posCol b))
+
+                            Core.sendFunc lf $ RspDefinition $ Core.makeResponseMessage req ht
         --response:
         --         J.Position start = 
         --         J.Position end   = 
