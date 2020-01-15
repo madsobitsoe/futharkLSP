@@ -29,7 +29,7 @@ import           System.Exit
 import qualified System.Log.Logger                     as L
 import qualified Data.Rope.UTF16                       as Rope
 -- Mads adding imports
-import Futhark.Compiler (readProgram, readProgramOrDie)
+import Futhark.Compiler (readProgram, readProgramOrDie, Imports)
 import Futhark.Pipeline (runFutharkM, Verbosity(..))
 import Data.Loc
 import Language.Futhark.Query
@@ -39,6 +39,9 @@ import Debug.Trace
 import System.IO
 --  Mads done importing stuff
 import           Futhark.Util.Options (mainWithOptions)
+import qualified System.Random                         as Rng
+import Text.Regex
+import Control.Monad.State (StateT, get, put, modify, evalStateT)
 
 main :: String -> [String] -> IO ()
 main = mainWithOptions () [] "" $ \args () -> do
@@ -63,7 +66,6 @@ dumpStatus file =
       case res of
         Left _ -> hPutStr stderr "failure\n"
         Right (w,_,_) -> hPutStr stderr $ (++) "Success!\n" $ show w
-
 
 
 run :: IO () -> IO Int
@@ -107,8 +109,12 @@ data ReactorInput
     -- ^ injected into the reactor input by each of the individual
     -- callback handlers
 
+data State = State {stateCounter :: Int, stateProgram :: Maybe Imports}
+initialState :: State
+initialState = State 0 Nothing
+
 -- | The monad used in the reactor
-type R c a = ReaderT (Core.LspFuncs c) IO a
+type R c a = StateT State (ReaderT (Core.LspFuncs c) IO) a
 -- reactor monad functions
 reactorSend :: FromServerMessage -> R () ()
 reactorSend msg = do
@@ -132,7 +138,7 @@ nextLspReqId = do
 reactor :: Core.LspFuncs () -> TChan ReactorInput -> IO ()
 reactor lf inp = do
   liftIO $ U.logs "reactor:entered"
-  flip runReaderT lf $ forever $ do
+  flip runReaderT lf $ flip evalStateT initialState $ forever $ do
     inval <- liftIO $ atomically $ readTChan inp
     case inval of
 
@@ -191,7 +197,9 @@ reactor lf inp = do
                                  . J.uri
             fileName =  J.uriToFilePath doc
         liftIO $ U.logs $ "********* fileName=" ++ show fileName
-        sendDiagnostics (J.toNormalizedUri doc) (Just 0)
+--        sendDiagnostics (J.toNormalizedUri doc) (Just 0)
+        lf <- ask
+        liftIO $ getAndPublishStatus (J.toNormalizedUri doc) (Just 0) fileName lf
 
       -- -------------------------------
 
@@ -220,12 +228,28 @@ reactor lf inp = do
                                  . J.uri
             fileName = J.uriToFilePath doc
         liftIO $ U.logs $ "********* fileName=" ++ show fileName
-        liftIO $ hPutStr stderr $ show fileName
-        liftIO $ dumpStatus fileName
+        -- Get the state value
+        s <- get
+        -- Increment the state counter
+        put $ s { stateCounter = stateCounter s + 1 }
+        s <- get
+        liftIO $ dump $ "Statecounter incremented to: " ++ (show $ stateCounter s)
+--        liftIO $ traceShowId a
+        -- liftIO $ dump $ show $ get
+        --liftIO $ hPutStr stderr $ show fileName
+        --liftIO $ dumpStatus fileName
         -- Here we should have a call to a function that
         -- gets warnings from the compiler and publishes them
+        do 
+          case fileName of
+            Nothing -> return ()
+            Just filename -> do
+              res <- liftIO $ runFutharkM (readProgram filename) NotVerbose
+              case res of
+                Left _ -> return ()
+                Right (_,imports,_) -> put $ s { stateProgram = Just imports }
         lf <- ask
-        liftIO $ getAndPublishStatus (J.toNormalizedUri doc) Nothing fileName lf
+        liftIO $ getAndPublishStatus (J.toNormalizedUri doc) (Just $ stateCounter s) fileName lf
          
 
       -- -------------------------------
@@ -252,11 +276,12 @@ reactor lf inp = do
         let J.TextDocumentPositionParams _doc pos Nothing = req ^. J.params
             J.Position _l _c' = pos
             J.TextDocumentIdentifier _uri = _doc
-        liftIO $ dump $ show $  J.uriToFilePath _uri
+        --liftIO $ dump $ show $  J.uriToFilePath _uri
 
         do
           lf <- ask
-          liftIO $ getHoverInfo (J.uriToFilePath _uri) _l _c' req lf
+          s <- get
+          liftIO $ getHoverInfo s (J.uriToFilePath _uri) _l _c' req lf
         -- let
         --   ht = Just $ J.Hover ms (Just range)
         --   -- We assume ms is short for message or the like
@@ -330,6 +355,41 @@ reactor lf inp = do
             reply (J.Object mempty)
 
       -- -------------------------------
+      
+      HandlerRequest (ReqDefinition req) -> do
+        liftIO $ U.logs "reactor:got GotoDefinitionRequest:"
+        -- The third argument, Nothing, is an optional "_workDoneToken" 
+        let J.TextDocumentPositionParams _doc pos Nothing = req ^. J.params
+            J.Position _l _c' = pos
+            J.TextDocumentIdentifier _uri = _doc
+
+        do
+          lf <- ask
+          s <- get
+          liftIO $ do
+            case (J.uriToFilePath _uri) of
+              Nothing -> dump "No file was supplied\n"
+              Just filename -> do
+                case (stateProgram s) of
+                  Nothing -> return () --probaly return an error
+                  Just imports -> do
+                    case atPos imports $ Pos filename (_l+1) (_c'+1) 0 of
+                      Nothing -> return () --probaly return an error
+                      Just (AtName qn def loc) -> do
+                        case def of
+                          Nothing -> return () --probaly return an error
+                          Just (BoundTerm t defloc) -> do
+                            let
+                              ht = J.SingleLoc $ ms
+                              Loc a b = defloc
+                              ms = J.Location (J.Uri $ T.pack $ posFile a) $ J.Range (J.Position (posLine a) (posCol a)) (J.Position (posLine b) (posCol b))
+
+                            Core.sendFunc lf $ RspDefinition $ Core.makeResponseMessage req ht
+        --response:
+        --         J.Position start = 
+        --         J.Position end   = 
+        --         J.Location (J.toNormalizedUri doc) (J.Range start end)
+      -- -------------------------------
 
       HandlerRequest om -> do
         liftIO $ U.logs $ "reactor:got HandlerRequest:" ++ show om
@@ -378,18 +438,21 @@ getStatus file =
         Right (w,_,_) -> return $ T.pack $ show w
 
 
-getHoverInfo :: Maybe FilePath -> Int -> Int -> J.HoverRequest -> Core.LspFuncs () -> IO ()
-getHoverInfo filename line col req lf = do
+getHoverInfo :: State -> Maybe FilePath -> Int -> Int -> J.HoverRequest -> Core.LspFuncs () -> IO ()
+getHoverInfo stateProg filename line col req lf = do
   case filename of
     Nothing -> dump "No file was supplied\n"
     Just filename -> do
-      res <- runFutharkM (readProgram filename) NotVerbose
-      case res of
-        Left _ -> do dump "compilation failed on hover request.\n"
-        Right (_,imports,_) -> do
-          case atPos imports $ Pos filename (line+1) col 0 of
+      --res <- runFutharkM (readProgram filename) NotVerbose
+      --case res of
+        --Left _ -> do dump "compilation failed on hover request.\n"
+        --Right (_,imports,_) -> do
+      case (stateProgram stateProg) of
+        Nothing -> return ()
+        Just imports -> do
+          case atPos imports $ Pos filename (line+1) (col+1) 0 of
             --      case atPos imports pos of
-            Nothing -> dump "No information available\n"
+            Nothing -> return ()-- dump "No information available\n"
             Just (AtName qn def loc) -> do
               -- dump $ "Name: " ++ pretty qn ++ "\n"
               -- dump $ "Position: " ++ locStr loc ++ "\n"
@@ -401,46 +464,72 @@ getHoverInfo filename line col req lf = do
                   let
                     ht = Just $ J.Hover ms (Just range)
                     ms = J.HoverContents $ J.markedUpContent  ""
-                        (T.pack ( "Name: " ++ pretty qn ++ "\n" ++
-                        "Position: " ++ locStr loc ++ "\n" ++
-                        "Type: " ++ pretty t ++ "\n" ++
-                        "Definition: " ++locStr (srclocOf defloc) ++ "\n")) 
+                        (T.pack ( pretty qn ++ " :: " ++ pretty t ++ "\n" ++
+                        --"Position: " ++ locStr loc ++ "\n" ++
+                        "Defined at: " ++locStr (srclocOf defloc) ++ "\n")) 
                     range = J.Range (J.Position line col) (J.Position line col) 
 
-                  Core.sendFunc lf $ RspHover $ Core.makeResponseMessage req $ traceShowId ht
+                  Core.sendFunc lf $ RspHover $ Core.makeResponseMessage req ht
+                  --                  Core.sendFunc lf $ RspHover $ Core.makeResponseMessage req $ traceShowId ht
 --                  return ()
-      
-
-                  
-  
+ 
 
 getAndPublishStatus :: J.NormalizedUri -> Maybe Int -> Maybe String -> Core.LspFuncs () -> IO ()
 getAndPublishStatus uri version fileName lf =
   do
     dump "entered getAndPublishStatus"
+    dump $ "Version: " ++ show version
     -- dump the filename
     case fileName of
       Nothing -> dump "No file was supplied.."
       Just filename -> do 
-        dump $ "filename: " ++ filename
+        --dump $ "filename: " ++ filename
         res <- runFutharkM (readProgram filename) NotVerbose
         case res of
-          Left _ -> dump "compilation failed.\n" -- dump to stderr (debug)
+          Left e -> do
+              -- /:(\d+):(\d+)-(\d+): ?\n? +(.+)/
+              -- group1 + group2 = startPos
+              -- group1 + group3 = endPos
+              -- group4          = message
+            let regex = mkRegexWithOpts ":([0-9]+):([0-9]+)-([0-9]+):[ |\n +](.+)" True False
+            case matchRegexAll regex $ show e of
+              Nothing -> do
+                let diags = []
+                (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
+              Just (_,_,_,strs) -> do
+                dump $ show $ length strs
+                let diags =
+                      [J.Diagnostic
+                        (J.Range (J.Position ((read $ strs!!0 :: Int) - 1) ((read $ strs!!1 :: Int) - 1)) (J.Position ((read $ strs!!0 :: Int) - 1) (read $ strs!!2 :: Int)))
+                        (Just J.DsError)  -- severity
+                        Nothing  -- code
+                        (Just $ T.pack $ show e) -- source
+                        (T.pack $ strs!!3) -- Convert the warnings to T.text and put them in diags
+                        (Just (J.List []))
+                      ]
+                (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
           Right (w,_,_) -> do
-            dump $ show w -- dump to stderr (debug)
-            let diags =
-                  [J.Diagnostic
-                   (J.Range (J.Position 0 1) (J.Position 0 5))
-                   (Just J.DsWarning)  -- severity
-                   Nothing  -- code
-                   (Just "lsp-hello") -- source
-                   (T.pack $ show w) -- Convert the warnings to T.text and put them in diags
-                   (Just (J.List []))
-                  ]
-            -- lf is the LSP server Method
-            -- (Core.publishDiagnosticsFunc lf) gives us a function that can send diagnostics to the client
-            -- 100 is max_warnings. TODO Replace with variable
-            (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
+            let regex = mkRegexWithOpts ":([0-9]+):([0-9]+)-([0-9]+):[ |\n +](.+)" True False
+            case matchRegexAll regex $ show w of
+              Nothing -> do
+                let diags = []
+                (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
+              Just (_,_,_,strs) -> do
+                dump $ show $ length strs
+                let diags =
+                      [J.Diagnostic
+                        (J.Range (J.Position ((read $ strs!!0 :: Int) - 1) ((read $ strs!!1 :: Int) - 1)) (J.Position ((read $ strs!!0 :: Int) - 1) (read $ strs!!2 :: Int)))
+                        (Just J.DsWarning)  -- severity
+                        Nothing  -- code
+                        (Just $ T.pack $ show w) -- source
+                        (T.pack $ strs!!3) -- Convert the warnings to T.text and put them in diags
+                        (Just (J.List []))
+                      ]
+                -- * lf is the LSP server Method
+                -- * (Core.publishDiagnosticsFunc lf) gives us a function that can 
+                --   send diagnostics to the client
+                -- * 100 is max_warnings. TODO Replace with variable
+                (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
     
 
 syncOptions :: J.TextDocumentSyncOptions
@@ -454,7 +543,7 @@ syncOptions = J.TextDocumentSyncOptions
 
 lspOptions :: Core.Options
 lspOptions = def { Core.textDocumentSync = Just syncOptions
---                 , Core.executeCommandProvider = Just (J.ExecuteCommandOptions (J.List ["lsp-hello-command"]))
+-- deprecated (?)                , Core.executeCommandProvider = Just (J.ExecuteCommandOptions (J.List ["lsp-hello-command"]))
                  }
 
 lspHandlers :: TChan ReactorInput -> Core.Handlers
@@ -469,7 +558,8 @@ lspHandlers rin =
       , Core.cancelNotificationHandler                = Just $ passHandler rin NotCancelRequestFromClient
       , Core.responseHandler                          = Just $ responseHandlerCb rin
       , Core.codeActionHandler                        = Just $ passHandler rin ReqCodeAction
---      , Core.executeCommandHandler                    = Just $ passHandler rin ReqExecuteCommand
+      , Core.definitionHandler                        = Just $ passHandler rin ReqDefinition
+-- deprecated (?) , Core.executeCommandHandler                    = Just $ passHandler rin ReqExecuteCommand
       }
 
 passHandler :: TChan ReactorInput -> (a -> FromClientMessage) -> Core.Handler a
