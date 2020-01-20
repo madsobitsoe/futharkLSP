@@ -87,6 +87,7 @@ library:
     - stm >= 2.5
     - lens >= 4.17
     - regex-compat >= 0.95.2.0
+    - split >= 0.2.3.3
 
   build-tools:
     - alex
