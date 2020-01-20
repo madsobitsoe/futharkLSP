@@ -42,6 +42,7 @@ import           Futhark.Util.Options (mainWithOptions)
 import qualified System.Random                         as Rng
 import Text.Regex
 import Control.Monad.State (StateT, get, put, modify, evalStateT)
+import Data.List.Split
 
 main :: String -> [String] -> IO ()
 main = mainWithOptions () [] "" $ \args () -> do
@@ -397,7 +398,46 @@ reactor lf inp = do
 toWorkspaceEdit :: t -> Maybe J.ApplyWorkspaceEditParams
 toWorkspaceEdit _ = Nothing
 
-  
+doWarnings :: (SrcLoc, String) -> J.Diagnostic
+doWarnings (l,m) = do
+  let Loc a b = (locOf l)
+  J.Diagnostic
+    (J.Range (J.Position (posLine a) (posCol a)) (J.Position (posLine b) (posCol b)))
+    (Just J.DsWarning)  -- severity
+    Nothing  -- code
+    (Just $ T.pack $ posFile a) -- source
+    (T.pack $ m) -- Convert the warnings to T.text and put them in diags
+    (Just (J.List []))
+
+doWarningsS :: String -> J.Diagnostic
+doWarningsS warn = do
+  let regex = mkRegexWithOpts ":([0-9]+):([0-9]+)-([0-9]+):[ |\n +](.+)" True False
+  case matchRegexAll regex warn of
+    Nothing -> do
+        J.Diagnostic 
+          (J.Range (J.Position 0 0) (J.Position 0 0)) 
+          Nothing 
+          Nothing 
+          Nothing 
+          (T.pack "") 
+          Nothing
+    Just (_,_,_,strs) -> do
+      J.Diagnostic
+        (J.Range (J.Position ((read $ strs!!0 :: Int) - 1) ((read $ strs!!1 :: Int) - 1)) (J.Position ((read $ strs!!0 :: Int) - 1) (read $ strs!!2 :: Int)))
+        (Just J.DsWarning)  -- severity
+        Nothing  -- code
+        (Just $ T.pack $ warn) -- source
+        (T.pack $ strs!!3) -- Convert the warnings to T.text and put them in diags
+        (Just (J.List []))
+
+  -- J.Diagnostic
+  --   (J.Range (J.Position (posLine a) (posCol a)) (J.Position (posLine b) (posCol b)))
+  --   (Just J.DsWarning)  -- severity
+  --   Nothing  -- code
+  --   (Just $ T.pack $ posFile a) -- source
+  --   (T.pack $ m) -- Convert the warnings to T.text and put them in diags
+  --   (Just (J.List []))
+
 -- sendFutharkDiagnostics :: J.NormalizedUri -> Maybe Int -> [J.Diagnostic] -> R () ()
 -- sendFutharkDiagnostics fileUri version diags = do
 --   -- I am pretty sure lf is the servermethod, e.g. WindowShowMessage, WindowLogMessage, workspaceApplyEdit etc.
@@ -509,27 +549,31 @@ getAndPublishStatus uri version fileName lf =
                       ]
                 (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
           Right (w,_,_) -> do
-            let regex = mkRegexWithOpts ":([0-9]+):([0-9]+)-([0-9]+):[ |\n +](.+)" True False
-            case matchRegexAll regex $ show w of
-              Nothing -> do
-                let diags = []
-                (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
-              Just (_,_,_,strs) -> do
-                dump $ show $ length strs
-                let diags =
-                      [J.Diagnostic
-                        (J.Range (J.Position ((read $ strs!!0 :: Int) - 1) ((read $ strs!!1 :: Int) - 1)) (J.Position ((read $ strs!!0 :: Int) - 1) (read $ strs!!2 :: Int)))
-                        (Just J.DsWarning)  -- severity
-                        Nothing  -- code
-                        (Just $ T.pack $ show w) -- source
-                        (T.pack $ strs!!3) -- Convert the warnings to T.text and put them in diags
-                        (Just (J.List []))
-                      ]
+            let wat = splitOn "\n\n" $ show w
+            let bla = filter (\x -> x /= "") wat 
+            dump $ show $ wat
+            let diags = map doWarningsS bla
+            (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
+            -- let regex = mkRegexWithOpts ":([0-9]+):([0-9]+)-([0-9]+):[ |\n +](.+)" True False
+            -- case matchRegexAll regex $ show w of
+            --   Nothing -> do
+            --     let diags = []
+            --     (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
+            --   Just (_,_,_,strs) -> do
+            --     dump $ show $ length strs
+            --     let diags =
+            --           [J.Diagnostic
+            --             (J.Range (J.Position ((read $ strs!!0 :: Int) - 1) ((read $ strs!!1 :: Int) - 1)) (J.Position ((read $ strs!!0 :: Int) - 1) (read $ strs!!2 :: Int)))
+            --             (Just J.DsWarning)  -- severity
+            --             Nothing  -- code
+            --             (Just $ T.pack $ show w) -- source
+            --             (T.pack $ strs!!3) -- Convert the warnings to T.text and put them in diags
+            --             (Just (J.List []))
+            --           ]
                 -- * lf is the LSP server Method
                 -- * (Core.publishDiagnosticsFunc lf) gives us a function that can 
                 --   send diagnostics to the client
                 -- * 100 is max_warnings. TODO Replace with variable
-                (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
     
 
 syncOptions :: J.TextDocumentSyncOptions
