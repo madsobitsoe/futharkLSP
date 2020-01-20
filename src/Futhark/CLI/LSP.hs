@@ -181,12 +181,12 @@ reactor lf inp = do
         reactorSend $ ReqRegisterCapability $ fmServerRegisterCapabilityRequest rid registrations
 
         -- example of showMessageRequest
-        let
-          params = J.ShowMessageRequestParams J.MtWarning "choose an option for XXX"
-                           (Just [J.MessageActionItem "option a", J.MessageActionItem "option b"])
-        rid1 <- nextLspReqId
+        -- let
+        --   params = J.ShowMessageRequestParams J.MtWarning "choose an option for XXX"
+        --                    (Just [J.MessageActionItem "option a", J.MessageActionItem "option b"])
+        -- rid1 <- nextLspReqId
 
-        reactorSend $ ReqShowMessage $ fmServerShowMessageRequest rid1 params
+        -- reactorSend $ ReqShowMessage $ fmServerShowMessageRequest rid1 params
 
       -- -------------------------------
 
@@ -234,7 +234,7 @@ reactor lf inp = do
         -- Increment the state counter
         put $ s { stateCounter = stateCounter s + 1 }
         s <- get
-        liftIO $ dump $ "Statecounter incremented to: " ++ (show $ stateCounter s)
+        -- liftIO $ dump $ "Statecounter incremented to: " ++ (show $ stateCounter s)
 --        liftIO $ traceShowId a
         -- liftIO $ dump $ show $ get
         --liftIO $ hPutStr stderr $ show fileName
@@ -517,8 +517,8 @@ getHoverInfo stateProg filename line col req lf = do
 getAndPublishStatus :: J.NormalizedUri -> Maybe Int -> Maybe String -> Core.LspFuncs () -> IO ()
 getAndPublishStatus uri version fileName lf =
   do
-    dump "entered getAndPublishStatus"
-    dump $ "Version: " ++ show version
+    -- dump "entered getAndPublishStatus"
+    -- dump $ "Version: " ++ show version
     -- dump the filename
     case fileName of
       Nothing -> dump "No file was supplied.."
@@ -537,7 +537,7 @@ getAndPublishStatus uri version fileName lf =
                 let diags = []
                 (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
               Just (_,_,_,strs) -> do
-                dump $ show $ length strs
+                -- dump $ show $ length strs
                 let diags =
                       [J.Diagnostic
                         (J.Range (J.Position ((read $ strs!!0 :: Int) - 1) ((read $ strs!!1 :: Int) - 1)) (J.Position ((read $ strs!!0 :: Int) - 1) (read $ strs!!2 :: Int)))
@@ -549,10 +549,7 @@ getAndPublishStatus uri version fileName lf =
                       ]
                 (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
           Right (w,_,_) -> do
-            let wat = splitOn "\n\n" $ show w
-            let bla = filter (\x -> x /= "") wat 
-            dump $ show $ wat
-            let diags = map doWarningsS bla
+            let diags = map doWarningsS splitOn "\n\n" $ show w
             (Core.publishDiagnosticsFunc lf) 100 uri version (partitionBySource diags)
             -- let regex = mkRegexWithOpts ":([0-9]+):([0-9]+)-([0-9]+):[ |\n +](.+)" True False
             -- case matchRegexAll regex $ show w of
